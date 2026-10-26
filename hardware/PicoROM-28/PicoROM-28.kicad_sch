@@ -6,11 +6,12 @@
 	(paper "A3")
 	(title_block
 		(title "PicoROM-28 - ROM Emulator")
-		(date "2026-10-24")
-		(rev "1.10")
+		(date "2026-10-26")
+		(rev "1.10-S")
 		(company "Martin Donlon (@wickerwaka)")
 		(comment 1 "DIP-28 Form factor")
 		(comment 2 "Based on RP2040 minimal example")
+		(comment 3 "1.10-S: side-entry USB-C (HRO TYPE-C-31-M-12), board +4.5 mm at pin-1 end")
 	)
 	(lib_symbols
 		(symbol "74xGxx:74AHCT1G126"
@@ -20132,7 +20133,7 @@
 				)
 			)
 		)
-		(property "Footprint" "Connector_USB:USB_C_Receptacle_G-Switch_GT-USB-7051x"
+		(property "Footprint" "PicoROM:USB_C_Receptacle_HRO_TYPE-C-31-M-12"
 			(at 29.21 48.26 0)
 			(hide yes)
 			(show_name no)
@@ -20165,7 +20166,7 @@
 				)
 			)
 		)
-		(property "MPN" "C2843970"
+		(property "MPN" "C165948"
 			(at 25.4 48.26 0)
 			(hide yes)
 			(show_name no)
