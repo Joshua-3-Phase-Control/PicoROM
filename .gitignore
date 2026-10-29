@@ -11,6 +11,7 @@ hardware/**/*.bck
 hardware/**/*.kicad_pcb-bak
 hardware/**/*.kicad_sch-bak
 hardware/**/*-backups
+hardware/**/.history/
 hardware/**/*.kicad_prl
 hardware/**/*.sch-bak
 hardware/**/*.lck
