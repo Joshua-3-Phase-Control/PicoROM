@@ -3,7 +3,8 @@
 A build of the fork's firmware (2.0-map, with 2.0-window's comms window) in which the board looks
 maps up for the DME's 8051: DME-Sim's map unit prototype (its `experiments/coproc_maps` and
 `MapUnit`) on an RP2040. The 8051 keeps a byte a map; the maps, and the lookups, are the board's.
-Nothing on the DME changes: the 8051 asks through one page of its 8 KiB.
+Nothing on the DME changes: the 8051 asks through one page of its 8 KiB. The builds hold the snoop
+too (`docs/snoop.md`): what the board learns of the 8051 from the socket alone.
 
 ## Builds
 
@@ -50,9 +51,10 @@ ready a few microseconds after the read that asks; DME-Sim's routine reads each 
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
   load) pushes A0-A7 of each read of the window's page once the read is over, so an answer never
-  changes a byte the 8051 is reading, and FFFFFFFFh for a read of 0000h. It takes the pins 26 ns
-  after /OE falls: margin only, the DME having /CE grounded and the address out long before /PSEN
-  falls.
+  changes a byte the 8051 is reading, shifted up a bit; and of each read of page 0, with a 1 below:
+  0000h is the 8051's start, the rest go to the snoop (its vectors). It runs from start-up; while
+  the unit is off its y holds no page. It takes the pins 26 ns after /OE falls: margin only, the
+  DME having /CE grounded and the address out long before /PSEN falls.
 - Its interrupt (priority 0, above USB and the timers) runs on core 0 from the unit's bank and calls
   nothing outside it. A pick or a send fills the page with the next answer, the last send looks the
   map up and fills the page with its value, and the value's read (or a start) copies the page as
@@ -81,11 +83,11 @@ ready a few microseconds after the read that asks; DME-Sim's routine reads each 
 
 The kinds: a pick or a send before the last; the last send (the lookup); the page as written again
 (the value's read, or a start). The bus bench and the probe make reads on the board itself, through
-the GPIO input overrides: no pin is driven and the data buffer is held off, but the board serves
-no 8051 meanwhile. Core 1 plays the 8051, reading as coproc_maps' routine does: each read 465 ns
-long, one every 8 us, 20 us between lookups, and one lookup in 64 broken off after its pick (and,
-one time in two, an input) by a read of 0000h. Times are in cycles of the 270 MHz clock. An
-answer is 35 characters at most (a packet's payload).
+the GPIO input overrides (`bus_bench.cpp`, shared with the snoop's): no pin is driven and the data
+buffer is held off, but the board serves no 8051 meanwhile. Core 1 plays the 8051, reading as
+coproc_maps' routine does: each read 465 ns long, one every 8 us, 20 us between lookups, and one
+lookup in 64 broken off after its pick (and, one time in two, an input) by a read of 0000h. Times
+are in cycles of the 270 MHz clock. An answer is 35 characters at most (a packet's payload).
 
 ## Measured
 
@@ -95,21 +97,23 @@ A POG (RP2040 at 270 MHz) with coproc_maps' images, 2026-11-06, by DME-Sim's
 - Every map at every input (467,712 lookups an image) gives MapUnit.Lookup's value, both cars.
 - A lookup takes 127 cycles (0.47 us) on one axis, 147 at most; 238 (0.88 us) on two, 287 (1.06
   us) at most.
-- The bus bench, each image: 200,000 lookups (and 3,125 broken off by a start) with USB quiet, then
-  as many with the PC reading the image throughout: none wrong, none late, none lost.
+- The bus bench, the 951's image, with the snoop running: 200,000 lookups (and 3,125 broken off by a
+  start) with USB quiet, then as many with the PC reading the image throughout: none wrong, none
+  late, none lost.
 
 | From the end of the 8051's read to the answer | Mean    | Most, USB quiet | Most, USB busy |
 |-----------------------------------------------|---------|-----------------|----------------|
-| A pick's, or a send's before the last         | 0.91 us | 4.24 us         | 3.93 us        |
-| The last send's (the lookup)                  | 1.44 us | 4.38 us         | 4.25 us        |
-| The page as written again (value, start)      | 1.18 us | 5.56 us         | 5.86 us        |
+| A pick's, or a send's before the last         | 1.01 us | 5.60 us         | 2.21 us        |
+| The last send's (the lookup)                  | 1.47 us | 3.07 us         | 2.62 us        |
+| The page as written again (value, start)      | 1.23 us | 5.73 us         | 2.93 us        |
 
 The 8051 reads 7.5 us after a pick or a send ends, and 19.5 us or more after the value. The
-interrupt itself takes 0.65 us (0.70 at most) for a pick or a send, 1.14 us (1.68) for the lookup
-and 0.90 us to put the page back; the rest is the time to reach it (core 0 finishing what it was
-doing) and to see the answer (the bench's core 1 polls for it, running from flash). The unit saw
-one start more than the benches made in one run: with no DME on its pins the board's inputs float,
-and a read of 0000h can appear outside the benches.
+interrupt itself takes 0.76 us (0.81 at most) for a pick or a send, 1.23 us (1.77) for the lookup
+and 0.96 us to put the page back; the rest is the time to reach it (core 0 finishing what it was
+doing) and to see the answer (the bench's core 1 polls for it). The most is a few runs' outliers
+(the same build has given 2.2 to 5.6 us); before the snoop, 4.2 to 4.4 us. The unit saw one start
+more than the benches made in one run: with no DME on its pins the board's inputs float, and a read
+of 0000h can appear outside the benches.
 
 ## Open
 

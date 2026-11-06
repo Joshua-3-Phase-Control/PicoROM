@@ -14,6 +14,7 @@
 #include "pico_link.h"
 #include "pio_programs.h"
 #include "rom.h"
+#include "snoop.h"
 #include "str_util.h"
 #include "system.h"
 
@@ -64,7 +65,9 @@ static const char *parameter_names[] = {"name",          "rom_name",   "addr_mas
                                         "build_version", "build_time", "comms_mode",   "comms_dropped",
 #if defined(FEATURE_MAP_UNIT)
                                         "map_unit",      "map_counts", "map_lookup", "map_bench",   "map_bus",
-                                        "map_bus_cycles", "map_cycles", "map_stack",
+                                        "map_bus_cycles", "map_cycles", "map_stack",  "snoop",      "snoop_adc",
+                                        "snoop_last",    "snoop_irq",  "snoop_vectors", "snoop_window",
+                                        "snoop_bench",   "snoop_bench_data",
 #endif
                                         nullptr};
 
@@ -125,7 +128,7 @@ bool set_parameter(const char *name, const char *value)
         }
     }
 #if defined(FEATURE_MAP_UNIT)
-    return map_unit_set_parameter(name, value);
+    return map_unit_set_parameter(name, value) || snoop_set_parameter(name, value);
 #else
     return false;
 #endif
@@ -205,7 +208,7 @@ bool get_parameter(const char *name, char *value, size_t value_size)
     }
 
 #if defined(FEATURE_MAP_UNIT)
-    return map_unit_get_parameter(name, value, value_size);
+    return map_unit_get_parameter(name, value, value_size) || snoop_get_parameter(name, value, value_size);
 #else
     return false;
 #endif
@@ -412,6 +415,7 @@ int main()
 
 #if defined(FEATURE_MAP_UNIT)
     map_unit_init(rom_get_buffer(), config.addr_mask);
+    snoop_init(rom_get_buffer());
 #endif
 
     rom_service_start();

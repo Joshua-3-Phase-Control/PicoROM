@@ -1,11 +1,13 @@
 ; 16 instructions
-; The map unit's window (FEATURE_MAP_UNIT, map_unit.cpp): each read of its page (/OE and /CE low, A8
-; and up y) pushes its A0-A7 once the read is over (/OE high), so an answer the CPU writes never
-; changes a byte the 8051 is reading; a read of 0000h, where the 8051 starts after a reset, pushes
-; FFFFFFFFh. The pins are taken 7 cycles (26 ns at 270 MHz) after /OE falls: margin only, as the DME
-; grounds /CE and has the address out long before /PSEN falls (951digit.pdf). In pins from the first
-; OE pin, shifting right; y = the window's page (address >> 8, 1 to 1Fh: inside the 8 KiB), set by
-; cpu. The two counts marked are set for the board's pins as the program loads (pio_programs.cpp).
+; The map unit's window and page 0 (FEATURE_MAP_UNIT, map_unit.cpp): each read of the window's page
+; (A8 and up y) pushes its A0-A7 shifted up a bit (an even word), and each read of page 0 its A0-A7
+; shifted up with a 1 below (an odd word: 0000h is the 8051's start, the vectors its interrupts;
+; snoop.cpp), each once the read is over (/OE high), so an answer the CPU writes never changes a byte
+; the 8051 is reading. The pins are taken 7 cycles (26 ns at 270 MHz) after /OE falls: margin only,
+; as the DME grounds /CE and has the address out long before /PSEN falls (951digit.pdf). In pins
+; from the first OE pin, OSR shifting right, ISR left; y = the window's page (1 to 1Fh: inside the
+; 8 KiB), set by cpu. The two counts marked are set for the board's pins as the program loads
+; (pio_programs.cpp).
 .program map_window
 .wrap_target
     wait 0 pin 0 [7]        ; /OE low, and 7 cycles more
@@ -17,18 +19,46 @@ public to_address:
     out isr, 8              ; A0-A7
 public page_bits:
     out x, 8                ; set: A8 and up (the lines addr_mask leaves out read 0)
-    jmp !x page_zero        ; page 0: the 8051's start?
+    jmp !x page_zero        ; page 0
     jmp x!=y read_over      ; not the window
+    in null, 1              ; the window's: even
     jmp report
 page_zero:
-    mov x, isr
-    jmp x-- read_over       ; not 0000h
-    mov isr, ~null          ; 0000h: FFFFFFFFh
+    set x, 1
+    in x, 1                 ; page 0's: odd
 report:
     wait 1 pin 0            ; the read over
-    push noblock            ; then A0-A7 (or the start)
+    push noblock
 read_over:
     wait 1 pin 0            ; /OE high
+.wrap
+
+; 11 instructions
+; The snoop (FEATURE_MAP_UNIT, snoop.cpp; DME-Sim's docs/Socket_View.md): after each /PSEN read, /OE
+; high for longer than a read's gap means a MOVX holds the bus; 1.5 us after the read's end all the
+; pins are taken (A0-A12 the data address, D0-D7 the byte) and pushed, then those of the read before
+; it (the byte after the MOVX's opcode). In pins from GPIO0, autopush at 32 bits, the jmp pin /OE.
+; The marked instructions are set for the board's /OE and the clock as the program loads.
+.program snoop
+.wrap_target
+public read:
+    wait 0 gpio 0           ; set: /OE's GPIO. A read
+    mov y, pins             ; its pins
+public read_ends:
+    wait 1 gpio 0           ; set: /OE's GPIO. The read's end (P)
+public gap_count:
+    set x, 31               ; set: 1 us, 9 cycles a turn
+gap:
+    jmp pin high            ; /OE high still
+    jmp read                ; low: the next read
+high:
+    jmp x-- gap [7]
+public sample_count:
+    set x, 12               ; set: to 1.5 us from P, 9 cycles a turn
+to_sample:
+    jmp x-- to_sample [8]
+    in pins, 32             ; the pins in the strobe: pushed
+    in y, 32                ; the read before's: pushed
 .wrap
 
 ; vim:ft=pioasm

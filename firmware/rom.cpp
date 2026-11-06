@@ -5,6 +5,7 @@
 
 #include "pio_programs.h"
 #include "rom.h"
+#include "snoop.h"
 #include "system.h"
 
 uint8_t *rom_data = (uint8_t *)0x21000000; // Start of 4 64kb sram banks
@@ -197,10 +198,14 @@ void rom_service_stop()
 
 bool rom_check_oe()
 {
+#if defined(FEATURE_MAP_UNIT)
+    return snoop_activity(); // report_data_access isn't loaded: the snoop has its state machine
+#else
     if (pio_interrupt_get(prg_report_data_access.pio(), prg_report_data_access.sm))
     {
         pio_interrupt_clear(prg_report_data_access.pio(), prg_report_data_access.sm);
         return true;
     }
     return false;
+#endif
 }

@@ -7,6 +7,7 @@
 #include <hardware/pio.h>
 
 PIOProgram prg_map_window;
+PIOProgram prg_snoop;
 PIOProgram prg_comms_detect;
 PIOProgram prg_comms_window;
 PIOProgram prg_comms_clock;
@@ -48,12 +49,29 @@ static void set_map_window_counts()
     p->instr_mem[prg_map_window.offset + map_window_offset_page_bits] = pio_encode_out(pio_x, N_ADDR_PINS - 8);
 }
 
+// The snoop's /OE and its two counts (map_unit.pio): the gap, (n + 1) turns of 9 cycles to 1 us at
+// least, and the rest to 1.5 us from the read's end (two cycles for the two sets).
+static constexpr uint32_t SNOOP_GAP_TURNS = (SYS_CLK_HZ + 8999999) / 9000000;
+static constexpr uint32_t SNOOP_SAMPLE_TURNS = (SYS_CLK_HZ / 2000000 * 3 - 2 - 9 * SNOOP_GAP_TURNS + 4) / 9;
+static_assert(SNOOP_GAP_TURNS - 1 < 32 && SNOOP_SAMPLE_TURNS >= 1 && SNOOP_SAMPLE_TURNS - 1 < 32, "set's 5 bits");
+
+static void set_snoop_counts()
+{
+    PIO p = prg_snoop.pio();
+    p->instr_mem[prg_snoop.offset + snoop_offset_read] = pio_encode_wait_gpio(false, BASE_OE_PIN);
+    p->instr_mem[prg_snoop.offset + snoop_offset_read_ends] = pio_encode_wait_gpio(true, BASE_OE_PIN);
+    p->instr_mem[prg_snoop.offset + snoop_offset_gap_count] = pio_encode_set(pio_x, SNOOP_GAP_TURNS - 1);
+    p->instr_mem[prg_snoop.offset + snoop_offset_sample_count] = pio_encode_set(pio_x, SNOOP_SAMPLE_TURNS - 1);
+}
+
 void pio_programs_reset()
 {
     pio_clear_instruction_memory(pio0);
     pio_clear_instruction_memory(pio1);
 
     prg_map_window.reset();
+    prg_snoop.reset();
+    prg_report_data_access.reset();
     prg_comms_detect.reset();
     prg_comms_window.reset();
     prg_comms_clock.reset();
@@ -81,7 +99,12 @@ bool pio_programs_init()
     else
         add_program(pio1, 0, route_output_enable, prg_set_output_enable);
 
+#if defined(FEATURE_MAP_UNIT) // the snoop in its place: it shows the 8051's activity too
+    add_program(SNOOP_PIO, SNOOP_SM, snoop, prg_snoop);
+    set_snoop_counts();
+#else
     add_program(pio1, 1, report_data_access, prg_report_data_access);
+#endif
 
 #if defined(FEATURE_CLOCK) // the only builds that use it
     add_program(pio1, 2, comms_clock, prg_comms_clock);

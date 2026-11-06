@@ -30,6 +30,8 @@ function(picorom BUILD_CONFIG DEFINES)
         rom.cpp
         comms.cpp
         map_unit.cpp
+        snoop.cpp
+        bus_bench.cpp
         pio_programs.cpp
         str_util.cpp
         peripherals.cpp
@@ -131,8 +133,10 @@ picorom(P28_27C512_100ns BOARD_28P=1 FEATURE_STABLE_ADDRESS=1)
 picorom(P28_27C512_70ns_MAP "BOARD_28P=1;FEATURE_MAP_UNIT=1")
 picorom(POG_27C020_70ns_MAP "BOARD_32P_TCA=1;FEATURE_MAP_UNIT=1")
 
-# The map unit's interrupt calls nothing outside its bank: no loop may become a memset call.
-set_source_files_properties(map_unit.cpp PROPERTIES COMPILE_OPTIONS -fno-tree-loop-distribute-patterns)
+# The unit's bank calls nothing outside it (the map unit's, the snoop's and the bus bench's code): no
+# loop may become a memset call.
+set_source_files_properties(map_unit.cpp snoop.cpp bus_bench.cpp PROPERTIES COMPILE_OPTIONS
+    -fno-tree-loop-distribute-patterns)
 
 foreach(TARGET ${ALL_FIRMWARE_TARGETS})
     list(APPEND FIRMWARE_BIN_FILES "${TARGET}.bin")

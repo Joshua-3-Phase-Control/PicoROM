@@ -13,11 +13,12 @@
 //   window + any  after the last: the map's value at the inputs sent, rom_lean's Map_Lookup and
 //                 Map_Lookup_2D's bit for bit; then the page is as written again
 //
-// map_window (map_unit.pio) pushes A0-A7 of each read of the page once the read is over, and FFFFFFFFh
-// for a read of 0000h, where the 8051 starts after a reset: the page as written again, and the unit
-// waiting for a pick. The 8051's routine reads each answer 8 us or more after it asks (map_bus times
-// the board). The PC reads and writes the image as it wrote it: the page is kept for it apart (the
-// shadow), and goes to flash as written.
+// map_window (map_unit.pio) pushes A0-A7 of each read of the page once the read is over (shifted up a
+// bit), and of each read of page 0 (with a 1 below): 0000h, where the 8051 starts after a reset, puts
+// the page as written again and the unit waiting for a pick; the rest go to the snoop (its vectors).
+// The 8051's routine reads each answer 8 us or more after it asks (map_bus times the board). The PC
+// reads and writes the image as it wrote it: the page is kept for it apart (the shadow), and goes to
+// flash as written.
 
 #include "map_unit.h"
 
@@ -36,16 +37,13 @@
 #include "hardware/timer.h"
 #include "pico/multicore.h"
 
+#include "bus_bench.h"
 #include "pio_programs.h"
 #include "rom.h"
+#include "snoop.h"
 #include "str_util.h"
 #include "system.h"
-
-// The unit's code and data, in the last SRAM bank (memmap_firmware.ld's UNIT_RAM), copied there from
-// flash by map_unit_init. Its interrupt runs from there and calls nothing outside it: no flash, no
-// library (no division, no switch tables, no memset: this file is built without loop patterns).
-#define UNIT_CODE(name) __attribute__((section(".unit_ram.text." #name), noinline)) name
-#define UNIT_DATA __attribute__((section(".unit_ram.data")))
+#include "unit_ram.h"
 
 extern "C"
 {
@@ -54,12 +52,10 @@ extern "C"
 }
 
 static_assert(ROM_SIZE <= 0x30000, "the map unit's bank is the last one");
-static_assert(N_OE_PINS == 2, "the bus bench reads with /OE and /CE");
 
 static constexpr uint32_t MARK = 0x2000;          // the unit's own memory, after the 8051's 8 KiB
 static constexpr uint32_t EIGHT_KIB = 0x1FFF;     // the address mask the unit works with
 static constexpr uint32_t PAGE = 0x100;
-static constexpr uint32_t STARTED = 0xFFFFFFFF;   // map_window's word for a read of 0000h
 
 enum : uint32_t
 {
@@ -85,7 +81,7 @@ struct Unit
     uint32_t map, axes, sent;
     uint8_t inputs[2];
     volatile uint32_t lookups;
-    volatile uint32_t starts; // reads of 0000h
+    volatile uint32_t starts; // reads of 0000h, the 8051's start
     volatile uint32_t served; // reads answered (the bus bench waits on it)
     Cycles answers;           // a pick's, or a send's before the last
     Cycles values;            // the last send's: the lookup, and the page filled with its value
@@ -251,19 +247,6 @@ static __force_inline bool send(uint32_t input)
     return true;
 }
 
-// Each core's own SysTick, on the processor's clock: the unit's times, in cycles.
-static __force_inline void systick_start()
-{
-    systick_hw->rvr = 0xFFFFFF;
-    systick_hw->cvr = 0;
-    systick_hw->csr = 5; // on, the processor's clock, no interrupt
-}
-
-static __force_inline uint32_t since(uint32_t then)
-{
-    return (then - systick_hw->cvr) & 0xFFFFFF; // SysTick counts down, 24 bits
-}
-
 static __force_inline void note(Cycles *cycles, uint32_t taken)
 {
     cycles->count++;
@@ -278,10 +261,13 @@ static void UNIT_CODE(map_unit_irq)()
     while (!(MAP_UNIT_PIO->fstat & (1u << (PIO_FSTAT_RXEMPTY_LSB + MAP_UNIT_SM))))
     {
         uint32_t start = systick_hw->cvr;
-        uint32_t read = MAP_UNIT_PIO->rxf[MAP_UNIT_SM];
+        uint32_t word = MAP_UNIT_PIO->rxf[MAP_UNIT_SM], read = word >> 1;
         Cycles *cycles = nullptr;
-        if (read == STARTED)
+        if (word & 1) // page 0
         {
+            snoop_page_read(read);
+            if (read != 0)
+                continue; // the snoop's alone
             unit.starts++;
             if (unit.phase != PICK_DUE)
             {
@@ -289,6 +275,8 @@ static void UNIT_CODE(map_unit_irq)()
                 cycles = &unit.restores;
             }
         }
+        else if (!unit.on)
+            continue; // a window's read pushed before the unit went off
         else if (unit.phase == PICK_DUE)
         {
             pick(read);
@@ -307,28 +295,21 @@ static void UNIT_CODE(map_unit_irq)()
     }
 }
 
+// map_window runs from init, so page 0's reads reach the snoop whether the unit is on or not; the
+// window's are pushed while y holds its page (1 to 1Fh: set's 5 bits), none while it holds ~0.
 static void window_start()
 {
-    PIO p = MAP_UNIT_PIO;
-    uint sm = MAP_UNIT_SM;
-    pio_sm_set_enabled(p, sm, false);
-    pio_sm_clear_fifos(p, sm);
-    pio_sm_restart(p, sm);
-    pio_sm_exec(p, sm, pio_encode_jmp(prg_map_window.offset));
-    pio_sm_exec(p, sm, pio_encode_set(pio_y, unit.window >> 8)); // 1 to 1Fh: set's 5 bits
-    pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
-    irq_set_enabled(PIO1_IRQ_0, true);
-    pio_sm_set_enabled(p, sm, true);
+    pio_sm_exec(MAP_UNIT_PIO, MAP_UNIT_SM, pio_encode_set(pio_y, unit.window >> 8));
 }
 
+// The page as written first, the interrupt held off meanwhile (a window's read pushed before is
+// dropped once the unit is off).
 static void window_stop()
 {
-    PIO p = MAP_UNIT_PIO;
-    uint sm = MAP_UNIT_SM;
     irq_set_enabled(PIO1_IRQ_0, false);
-    pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), false);
-    pio_sm_set_enabled(p, sm, false);
-    pio_sm_clear_fifos(p, sm);
+    pio_sm_exec(MAP_UNIT_PIO, MAP_UNIT_SM, pio_encode_mov_not(pio_y, pio_null));
+    memcpy(unit.rom + unit.window, shadow, PAGE);
+    irq_set_enabled(PIO1_IRQ_0, true);
 }
 
 // The window's page from the mark (1 to 1Fh), or 0: the image unmarked, or the board serving more
@@ -354,7 +335,6 @@ static void turn_off()
 {
     window_stop();
     unit.on = false;
-    memcpy(unit.rom + unit.window, shadow, PAGE);
 }
 
 // After the image or the mask changed: on with the mark and the 8 KiB served, off without.
@@ -399,9 +379,15 @@ void map_unit_init(uint8_t *rom, uint32_t addr_mask)
         return;
     PRG_LOCAL(prg_map_window, p, sm, offset, cfg);
     sm_config_set_in_pins(&cfg, BASE_OE_PIN);
+    sm_config_set_in_shift(&cfg, false, false, 32); // ISR left: the tag below A0-A7
+    sm_config_set_fifo_join(&cfg, PIO_FIFO_JOIN_RX);
     pio_sm_init(p, sm, offset, &cfg);
+    pio_sm_exec(p, sm, pio_encode_mov_not(pio_y, pio_null)); // no window till the unit is on
     irq_set_exclusive_handler(PIO1_IRQ_0, map_unit_irq);
     irq_set_priority(PIO1_IRQ_0, 0);
+    pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
+    irq_set_enabled(PIO1_IRQ_0, true);
+    pio_sm_set_enabled(p, sm, true);
     refresh();
 }
 
@@ -439,10 +425,8 @@ void map_unit_read(uint32_t offset, uint8_t *into, uint32_t size)
 
 void map_unit_hide()
 {
-    if (!unit.on)
-        return;
-    window_stop();
-    memcpy(unit.rom + unit.window, shadow, PAGE);
+    if (unit.on)
+        window_stop();
 }
 
 void map_unit_show()
@@ -455,28 +439,20 @@ void map_unit_show()
 
 // ---------------------------------------------------------------------------------------------------
 // The benches. map_bench: every input of a map looked up, each timed, with core 1 serving the 8051's
-// ROM as in the car. map_bus: core 1 plays the 8051 instead, reading the window as coproc_maps'
-// routine does (through the GPIO input overrides: no pin is driven, and the data buffer is held off),
-// while core 0 answers and serves USB as it would in the car. The 8051's part runs from flash (it
-// fits the XIP cache), so it doesn't hold up the unit's bank as no 8051 would; the ROM's bank goes
-// unread meanwhile, though core 1 reads it every 7 cycles in the car. Times are in cycles of the
-// system clock.
+// ROM as in the car. map_bus: core 1 plays the 8051 instead (bus_bench.h), reading the window as
+// coproc_maps' routine does, while core 0 answers and serves USB as it would in the car; the ROM's
+// bank goes unread meanwhile, though core 1 reads it every 7 cycles in the car. Times are in cycles
+// of the system clock.
 
-static constexpr uint32_t CYCLES_PER_US = SYS_CLK_HZ / 1000000;
-static constexpr uint32_t MACHINE_CYCLE = 2 * CYCLES_PER_US;            // the 8051's: 12 clocks at 6 MHz
-static constexpr uint32_t READ_CYCLES = 465 * CYCLES_PER_US / 1000;     // /PSEN low: 3 TCLCL - 35 ns
 static constexpr uint32_t GAP = 4 * MACHINE_CYCLE;                      // a read to the next, at least
 static constexpr uint32_t PAUSE = 10 * MACHINE_CYCLE;                   // from a lookup to the next
 static constexpr uint32_t LOST = 50 * CYCLES_PER_US;                    // no answer by then: lost
-static constexpr uint32_t INOVER_LOW = 2u << IO_BANK0_GPIO0_CTRL_INOVER_LSB;
-static constexpr uint32_t INOVER_HIGH = 3u << IO_BANK0_GPIO0_CTRL_INOVER_LSB;
 
 enum : uint32_t
 {
     BUS_IDLE,
     BUS_RUNNING,
-    BUS_DONE, // core 1 has finished; core 0 gives the board back
-    BUS_ENDED
+    BUS_ENDED // core 1 has finished; bench_update gives the board back
 };
 
 enum : uint32_t
@@ -501,9 +477,6 @@ struct Bus
 };
 
 static Bus bus UNIT_DATA = {};
-static uint32_t bus_stack[128] UNIT_DATA = {};
-static uint32_t gpio_ctrl[N_ADDR_PINS + N_OE_PINS] UNIT_DATA = {};  // the pins' CTRL, no input override
-static uint32_t gpio_saved[N_ADDR_PINS + N_OE_PINS] UNIT_DATA = {}; // as they were (addr_mask's overrides)
 static char bench_text[40] UNIT_DATA = {};
 static char lookup_text[40] UNIT_DATA = {};
 
@@ -544,53 +517,6 @@ static void UNIT_CODE(bench_map)(uint32_t map, uint32_t axes, uint32_t *crc, uin
     *crc = ~*crc;
 }
 
-static __force_inline void bus_pin(uint32_t pin, uint32_t ctrl, uint32_t over)
-{
-    io_bank0_hw->io[pin].ctrl = ctrl | over;
-}
-
-// The bench's bus at rest: /CE low throughout, as the DME grounds it (951digit.pdf), and /OE (the
-// 8051's /PSEN) high.
-static void bus_rest()
-{
-    for (uint32_t i = 0; i < N_ADDR_PINS + N_OE_PINS; i++)
-    {
-        uint32_t pin = i < N_ADDR_PINS ? BASE_ADDR_PIN + i : BASE_OE_PIN + i - N_ADDR_PINS;
-        gpio_saved[i] = io_bank0_hw->io[pin].ctrl;
-        gpio_ctrl[i] = gpio_saved[i] & ~IO_BANK0_GPIO0_CTRL_INOVER_BITS;
-    }
-    bus_pin(BASE_OE_PIN + 1, gpio_ctrl[N_ADDR_PINS + 1], INOVER_LOW);
-    bus_pin(BASE_OE_PIN, gpio_ctrl[N_ADDR_PINS], INOVER_HIGH);
-}
-
-// The pins as they were, and the data buffer back under the output enable program.
-static void bus_restore()
-{
-    for (uint32_t i = 0; i < N_ADDR_PINS + N_OE_PINS; i++)
-    {
-        uint32_t pin = i < N_ADDR_PINS ? BASE_ADDR_PIN + i : BASE_OE_PIN + i - N_ADDR_PINS;
-        io_bank0_hw->io[pin].ctrl = gpio_saved[i];
-    }
-    gpio_set_outover(BUF_OE_PIN, GPIO_OVERRIDE_NORMAL);
-}
-
-// One read as the 8051 makes it: the address, then /PSEN (the EPROM's /OE) low for 465 ns. The byte
-// is taken from the image as the read ends, as the 8051 latches it.
-static uint32_t bus_read(uint32_t address, uint32_t *value, uint32_t *end)
-{
-    for (uint32_t i = 0; i < N_ADDR_PINS; i++)
-        bus_pin(BASE_ADDR_PIN + i, gpio_ctrl[i], (address >> i) & 1 ? INOVER_HIGH : INOVER_LOW);
-    uint32_t start = systick_hw->cvr;
-    bus_pin(BASE_OE_PIN, gpio_ctrl[N_ADDR_PINS], INOVER_LOW);
-    while (since(start) < READ_CYCLES)
-    {
-    }
-    *value = unit.rom[address & unit.mask];
-    bus_pin(BASE_OE_PIN, gpio_ctrl[N_ADDR_PINS], INOVER_HIGH);
-    *end = systick_hw->cvr;
-    return start;
-}
-
 // A read wait after the one that started at after: checked against what the 8051 should read, then
 // the unit's answer timed from the read's end. Returns when the read started.
 static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32_t expect, uint32_t kind)
@@ -599,7 +525,7 @@ static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32
     {
     }
     uint32_t served = unit.served, value, end;
-    uint32_t start = bus_read(address, &value, &end);
+    uint32_t start = bench_read(address, unit.rom, unit.mask, &value, &end);
     if (value != expect)
         bus.wrong++;
     while (unit.served == served && since(end) < LOST)
@@ -654,33 +580,27 @@ static void bus_run()
         if (++id == count)
             id = 0;
     }
-    bus.state = BUS_DONE;
-    while (true)
-        __wfe();
+    bus.state = BUS_ENDED;
+    bench_finished();
 }
 
 static bool bus_start(uint32_t want)
 {
-    if (!unit.on || bus.state == BUS_RUNNING || bus.state == BUS_DONE || want == 0)
+    bench_update(); // a run over, the board not yet given back: given back now
+    if (!unit.on || bench_running() || want == 0)
         return false;
     memset(&bus, 0, sizeof(bus));
     bus.want = want;
-    rom_service_stop();
-    gpio_set_outover(BUF_OE_PIN, GPIO_OVERRIDE_HIGH); // the socket's data buffer off: nothing driven
-    bus_rest();
     bus.state = BUS_RUNNING;
-    multicore_launch_core1_with_stack(bus_run, bus_stack, sizeof(bus_stack));
-    return true;
+    if (bench_launch(bus_run))
+        return true;
+    bus.state = BUS_IDLE;
+    return false;
 }
 
 void map_unit_update()
 {
-    if (bus.state != BUS_DONE)
-        return;
-    multicore_reset_core1();
-    bus_restore();
-    rom_service_start();
-    bus.state = BUS_ENDED;
+    bench_update();
 }
 
 // map_probe: one read made from core 0, as the bus bench makes them: what the pins read during it,
@@ -689,19 +609,17 @@ static char probe_text[40] UNIT_DATA = {};
 
 static void probe(uint32_t address)
 {
-    gpio_set_outover(BUF_OE_PIN, GPIO_OVERRIDE_HIGH);
-    bus_rest();
+    bench_take();
     busy_wait_us_32(2); // map_window back at its start, whatever the pins said before
     uint32_t served = unit.served, before = pio_sm_get_pc(MAP_UNIT_PIO, MAP_UNIT_SM);
-    for (uint32_t i = 0; i < N_ADDR_PINS; i++)
-        bus_pin(BASE_ADDR_PIN + i, gpio_ctrl[i], (address >> i) & 1 ? INOVER_HIGH : INOVER_LOW);
-    bus_pin(BASE_OE_PIN, gpio_ctrl[N_ADDR_PINS], INOVER_LOW);
+    bench_address(address);
+    bench_oe(true);
     busy_wait_us_32(2);
     uint32_t pins = sio_hw->gpio_in, during = pio_sm_get_pc(MAP_UNIT_PIO, MAP_UNIT_SM);
-    bus_pin(BASE_OE_PIN, gpio_ctrl[N_ADDR_PINS], INOVER_HIGH);
+    bench_oe(false);
     busy_wait_us_32(20);
     uint32_t after = pio_sm_get_pc(MAP_UNIT_PIO, MAP_UNIT_SM);
-    bus_restore();
+    bench_give();
     snprintf(probe_text, sizeof(probe_text), "pins %08x pc %u %u %u served %u", (unsigned)pins, (unsigned)before,
              (unsigned)during, (unsigned)after, (unsigned)(unit.served - served));
 }
@@ -778,7 +696,7 @@ bool map_unit_set_parameter(const char *name, const char *value)
         return bus_start(args[0]);
     if (streq(name, "map_probe"))
     {
-        if (!unit.on || bus.state == BUS_RUNNING || bus.state == BUS_DONE)
+        if (!unit.on || bench_running())
             return false;
         probe(args[0]);
         return true;

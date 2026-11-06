@@ -47,7 +47,12 @@ struct PIOProgram
 #define MAP_UNIT_PIO pio1
 static constexpr uint MAP_UNIT_SM = 2;
 
+// The snoop (FEATURE_MAP_UNIT, map_unit.pio): pio1's state machine 1, report_data_access's.
+#define SNOOP_PIO pio1
+static constexpr uint SNOOP_SM = 1;
+
 extern PIOProgram prg_map_window;
+extern PIOProgram prg_snoop;
 extern PIOProgram prg_comms_detect;
 extern PIOProgram prg_comms_window;
 extern PIOProgram prg_comms_clock;
