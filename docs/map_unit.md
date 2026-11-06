@@ -106,7 +106,7 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | map_counts     |                   | the lookups made and the starts seen                      |
 | map_lookup     | id,first[,second] | the value and its cycles                                  |
 | map_bench      | id                | every input: the values' CRC-32, cycles least, mean, most |
-| map_task       | id                | a task's cases: the outputs' CRC-32, cycles as map_bench  |
+| map_task       | id                | a task's cases (core 1): running, then CRC-32 and cycles  |
 | map_bus        | n                 | the bus bench: n lookups, then done, wrong, late, lost    |
 | map_bus_cycles |                   | its times from each read's end, by kind: mean and most    |
 | map_cycles     |                   | the interrupt's own times by kind since start             |
@@ -158,6 +158,13 @@ to 552 (Slow_Fuel), 628 to 726 (Main_Ign) and 311 to 350 (Slow_Charge). On the b
 tasks among the maps: 200,000 requests, USB quiet and busy, none wrong, late or lost; the last send's
 answer (a lookup's or a task's) 1.65 us on average, 4.4 us at most, and the interrupt itself 3.66 us at
 most (a task's 12 us before the 8051 reads its first output).
+
+The advance's tasks too (coproc_advance's 951 image, 2026-11-06): each of the six tasks' outputs at
+its cases (task 4's 2^18 at random) have the CRC-32 of rom_lean's routine's. Task 4 takes 413 to 579
+cycles, task 5 312 to 353. The bus bench, all six tasks among the maps: 200,000 requests, none wrong,
+late or lost; the answers' times as before. (A first run counted task 5's outputs wrong: its output
+is its input's byte, and the bench sent the byte it had worked the output into; it sends the inputs
+it chose now.)
 
 ## Open
 

@@ -595,7 +595,14 @@ struct Bus
 static Bus bus UNIT_DATA = {};
 static char bench_text[40] UNIT_DATA = {};
 static char lookup_text[40] UNIT_DATA = {};
-static char task_text[40] UNIT_DATA = {};
+struct TaskBench
+{
+    volatile uint32_t state; // as the bus bench's
+    uint32_t task, description;
+    uint32_t crc, least, sum, most, cases;
+};
+
+static TaskBench task_bench UNIT_DATA = {};
 static uint8_t bench_ram[0x80] UNIT_DATA = {}; // the 8051's RAM bytes for map_task's runs
 static uint8_t bus_ram[0x80] = {};             // core 1's for the bus bench's tasks
 
@@ -773,17 +780,20 @@ static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32
 // send, the rest 4 or more apart. Returns when the last read started.
 static uint32_t bus_task(uint32_t t, uint32_t window, uint32_t id, uint32_t task, uint32_t description, uint32_t *seed)
 {
-    uint32_t n = at(description), outputs = description + 1 + n;
-    for (uint32_t k = 1; k <= n; k++)
+    uint32_t n = at(description), outputs = description + 1 + n, sent[INPUTS];
+    if (n > INPUTS)
+        n = INPUTS; // (none has more)
+    for (uint32_t k = 0; k < n; k++)
     {
         *seed = xorshift(*seed);
-        bus_ram[at(description + k) & 0x7F] = *seed & 0xFF;
+        sent[k] = *seed & 0xFF;
+        bus_ram[at(description + 1 + k) & 0x7F] = sent[k];
     }
-    unit_task(task, description, unit.rom, bus_ram);
+    unit_task(task, description, unit.rom, bus_ram); // its outputs here (one may be an input's byte)
     t = bus_step(t, PAUSE, window + id, at(description + 1), ANSWER, GAP);
     for (uint32_t k = 1; k <= n; k++) // send k: the byte read is input k + 1's address, or 0
-        t = bus_step(t, GAP, window + bus_ram[at(description + k) & 0x7F], k < n ? at(description + 1 + k) : 0,
-                     k < n ? ANSWER : VALUE, k < n ? GAP : TASK_GAP);
+        t = bus_step(t, GAP, window + sent[k - 1], k < n ? at(description + 1 + k) : 0, k < n ? ANSWER : VALUE,
+                     k < n ? GAP : TASK_GAP);
     uint32_t wait = TASK_GAP;
     for (uint32_t j = 0; j < at(outputs); j++)
     {
@@ -834,6 +844,33 @@ static void bus_run()
     }
     bus.state = BUS_ENDED;
     bench_finished();
+}
+
+// map_task's bench, on core 1 as the bus bench is (a task's cases can take longer than a parameter's
+// answer may: 0.8 s for task 4's), the board serving no 8051 meanwhile.
+static void task_run()
+{
+    TaskBench &b = task_bench;
+    bench_task(b.task, b.description, &b.crc, &b.least, &b.sum, &b.most, &b.cases);
+    b.state = BUS_ENDED;
+    bench_finished();
+}
+
+static bool task_start(uint32_t id)
+{
+    bench_update(); // a run over, the board not yet given back: given back now
+    if (!unit.on || bench_running() || id >= at(MARK + 6))
+        return false;
+    uint32_t entry = entry_of(id), kind = at(entry + 2);
+    if (!(kind & TASK))
+        return false; // a map's id
+    task_bench.task = kind & ~TASK;
+    task_bench.description = at(entry) << 8 | at(entry + 1);
+    task_bench.state = BUS_RUNNING;
+    if (bench_launch(task_run))
+        return true;
+    task_bench.state = BUS_IDLE;
+    return false;
 }
 
 static bool bus_start(uint32_t want)
@@ -945,18 +982,7 @@ bool map_unit_set_parameter(const char *name, const char *value)
         return true;
     }
     if (streq(name, "map_task"))
-    {
-        if (!unit.on || args[0] >= at(MARK + 6))
-            return false;
-        uint32_t entry = entry_of(args[0]), kind = at(entry + 2);
-        if (!(kind & TASK))
-            return false; // a map's id
-        uint32_t crc, least, sum, most, cases;
-        bench_task(kind & ~TASK, at(entry) << 8 | at(entry + 1), &crc, &least, &sum, &most, &cases);
-        snprintf(task_text, sizeof(task_text), "crc %08x cycles %u %u %u", (unsigned)crc, (unsigned)least,
-                 (unsigned)((sum + cases / 2) / cases), (unsigned)most);
-        return true;
-    }
+        return task_start(args[0]);
     if (streq(name, "map_bus"))
         return bus_start(args[0]);
     if (streq(name, "map_probe"))
@@ -1002,7 +1028,14 @@ bool map_unit_get_parameter(const char *name, char *value, size_t value_size)
     }
     if (streq(name, "map_task"))
     {
-        strcpyz(value, value_size, task_text[0] ? task_text : "none");
+        const TaskBench &b = task_bench;
+        if (b.state == BUS_IDLE)
+            strcpyz(value, value_size, "none");
+        else if (b.state != BUS_ENDED)
+            strcpyz(value, value_size, "running");
+        else
+            snprintf(value, value_size, "crc %08x cycles %u %u %u", (unsigned)b.crc, (unsigned)b.least,
+                     (unsigned)((b.sum + b.cases / 2) / b.cases), (unsigned)b.most);
         return true;
     }
     if (streq(name, "map_bus"))
