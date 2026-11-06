@@ -330,7 +330,7 @@ static void window_stop()
 
 // The window's page from the mark (1 to 1Fh), or 0: the image unmarked, or the board serving more
 // than the 8051's 8 KiB (in a DME, A13 high would then take the 8051 to the unit's memory).
-static uint32_t marked_page()
+static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
     if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] != 2)
@@ -338,12 +338,18 @@ static uint32_t marked_page()
     return m[5] < 0x20 ? m[5] : 0;
 }
 
-static void turn_on(uint32_t page)
+// The unit on at the page, waiting for a pick: its state alone (turn_on starts the window's PIO).
+static void UNIT_CODE(state_on)(uint32_t page)
 {
     unit.window = page << 8;
-    memcpy(shadow, unit.rom + unit.window, PAGE);
+    copy_page(shadow, (const uint32_t *)(unit.rom + unit.window));
     unit.phase = PICK_DUE;
     unit.on = true;
+}
+
+static void turn_on(uint32_t page)
+{
+    state_on(page);
     window_start();
 }
 
@@ -382,6 +388,17 @@ static uint32_t stack_unused()
     return bytes;
 }
 
+// The unit's state as the board starts it: on, waiting for a pick, if the image has the mark and the
+// board serves the 8051 its 8 KiB. It touches no hardware, so DME-Sim starts the unit with it too.
+void UNIT_CODE(map_unit_start)(uint8_t *rom, uint32_t addr_mask)
+{
+    unit.rom = rom;
+    unit.mask = addr_mask & 0xFFFF;
+    uint32_t page = marked_page();
+    if (page != 0)
+        state_on(page);
+}
+
 void map_unit_init(uint8_t *rom, uint32_t addr_mask)
 {
     paint_stack();
@@ -402,7 +419,9 @@ void map_unit_init(uint8_t *rom, uint32_t addr_mask)
     pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
     irq_set_enabled(PIO1_IRQ_0, true);
     pio_sm_set_enabled(p, sm, true);
-    refresh();
+    map_unit_start(rom, addr_mask);
+    if (unit.on)
+        window_start();
 }
 
 void map_unit_set_mask(uint32_t addr_mask)

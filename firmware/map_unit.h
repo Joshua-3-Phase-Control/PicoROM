@@ -13,6 +13,10 @@
 void map_unit_init(uint8_t *rom, uint32_t addr_mask);
 void map_unit_set_mask(uint32_t addr_mask);
 
+// The unit's state as the board starts it, without the hardware: map_unit_init calls it, and
+// DME-Sim's emulated core runs it to start the unit as the board does.
+void map_unit_start(uint8_t *rom, uint32_t addr_mask);
+
 // The PC's writes and reads of the image: the unit's page holds its answers, and the PC sees the
 // image as it wrote it there.
 void map_unit_write(uint32_t offset, const uint8_t *data, uint32_t size);

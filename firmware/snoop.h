@@ -11,6 +11,10 @@
 // After map_unit_init (which puts the unit's bank in place), with the image the board serves.
 void snoop_init(const uint8_t *rom);
 
+// The snoop's state as the board starts it, without the hardware: snoop_init calls it, and DME-Sim's
+// emulated core runs it.
+void snoop_start(const uint8_t *rom);
+
 // From the map unit's interrupt, each read of page 0 (A0-A7): its vectors.
 void snoop_page_read(uint32_t address);
 

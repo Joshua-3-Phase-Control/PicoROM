@@ -128,11 +128,16 @@ void UNIT_CODE(snoop_page_read)(uint32_t address)
     snoop.entry_time[k] = timer_hw->timerawl;
 }
 
-void snoop_init(const uint8_t *rom)
+void UNIT_CODE(snoop_start)(const uint8_t *rom)
 {
     snoop.rom = rom;
     snoop.vectors = 0x1F;
     snoop.previous = NONE;
+}
+
+void snoop_init(const uint8_t *rom)
+{
+    snoop_start(rom);
     if (!prg_snoop.valid())
         return;
     PRG_LOCAL(prg_snoop, p, sm, offset, cfg);
