@@ -9,6 +9,7 @@
 
 #include "comms.h"
 #include "flash.h"
+#include "map_unit.h"
 #include "peripherals.h"
 #include "pico_link.h"
 #include "pio_programs.h"
@@ -60,7 +61,12 @@ static Config config;
 
 static const char *parameter_names[] = {"name",          "rom_name",   "addr_mask", "rom_size",     "initial_reset",
                                         "default_reset", "reset",      "status",    "startup_time", "build_config",
-                                        "build_version", "build_time", "comms_mode",   "comms_dropped", nullptr};
+                                        "build_version", "build_time", "comms_mode",   "comms_dropped",
+#if defined(FEATURE_MAP_UNIT)
+                                        "map_unit",      "map_lookup", "map_bench", "map_bus",      "map_bus_cycles",
+                                        "map_cycles",    "map_stack",
+#endif
+                                        nullptr};
 
 bool set_parameter(const char *name, const char *value)
 {
@@ -68,6 +74,9 @@ bool set_parameter(const char *name, const char *value)
     {
         config.addr_mask = strtoul(value) & ADDR_MASK;
         configure_address_pins(config.addr_mask);
+#if defined(FEATURE_MAP_UNIT)
+        map_unit_set_mask(config.addr_mask);
+#endif
         return true;
     }
     else if (streq(name, "name"))
@@ -115,7 +124,11 @@ bool set_parameter(const char *name, const char *value)
             return false;
         }
     }
+#if defined(FEATURE_MAP_UNIT)
+    return map_unit_set_parameter(name, value);
+#else
     return false;
+#endif
 }
 
 bool get_parameter(const char *name, char *value, size_t value_size)
@@ -191,7 +204,11 @@ bool get_parameter(const char *name, char *value, size_t value_size)
         return true;
     }
 
+#if defined(FEATURE_MAP_UNIT)
+    return map_unit_get_parameter(name, value, value_size);
+#else
     return false;
+#endif
 }
 
 // Packet handler - called from USB RX callback
@@ -214,7 +231,11 @@ void handle_packet(const Packet *req)
             pl_send_error("Write out of range", offset, data_size);
             break;
         }
+#if defined(FEATURE_MAP_UNIT)
+        map_unit_write(offset, req->payload + 4, data_size);
+#else
         memcpy(rom_get_buffer() + offset, req->payload + 4, data_size);
+#endif
         break;
     }
 
@@ -231,7 +252,13 @@ void handle_packet(const Packet *req)
         uint32_t available = (offset < ROM_SIZE) ? (ROM_SIZE - offset) : 0;
         uint32_t max_data = MAX_PKT_PAYLOAD - 4;
         uint32_t size = MIN(MIN(requested, max_data), available);
+#if defined(FEATURE_MAP_UNIT)
+        uint8_t data[MAX_PKT_PAYLOAD];
+        map_unit_read(offset, data, size);
+        pl_send_payload_offset(PacketType::ReadData, offset, data, size);
+#else
         pl_send_payload_offset(PacketType::ReadData, offset, rom_get_buffer() + offset, size);
+#endif
         break;
     }
 
@@ -383,6 +410,10 @@ int main()
 
     configure_address_pins(config.addr_mask);
 
+#if defined(FEATURE_MAP_UNIT)
+    map_unit_init(rom_get_buffer(), config.addr_mask);
+#endif
+
     rom_service_start();
 
     reset_set(config.default_reset);
@@ -407,5 +438,8 @@ int main()
 
         comms_update(nullptr, 0, 5000);
         comms_window_update();
+#if defined(FEATURE_MAP_UNIT)
+        map_unit_update();
+#endif
     }
 }

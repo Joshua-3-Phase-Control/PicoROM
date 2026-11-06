@@ -4,7 +4,7 @@ include(pico-sdk/pico_sdk_init.cmake)
 project(PicoROM C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
-set(VERSION 2.0-window)
+set(VERSION 2.0-map)
 string(REPLACE . _ FILENAME_VERSION ${VERSION})
 
 pico_sdk_init()
@@ -29,6 +29,7 @@ function(picorom BUILD_CONFIG DEFINES)
         pico_link.cpp
         rom.cpp
         comms.cpp
+        map_unit.cpp
         pio_programs.cpp
         str_util.cpp
         peripherals.cpp
@@ -45,6 +46,7 @@ function(picorom BUILD_CONFIG DEFINES)
 
     pico_generate_pio_header(${TARGET} ${CMAKE_CURRENT_LIST_DIR}/data_bus.pio)
     pico_generate_pio_header(${TARGET} ${CMAKE_CURRENT_LIST_DIR}/comms.pio)
+    pico_generate_pio_header(${TARGET} ${CMAKE_CURRENT_LIST_DIR}/map_unit.pio)
 
     # Use custom USB implementation (not stdio_usb)
     pico_enable_stdio_usb(${TARGET} 0)
@@ -78,11 +80,19 @@ function(picorom BUILD_CONFIG DEFINES)
         -Wl,--wrap=atexit
     )
 
+    # The map unit's builds keep the comms window's queue in the unit's bank, and give its 1 KiB to the
+    # main stack: a parameter's snprintf in the USB callback, with an interrupt on top, needs over 640.
+    if ("FEATURE_MAP_UNIT=1" IN_LIST DEFINES)
+        set(STACK_SIZE 1536)
+    else()
+        set(STACK_SIZE 640)
+    endif()
+
     target_compile_definitions(${TARGET} PRIVATE
         PICOROM_CONFIG_NAME="${BUILD_CONFIG}"
         PICOROM_FIRMWARE_VERSION="${VERSION}"
         PICO_HEAP_SIZE=16
-        PICO_STACK_SIZE=640
+        PICO_STACK_SIZE=${STACK_SIZE}
         PICO_CORE1_STACK_SIZE=4
         USB_MAX_ENDPOINTS=4
         PICO_STDIO_ENABLE_CRLF_SUPPORT=0
@@ -113,6 +123,16 @@ picorom(P32_27C020_70ns BOARD_32P=1)
 picorom(P32_27C020_100ns BOARD_32P=1 FEATURE_STABLE_ADDRESS=1)
 picorom(P28_27C512_70ns BOARD_28P=1)
 picorom(P28_27C512_100ns BOARD_28P=1 FEATURE_STABLE_ADDRESS=1)
+
+# The map unit (docs/map_unit.md): the P28 in the DME looks maps up for its 8051. The POG build is for
+# trying it on a 32-pin board: it serves 192 KiB, the map unit having the last SRAM bank. The defines go
+# as one list: picorom() takes only its second argument (so the 100ns builds above don't get
+# FEATURE_STABLE_ADDRESS either).
+picorom(P28_27C512_70ns_MAP "BOARD_28P=1;FEATURE_MAP_UNIT=1")
+picorom(POG_27C020_70ns_MAP "BOARD_32P_TCA=1;FEATURE_MAP_UNIT=1")
+
+# The map unit's interrupt calls nothing outside its bank: no loop may become a memset call.
+set_source_files_properties(map_unit.cpp PROPERTIES COMPILE_OPTIONS -fno-tree-loop-distribute-patterns)
 
 foreach(TARGET ${ALL_FIRMWARE_TARGETS})
     list(APPEND FIRMWARE_BIN_FILES "${TARGET}.bin")

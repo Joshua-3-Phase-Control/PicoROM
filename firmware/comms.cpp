@@ -57,6 +57,11 @@ static uint32_t comms_reg_addr = 0;
 static constexpr uint32_t WINDOW_QUEUE = 1024;
 static constexpr uint32_t WINDOW_PACKET = 24;
 static constexpr uint32_t WINDOW_SEND_US = 1000;
+// The map unit's builds keep the queue in the unit's bank (copied there, empty, before USB starts),
+// giving its room in the 8 KiB to the main stack.
+#if defined(FEATURE_MAP_UNIT)
+__attribute__((section(".unit_ram.comms")))
+#endif
 static FIFO<WINDOW_QUEUE> window_fifo;
 static bool window_mode = false;
 static volatile bool window_active = false;

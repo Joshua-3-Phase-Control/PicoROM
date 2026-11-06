@@ -11,11 +11,12 @@
 #include "pico/unique_id.h"
 
 #include "flash.h"
+#include "map_unit.h"
 #include "rom.h"
 #include "system.h"
 
 static constexpr uint FLASH_CFG_OFFSET = FLASH_SIZE - FLASH_SECTOR_SIZE;
-static constexpr uint FLASH_ROM_OFFSET = FLASH_CFG_OFFSET - ROM_SIZE;
+static constexpr uint FLASH_ROM_OFFSET = FLASH_CFG_OFFSET - ROM_FLASH_SIZE;
 
 static constexpr uint CONFIG_VERSION = 0x00010010;
 
@@ -91,10 +92,12 @@ void flash_init_config(Config *config)
 void flash_save_rom()
 {
     rom_service_stop();
+    map_unit_hide(); // the image as the PC wrote it, not the map unit's answers
     uint32_t ints = save_and_disable_interrupts();
     flash_range_erase(FLASH_ROM_OFFSET, ROM_SIZE);
     flash_range_program(FLASH_ROM_OFFSET, rom_get_buffer(), ROM_SIZE);
     restore_interrupts(ints);
+    map_unit_show();
     rom_service_start();
 }
 

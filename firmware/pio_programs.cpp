@@ -3,8 +3,10 @@
 #include "system.h"
 #include "comms.pio.h"
 #include "data_bus.pio.h"
+#include "map_unit.pio.h"
 #include <hardware/pio.h>
 
+PIOProgram prg_map_window;
 PIOProgram prg_comms_detect;
 PIOProgram prg_comms_window;
 PIOProgram prg_comms_clock;
@@ -38,11 +40,21 @@ static void set_comms_window_counts()
     p->instr_mem[prg_comms_window.offset + comms_window_offset_page_bits] = pio_encode_out(pio_x, N_ADDR_PINS - 8);
 }
 
+// map_window's two counts for this board's pins (map_unit.pio), as comms_window's: to A0, then A10 up.
+static_assert(N_ADDR_PINS > 10, "the map window's count of the lines above A9 is 1 to 32");
+static void set_map_window_counts()
+{
+    PIO p = prg_map_window.pio();
+    p->instr_mem[prg_map_window.offset + map_window_offset_to_address] = pio_encode_out(pio_null, WINDOW_TO_ADDRESS);
+    p->instr_mem[prg_map_window.offset + map_window_offset_window_bits] = pio_encode_out(pio_x, N_ADDR_PINS - 10);
+}
+
 void pio_programs_reset()
 {
     pio_clear_instruction_memory(pio0);
     pio_clear_instruction_memory(pio1);
 
+    prg_map_window.reset();
     prg_comms_detect.reset();
     prg_comms_window.reset();
     prg_comms_clock.reset();
@@ -72,7 +84,13 @@ bool pio_programs_init()
 
     add_program(pio1, 1, report_data_access, prg_report_data_access);
 
+#if defined(FEATURE_CLOCK) // the only builds that use it
     add_program(pio1, 2, comms_clock, prg_comms_clock);
+#endif
+#if defined(FEATURE_MAP_UNIT)
+    add_program(MAP_UNIT_PIO, MAP_UNIT_SM, map_window, prg_map_window);
+    set_map_window_counts();
+#endif
     add_program(pio1, 3, write_tca_bits, prg_write_tca_bits);
 
     return true;

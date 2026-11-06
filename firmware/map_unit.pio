@@ -1,0 +1,26 @@
+; 11 instructions
+; The map unit's window (FEATURE_MAP_UNIT, map_unit.cpp): each read of the image's 1 KiB at 3C00h
+; (/OE and /CE low, A10 and up 0Fh) pushes its A0-A9 once the read is over (/OE high), so an answer
+; the CPU writes never changes a byte the 8051 is reading. The pins are taken 7 cycles (26 ns at
+; 270 MHz) after /OE falls, so a /CE that falls with it, a little later, still counts. In pins from
+; the first OE pin, shifting right; y = 0Fh (3C00h >> 10), set by cpu. The two counts marked are set
+; for the board's pins as the program loads (pio_programs.cpp).
+.program map_window
+.wrap_target
+    wait 0 pin 0 [7]        ; /OE low, and 7 cycles more
+    mov osr, pins           ; the pins from /OE, round to the address
+    out x, 2                ; /OE and /CE
+    jmp x-- read_over       ; not both low: not a read of the ROM
+public to_address:
+    out null, 6             ; set: from the OE pins to A0
+    out isr, 10             ; A0-A9
+public window_bits:
+    out x, 6                ; set: A10 and up (the lines addr_mask leaves out read 0)
+    jmp x!=y read_over      ; not the window
+    wait 1 pin 0            ; the read over
+    push noblock            ; then A0-A9
+read_over:
+    wait 1 pin 0            ; /OE high
+.wrap
+
+; vim:ft=pioasm

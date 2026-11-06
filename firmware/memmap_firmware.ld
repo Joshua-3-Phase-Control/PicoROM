@@ -26,6 +26,8 @@ MEMORY
     FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 2048k
     RAM(rwx) : ORIGIN = 0x20040000, LENGTH = 8k
     BLOCK_RAM(rwx) : ORIGIN =  0x21000000, LENGTH = 256k
+    /* The map unit's (FEATURE_MAP_UNIT): the last of BLOCK_RAM's four banks, which its builds don't serve */
+    UNIT_RAM(rwx) : ORIGIN = 0x21030000, LENGTH = 64k
 }
 
 ENTRY(_entry_point)
@@ -171,6 +173,15 @@ SECTIONS
     } > RAM AT> FLASH
     /* __etext is (for backwards compatibility) the name of the .data init source pointer (...) */
     __etext = LOADADDR(.data);
+
+    /* The map unit's code and data, copied from flash by map_unit_init (empty without the unit) */
+    .unit_ram : {
+        __unit_ram_start__ = .;
+        *(.unit_ram*)
+        . = ALIGN(4);
+        __unit_ram_end__ = .;
+    } > UNIT_RAM AT> FLASH
+    __unit_ram_source__ = LOADADDR(.unit_ram);
 
     .uninitialized_data (NOLOAD): {
         . = ALIGN(4);

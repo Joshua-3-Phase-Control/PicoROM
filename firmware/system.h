@@ -14,7 +14,7 @@ static constexpr uint32_t BASE_OE_PIN = 20;
 static constexpr uint32_t BUF_OE_PIN = 19;
 static constexpr uint32_t TCA_EXPANDER_PIN = 18;
 
-static constexpr uint32_t ROM_SIZE = 0x40000;
+static constexpr uint32_t ROM_FLASH_SIZE = 0x40000;
 
 #elif defined(BOARD_32P)
 
@@ -29,7 +29,7 @@ static constexpr uint32_t BUF_OE_PIN = 27;
 static constexpr uint32_t RESET_PIN = 28;
 static constexpr uint32_t INFO_LED_PIN = 29;
 
-static constexpr uint32_t ROM_SIZE = 0x40000;
+static constexpr uint32_t ROM_FLASH_SIZE = 0x40000;
 
 #elif defined(BOARD_28P)
 
@@ -45,10 +45,19 @@ static constexpr uint32_t BUF_DIR_PIN = 27;
 static constexpr uint32_t RESET_PIN = 28;
 static constexpr uint32_t INFO_LED_PIN = 29;
 
-static constexpr uint32_t ROM_SIZE = 0x10000;
+static constexpr uint32_t ROM_FLASH_SIZE = 0x10000;
 
 #else
 #error "Invalid board configuration"
+#endif
+
+// The image the board serves, from 0x21000000. The map unit (FEATURE_MAP_UNIT) keeps its code and
+// data in the last 64 KiB SRAM bank (memmap_firmware.ld's UNIT_RAM), so a board whose image filled
+// all four banks serves three. The image keeps its place in flash (ROM_FLASH_SIZE) either way.
+#if defined(FEATURE_MAP_UNIT)
+static constexpr uint32_t ROM_SIZE = ROM_FLASH_SIZE > 0x30000 ? 0x30000 : ROM_FLASH_SIZE;
+#else
+static constexpr uint32_t ROM_SIZE = ROM_FLASH_SIZE;
 #endif
 
 static constexpr uint32_t DATA_PIN_MASK = ((1 << N_DATA_PINS) - 1) << BASE_DATA_PIN;

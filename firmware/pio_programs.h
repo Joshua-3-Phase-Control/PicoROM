@@ -43,6 +43,11 @@ struct PIOProgram
     int o = prg.offset;                                                                                                \
     pio_sm_config c = prg.config();
 
+// The map unit's window (FEATURE_MAP_UNIT, map_unit.pio): pio1's state machine 2.
+#define MAP_UNIT_PIO pio1
+static constexpr uint MAP_UNIT_SM = 2;
+
+extern PIOProgram prg_map_window;
 extern PIOProgram prg_comms_detect;
 extern PIOProgram prg_comms_window;
 extern PIOProgram prg_comms_clock;
