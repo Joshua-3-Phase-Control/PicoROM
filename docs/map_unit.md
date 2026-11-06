@@ -73,6 +73,8 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 1    | Slow_Fuel          | FuelFactorL, FuelFactorH, FuelShift |
 | 2    | Main_Ign           | IgnSlow, MapGainNow                 |
 | 3    | Slow_Charge's sum  | ChargeL, ChargeH                    |
+| 4    | Ign_Advance        | Handover: the maps summed           |
+| 5    | Ign_Offset's start | Handover: the target                |
 
 ## How it works
 
@@ -120,8 +122,9 @@ lookup in 64 broken off after its pick (and, one time in two, an input) by a rea
 (format 3) it asks as coproc_slow's Co_Task does, its inputs at random: its first output read 12 us
 after its last input, each output checked against the task worked out on core 1. map_task takes a
 task's cases as DME-Sim's UnitTasks.Cases does: every value of each input byte (a byte of bits 00h
-and FFh), then each of those bits alone over the first other input's range. Times are in cycles of
-the 270 MHz clock. An answer is 35 characters at most (a packet's payload).
+and FFh), then each of those bits alone over the first other input's range; beyond 2^18 of those,
+2^18 at random instead (each input in turn a byte of xorshift32's from 2545F491h). Times are in
+cycles of the 270 MHz clock. An answer is 35 characters at most (a packet's payload).
 
 ## Measured
 

@@ -607,6 +607,13 @@ static __force_inline uint32_t crc32_byte(uint32_t crc, uint32_t byte)
     return crc;
 }
 
+static __force_inline uint32_t xorshift(uint32_t seed)
+{
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    return seed ^ seed << 5;
+}
+
 // Every input of the map, the second inner on two axes: the values' CRC-32, as DME-Sim makes it from
 // MapUnit.Lookup, and each lookup's cycles with the interrupts held off, less the clock's own reads.
 static void UNIT_CODE(bench_map)(uint32_t map, uint32_t axes, uint32_t *crc, uint32_t *least, uint32_t *sum,
@@ -655,25 +662,32 @@ static __force_inline void bench_run(uint32_t task, uint32_t description, uint32
         *most = cycles;
 }
 
+static constexpr uint32_t INPUTS = 8;          // a task's inputs, at most
+static constexpr uint32_t CASES = 1u << 18;    // a task's exhaustive cases, at most; beyond, as many at random
+static constexpr uint32_t SEED = 0x2545F491;   // the random cases' (UnitTasks.Seed)
+
 // The task at each case of its inputs as DME-Sim's UnitTasks.Cases takes them: every value of each
 // input byte, the last fastest, a byte of bits (20h-2Fh) 00h and FFh; then each of its bits alone (the
-// other inputs 80h) over the first other input's range. The outputs' CRC-32, and the cases.
+// other inputs 80h) over the first other input's range. More than CASES of those: CASES cases at
+// random instead, each input a byte of xorshift's in turn. The outputs' CRC-32, and the cases.
 static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t *crc, uint32_t *least, uint32_t *sum,
                                   uint32_t *most, uint32_t *cases)
 {
-    uint32_t n = at(description), outputs = description + 1 + n, address[4], count[4], place[4] = {};
-    uint32_t flags = 4, other = 4;
-    if (n > 4)
-        n = 4; // (none has more)
+    uint32_t n = at(description), outputs = description + 1 + n, address[INPUTS], count[INPUTS], place[INPUTS] = {};
+    uint32_t flags = INPUTS, other = INPUTS, product = 1;
+    if (n > INPUTS)
+        n = INPUTS; // (none has more)
     for (uint32_t i = 0; i < n; i++)
     {
         address[i] = at(description + 1 + i) & 0x7F;
         bool bits = address[i] >= 0x20 && address[i] < 0x30;
         count[i] = bits ? 2 : 256;
-        if (bits && flags == 4)
+        if (bits && flags == INPUTS)
             flags = i;
-        if (!bits && other == 4)
+        if (!bits && other == INPUTS)
             other = i;
+        if (product <= CASES)
+            product *= count[i]; // past CASES it stays past it
     }
     systick_start();
     uint32_t t = systick_hw->cvr, empty = since(t);
@@ -682,6 +696,21 @@ static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t 
     *sum = 0;
     *most = 0;
     *cases = 0;
+    if (product + (flags < INPUTS && other < INPUTS ? 8 * 256 : 0) > CASES)
+    {
+        uint32_t seed = SEED;
+        for (*cases = 0; *cases < CASES; ++*cases)
+        {
+            for (uint32_t i = 0; i < n; i++)
+            {
+                seed = xorshift(seed);
+                bench_ram[address[i]] = seed & 0xFF;
+            }
+            bench_run(task, description, outputs, empty, crc, least, sum, most);
+        }
+        *crc = ~*crc;
+        return;
+    }
     for (;;)
     {
         for (uint32_t i = 0; i < n; i++)
@@ -694,7 +723,7 @@ static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t 
         if (i == 0)
             break;
     }
-    if (flags < 4 && other < 4)
+    if (flags < INPUTS && other < INPUTS)
         for (uint32_t bit = 0; bit < 8; bit++)
             for (uint32_t v = 0; v < 256; v++)
             {
@@ -737,13 +766,6 @@ static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32
     if (cycles > times->most)
         times->most = cycles;
     return start;
-}
-
-static __force_inline uint32_t xorshift(uint32_t seed)
-{
-    seed ^= seed << 13;
-    seed ^= seed >> 17;
-    return seed ^ seed << 5;
 }
 
 // A task as coproc_slow's Co_Task asks for it, its inputs at random: each output checked against the

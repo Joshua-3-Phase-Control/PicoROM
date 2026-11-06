@@ -47,6 +47,12 @@ __force_inline uint32_t bit(const Task &t, uint32_t address)
     return t.ram[0x20 + (address >> 3 & 0x0F)] >> (address & 7) & 1;
 }
 
+// The 8051's RAM byte whose address is the task's data byte i, as sent.
+__force_inline uint32_t byte_of(const Task &t, uint32_t i)
+{
+    return t.ram[get(t, i) & 0x7F];
+}
+
 __force_inline uint32_t value(const Task &t, uint32_t id)
 {
     return unit_map_value(id, t.ram);
@@ -130,6 +136,37 @@ static void UNIT_CODE(charge)(const Task &t)
     put(t, 1, (high >> 8) + (sum >> 8));                                // CLR A; ADDC A,B: ChargeH
 }
 
+// Ign_Advance: the advance's maps summed, each less 20 (Sum_Map). Starting: by speed, then by coolant;
+// at idle: by coolant (the cold map after a cold start), then by speed; off idle: the slow sum and the
+// main map (Sum_Add). Data: Ign_StartSpeed's id, Ign_StartCoolant's, Ign_IdleCoolant's,
+// Ign_IdleCoolant_Cold's, Ign_IdleSpeed's, Ign_Main's; StartMode's bit, IdleSwitch's, ColdStartIgn's;
+// IgnSlow's RAM address. Out: Handover.
+static void UNIT_CODE(advance)(const Task &t)
+{
+    uint32_t sum;
+    if (bit(t, get(t, 6)))                                              // JNB StartMode,Ign_Running
+        sum = sum_map(t, sum_map(t, 0, get(t, 0)), get(t, 1));
+    else if (bit(t, get(t, 7)))                                         // JNB IdleSwitch,Ign_OffIdle
+        sum = sum_map(t, sum_map(t, 0, get(t, bit(t, get(t, 8)) ? 3 : 2)), get(t, 4));
+    else
+        sum = (value(t, get(t, 5)) + byte_of(t, 9) - 0x14) & 0xFF;     // MOV B,IgnSlow; Map_Lookup_2D; Sum_Add
+    put(t, 0, sum);                                                     // MOV Handover,B
+}
+
+// Ign_Offset to Ign_Halve: the sum with the offset by speed (Sum_Map), clamped by Cal_AdvanceMax, or
+// when negative by the constant after it (Cal_AdvanceMin), each compared as unsigned bytes, then halved
+// with its sign (RRC). Data: Ign_SpeedOffset's id; Constants' address; Cal_AdvanceMax's place in
+// Constants; Handover's RAM address. Out: Handover.
+static void UNIT_CODE(offset)(const Task &t)
+{
+    uint32_t sum = sum_map(t, byte_of(t, 4), get(t, 0));                // MOV B,Handover; Sum_Map
+    uint32_t negative = sum >> 7;                                       // MOV C,ACC.7
+    uint32_t limit = at(t.rom, word(t, 1) + ((get(t, 3) + negative) & 0xFF)); // MOV A,#..; (INC A;) MOVC
+    uint32_t kept = negative ? (sum >= limit ? sum : limit)             // the sum less the limit, no borrow
+                             : (limit >= sum ? sum : limit);            // the limit less the sum, no borrow
+    put(t, 0, kept >> 1 | (kept & 0x80));                               // MOV C,ACC.7; RRC A
+}
+
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
 {
     uint32_t outputs = description + 1 + at(rom, description); // their count, then their addresses
@@ -142,6 +179,10 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         ign(t);
     else if (task == TASK_CHARGE)
         charge(t);
+    else if (task == TASK_ADVANCE)
+        advance(t);
+    else if (task == TASK_OFFSET)
+        offset(t);
     else
         return false;
     return true;

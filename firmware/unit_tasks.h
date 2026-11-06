@@ -13,10 +13,12 @@
 
 enum : uint32_t
 {
-    TASK_WARMUP, // rom_lean's Slow_WarmUp: the warm-up enrichment
-    TASK_FUEL,   // Slow_Fuel: the slow fuel factor
-    TASK_IGN,    // Main_Ign: the advance's slow sum and the MAP pulse's gain
-    TASK_CHARGE, // Slow_Charge: the charge's time
+    TASK_WARMUP,  // rom_lean's Slow_WarmUp: the warm-up enrichment
+    TASK_FUEL,    // Slow_Fuel: the slow fuel factor
+    TASK_IGN,     // Main_Ign: the advance's slow sum and the MAP pulse's gain
+    TASK_CHARGE,  // Slow_Charge: the charge's time
+    TASK_ADVANCE, // Ign_Advance: the advance's maps summed (the pipeline's stage 3)
+    TASK_OFFSET,  // Ign_Offset to Ign_Halve: the target, the sum with the speed's offset, clamped, halved
 };
 
 // Works task out from its description; false if there is no such task.
