@@ -47,6 +47,33 @@ byte first. The index holds 3 bytes a map: its address (high, low) and its axes.
 ready a few microseconds after the read that asks; DME-Sim's routine reads each 4 machine cycles
 (8 us) or more after.
 
+### Tasks (format 3)
+
+Format 3 adds tasks: work the board does for the 8051, rom_lean's slow work so far (DME-Sim's
+`experiments/coproc_slow`, `unit_tasks.cpp`). A task's index entry is its description's address and
+80h + its number. The 8051 picks it and sends its inputs as a map's. After the last input, each read
+gives what comes next:
+
+| After                    | The byte read                                        |
+|--------------------------|------------------------------------------------------|
+| the last input           | the RAM address of the task's first output (0: none) |
+| an output's address      | that output's value                                  |
+| an output's value        | the next output's address, or 0                      |
+| 0                        | (the page is as written again)                       |
+
+A description is the input count and the inputs' RAM addresses, the output count and the outputs'
+addresses, then the task's data: the maps it looks up (by id), the tables and constants it reads in
+the 8051's 8 KiB, the 8051 bits it tests. The board keeps the 8051's RAM bytes sent, the task reads
+them as rom_lean's routine reads its RAM, and puts its outputs there. DME-Sim checks each task
+against rom_lean's routine at every input, running this firmware's own unit bank.
+
+| Task | rom_lean's routine | Outputs                             |
+|------|--------------------|-------------------------------------|
+| 0    | Slow_WarmUp        | WarmUp                              |
+| 1    | Slow_Fuel          | FuelFactorL, FuelFactorH, FuelShift |
+| 2    | Main_Ign           | IgnSlow, MapGainNow                 |
+| 3    | Slow_Charge's sum  | ChargeL, ChargeH                    |
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
@@ -56,9 +83,11 @@ ready a few microseconds after the read that asks; DME-Sim's routine reads each 
   the unit is off its y holds no page. It takes the pins 26 ns after /OE falls: margin only, the
   DME having /CE grounded and the address out long before /PSEN falls.
 - Its interrupt (priority 0, above USB and the timers) runs on core 0 from the unit's bank and calls
-  nothing outside it. A pick or a send fills the page with the next answer, the last send looks the
-  map up and fills the page with its value, and the value's read (or a start) copies the page as
-  written back. A fill takes about 105 cycles; the interrupt's own times are under Measured.
+  nothing outside it (its files are built with no loop patterns and no jump tables, whose helpers
+  are in flash). A pick or a send fills the page with the next answer, the last send looks the map
+  up (or works the task out) and fills the page with its value, and the value's read (or a start)
+  copies the page as written back. A fill takes about 105 cycles; the interrupt's own times are
+  under Measured.
 - The PC reads and writes the image as it wrote it: the page is kept for it (the shadow), and a
   commit writes that. While the unit is on, the PC's bytes for the page reach the 8051 once the page
   is as written again (after the next lookup, or the 8051's start).
@@ -118,6 +147,7 @@ of 0000h can appear outside the benches.
 ## Open
 
 - Run it on a P28 in the DME.
+- The tasks have run in DME-Sim only; the bus bench and map_bench take maps alone.
 - A commit with the unit on (the shadow to flash) hasn't been tried on a board.
 - The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles (with the bus
   priority), slowing the unit's fills and copies of the page a little. map_bench runs with core 1

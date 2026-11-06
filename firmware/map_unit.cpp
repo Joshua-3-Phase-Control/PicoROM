@@ -1,17 +1,21 @@
 // The map unit (FEATURE_MAP_UNIT): the board looks maps up for the 8051, as DME-Sim's MapUnit models
-// it (experiments/coproc_maps there; docs/map_unit.md here). The board serves the 8051 the image's
-// first 8 KiB (addr_mask 0x1fff: the DME ties the socket's A13 high) and keeps its own memory after
-// them, which the 8051 never reads: from 2000h the mark ("MAPU", format 2, the window's page, the
-// number of maps, the index's address, high byte first), the index (each map's address and its axes)
-// and the maps. The window is one page of the 8 KiB, which the mark names. The socket has no write
-// line, so the 8051 asks by the addresses it reads there, and the unit fills the page with each
+// it (experiments/coproc_maps there; docs/map_unit.md here), and works out tasks for it (format 3:
+// rom_lean's slow work, unit_tasks.cpp; experiments/coproc_slow). The board serves the 8051 the
+// image's first 8 KiB (addr_mask 0x1fff: the DME ties the socket's A13 high) and keeps its own memory
+// after them, which the 8051 never reads: from 2000h the mark ("MAPU", format 2 or 3, the window's
+// page, the number of maps and tasks, the index's address, high byte first), the index (by id each
+// map's address and its axes, or a task's description's address and 80h + its number) and the maps
+// and descriptions. The window is one page of the 8 KiB, which the mark names. The socket has no
+// write line, so the 8051 asks by the addresses it reads there, and the unit fills the page with each
 // answer:
 //
-//   window + id   picks map id; the byte read is the page as written: by id, each map's first
+//   window + id   picks map or task id; the byte read is the page as written: by id, its first
 //                 input's RAM address
-//   window + v    sends v, the map's next input; the byte read is the next input's address, or 0
-//   window + any  after the last: the map's value at the inputs sent, rom_lean's Map_Lookup and
+//   window + v    sends v, the next input; the byte read is the address of the input after it, or 0
+//   window + any  after a map's last: its value at the inputs sent, rom_lean's Map_Lookup and
 //                 Map_Lookup_2D's bit for bit; then the page is as written again
+//   window + any  after a task's last: the RAM address of its first output, then its value, then
+//                 the next output's address, and so on; after 0 (no more) the page is as written again
 //
 // map_window (map_unit.pio) pushes A0-A7 of each read of the page once the read is over (shifted up a
 // bit), and of each read of page 0 (with a 1 below): 0000h, where the 8051 starts after a reset, puts
@@ -44,6 +48,7 @@
 #include "str_util.h"
 #include "system.h"
 #include "unit_ram.h"
+#include "unit_tasks.h"
 
 extern "C"
 {
@@ -56,12 +61,16 @@ static_assert(ROM_SIZE <= 0x30000, "the map unit's bank is the last one");
 static constexpr uint32_t MARK = 0x2000;          // the unit's own memory, after the 8051's 8 KiB
 static constexpr uint32_t EIGHT_KIB = 0x1FFF;     // the address mask the unit works with
 static constexpr uint32_t PAGE = 0x100;
+static constexpr uint32_t TASK = 0x80; // an index entry's kind: a task, its number below (format 3)
+static constexpr uint32_t MAP = ~0u;   // unit.task: a map picked
 
 enum : uint32_t
 {
-    PICK_DUE,  // waiting for a pick; the page as written
-    INPUT_DUE, // the map's inputs due
-    VALUE_DUE  // the page holds the value
+    PICK_DUE,    // waiting for a pick; the page as written
+    INPUT_DUE,   // the map's or the task's inputs due
+    VALUE_DUE,   // the page holds the map's value
+    ADDRESS_DUE, // the page holds the task's next output's RAM address, or 0: none
+    OUTPUT_DUE   // the page holds that output's value
 };
 
 // Cycles the interrupt took, from its start (map_cycles).
@@ -83,13 +92,18 @@ struct Unit
     volatile uint32_t lookups;
     volatile uint32_t starts; // reads of 0000h, the 8051's start
     volatile uint32_t served; // reads answered (the bus bench waits on it)
-    Cycles answers;           // a pick's, or a send's before the last
-    Cycles values;            // the last send's: the lookup, and the page filled with its value
-    Cycles restores;          // the value's read, or a start: the page as written again
+    Cycles answers;           // a pick's, a send's before the last, a task's output's
+    Cycles values;            // the last send's: the lookup or the task, and the page filled after
+    Cycles restores;          // the value's read, the end of a task's outputs, or a start: the page
+                              //   as written again
+    uint32_t task;            // the task picked (its number), or MAP (after the fields DME-Sim reads)
+    uint32_t output;          // the task's next output
+    volatile uint32_t tasks;  // tasks worked out
 };
 
 static Unit unit UNIT_DATA = {};
 static uint32_t shadow[PAGE / 4] UNIT_DATA = {}; // the page as the PC wrote it
+static uint8_t ram[0x80] UNIT_DATA = {};         // the 8051's RAM bytes a task was sent, and it made
 
 // ceil(2^16 / d): x / d = x * it >> 16, exact below 256. Made as the firmware is built, so the image of
 // the unit's bank holds it (DME-Sim runs that image).
@@ -176,6 +190,18 @@ static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t
     return lerp(here, cell(cells, (columns + 0x0A) & 0xFF, column_fraction), row_fraction);
 }
 
+// A map's entry in the index, by id.
+static __force_inline uint32_t entry_of(uint32_t id)
+{
+    return (at(MARK + 7) << 8 | at(MARK + 8)) + 3 * id;
+}
+
+uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes)
+{
+    uint32_t entry = entry_of(id), map = at(entry) << 8 | at(entry + 1), axes = at(entry + 2);
+    return map_unit_lookup(map, axes, bytes[at(map) & 0x7F], axes > 1 ? bytes[at(map + 9) & 0x7F] : 0);
+}
+
 // ---------------------------------------------------------------------------------------------------
 // The window: the interrupt and the page.
 
@@ -236,31 +262,84 @@ static __force_inline void as_written()
     unit.phase = PICK_DUE;
 }
 
+// The RAM address of the picked map's or task's input k (from 1), or 0 past its last. A map's are its
+// axes' first bytes; a task's description lists them after their count.
+static __force_inline uint32_t input_address(uint32_t k)
+{
+    if (k > unit.axes)
+        return 0;
+    return unit.task == MAP ? at(unit.map + 9 * (k - 1)) : at(unit.map + k);
+}
+
+// The RAM address of the picked task's output j (from 0), or 0 past its last: the description lists
+// them, after their count, after the inputs.
+static __force_inline uint32_t output_address(uint32_t j)
+{
+    uint32_t outputs = unit.map + 1 + unit.axes;
+    return j < at(outputs) ? at(outputs + 1 + j) : 0;
+}
+
 static __force_inline void pick(uint32_t id)
 {
     if (id >= at(MARK + 6))
-        return; // no map: still waiting for a pick
-    uint32_t entry = (at(MARK + 7) << 8 | at(MARK + 8)) + 3 * id;
+        return; // nothing by that id: still waiting for a pick
+    uint32_t entry = entry_of(id), kind = at(entry + 2);
     unit.map = at(entry) << 8 | at(entry + 1);
-    unit.axes = at(entry + 2);
+    unit.task = kind & TASK ? kind & ~TASK : MAP;
+    unit.axes = unit.task == MAP ? kind : at(unit.map); // the inputs
     unit.sent = 0;
     unit.phase = INPUT_DUE;
-    fill(unit.axes > 1 ? at(unit.map + 9) : 0); // the second input's address, or none
+    fill(input_address(2)); // the second input's address, or none
 }
 
-// The input sent; true when it was the last, and the page holds the map's value.
+// The input sent; true when it was the last, and the page holds the map's value or the task's first
+// output's address.
 static __force_inline bool send(uint32_t input)
 {
-    unit.inputs[unit.sent++] = input;
+    if (unit.task == MAP)
+        unit.inputs[unit.sent] = input;
+    else
+        ram[input_address(unit.sent + 1) & 0x7F] = input;
+    unit.sent++;
     if (unit.sent < unit.axes)
     {
-        fill(0); // no input after the next
+        fill(input_address(unit.sent + 2)); // the input's after the next, or none
         return false;
     }
-    fill(map_unit_lookup(unit.map, unit.axes, unit.inputs[0], unit.inputs[1]));
-    unit.phase = VALUE_DUE;
-    unit.lookups++;
+    if (unit.task == MAP)
+    {
+        fill(map_unit_lookup(unit.map, unit.axes, unit.inputs[0], unit.inputs[1]));
+        unit.phase = VALUE_DUE;
+        unit.lookups++;
+        return true;
+    }
+    unit_task(unit.task, unit.map, unit.rom, ram);
+    unit.tasks++;
+    unit.output = 0;
+    unit.phase = ADDRESS_DUE;
+    fill(output_address(0));
     return true;
+}
+
+// A read of a task's output's address (0: the end) or of its value: the page holds what comes next.
+static __force_inline Cycles *output()
+{
+    if (unit.phase == OUTPUT_DUE)
+    {
+        unit.output++;
+        unit.phase = ADDRESS_DUE;
+        fill(output_address(unit.output));
+        return &unit.answers;
+    }
+    uint32_t address = output_address(unit.output);
+    if (address == 0)
+    {
+        as_written();
+        return &unit.restores;
+    }
+    unit.phase = OUTPUT_DUE;
+    fill(ram[address & 0x7F]);
+    return &unit.answers;
 }
 
 static __force_inline void note(Cycles *cycles, uint32_t taken)
@@ -300,6 +379,8 @@ static void UNIT_CODE(map_unit_irq)()
         }
         else if (unit.phase == INPUT_DUE)
             cycles = send(read) ? &unit.values : &unit.answers;
+        else if (unit.phase != VALUE_DUE)
+            cycles = output();
         else
         {
             as_written(); // the value read
@@ -333,7 +414,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] != 2)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 3)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }
@@ -586,6 +667,8 @@ static void bus_run()
 {
     systick_start();
     uint32_t count = at(MARK + 6), index = at(MARK + 7) << 8 | at(MARK + 8), window = unit.window;
+    while (count > 0 && at(index + 3 * count - 1) & TASK)
+        count--; // the maps alone (the tasks come after them)
     uint32_t seed = 0x2545F491, id = 0, t = systick_hw->cvr;
     for (uint32_t n = 0; n < bus.want; n++)
     {
@@ -686,10 +769,10 @@ static bool map_of(uint32_t id, uint32_t *map, uint32_t *axes)
 {
     if (!unit.on || id >= at(MARK + 6))
         return false;
-    uint32_t entry = (at(MARK + 7) << 8 | at(MARK + 8)) + 3 * id;
+    uint32_t entry = entry_of(id);
     *map = at(entry) << 8 | at(entry + 1);
     *axes = at(entry + 2);
-    return true;
+    return !(*axes & TASK); // a map's
 }
 
 static uint32_t mean(uint64_t sum, uint32_t count)
