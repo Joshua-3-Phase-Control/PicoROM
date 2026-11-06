@@ -90,7 +90,23 @@ struct Unit
 
 static Unit unit UNIT_DATA = {};
 static uint32_t shadow[PAGE / 4] UNIT_DATA = {}; // the page as the PC wrote it
-static uint32_t reciprocal[256] UNIT_DATA = {};  // ceil(2^16 / d): x / d = x * it >> 16, exact below 256
+
+// ceil(2^16 / d): x / d = x * it >> 16, exact below 256. Made as the firmware is built, so the image of
+// the unit's bank holds it (DME-Sim runs that image).
+struct Reciprocals
+{
+    uint32_t of[256];
+};
+
+static constexpr Reciprocals make_reciprocals()
+{
+    Reciprocals r = {};
+    for (uint32_t d = 1; d < 256; d++)
+        r.of[d] = (0x10000 + d - 1) / d;
+    return r;
+}
+
+static const Reciprocals reciprocals __attribute__((section(".unit_ram.rodata"))) = make_reciprocals();
 
 // ---------------------------------------------------------------------------------------------------
 // The lookup, format 2 (format 1's maps): as MapUnit.Lookup and rom_lean's routines make it, from the
@@ -122,7 +138,7 @@ static __force_inline uint32_t place(uint32_t axis, uint32_t input)
     uint32_t index = x, remainder = 0; // DIV AB by 0 leaves A as it was, and B (0)
     if (step != 0)
     {
-        index = x * reciprocal[step] >> 16;
+        index = x * reciprocals.of[step] >> 16;
         remainder = x - index * step;
     }
     return ((index + start) & 0xFF) | ((remainder * factor) & 0xFF) << 8;
@@ -370,8 +386,6 @@ void map_unit_init(uint8_t *rom, uint32_t addr_mask)
 {
     paint_stack();
     memcpy(__unit_ram_start__, __unit_ram_source__, __unit_ram_end__ - __unit_ram_start__);
-    for (uint32_t d = 1; d < 256; d++)
-        reciprocal[d] = (0x10000 + d - 1) / d;
     unit.rom = rom;
     unit.mask = addr_mask & 0xFFFF;
     systick_start(); // core 0's, for map_cycles
