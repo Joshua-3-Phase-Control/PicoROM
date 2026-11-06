@@ -53,6 +53,11 @@ void pl_send_debug(const char *s, uint32_t v0, uint32_t v1);
 void pl_send_error(const char *s, uint32_t v0, uint32_t v1);
 void pl_send_packet(const Packet *pkt);
 
+// Whether a packet the board sends by itself (len bytes of payload) can go now without waiting,
+// leaving room for the answer to a request (usb_send waits for room, and the PC empties it only
+// as tud_task runs).
+bool pl_can_send_unasked(size_t len);
+
 // Activity tracking
 bool pl_check_activity();
 

@@ -112,6 +112,11 @@ void pl_send_error(const char *s, uint32_t v0, uint32_t v1)
     usb_send(&pkt, pkt.size + 2);
 }
 
+bool pl_can_send_unasked(size_t len)
+{
+    return tud_vendor_mounted() && tud_vendor_write_available() >= (len + 2) + (MAX_PKT_PAYLOAD + 2);
+}
+
 bool pl_check_activity()
 {
     if (activity_count != activity_report)

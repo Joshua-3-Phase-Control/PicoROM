@@ -63,4 +63,10 @@ void comms_begin_session(uint32_t addr, uint8_t *rom_base);
 void comms_end_session();
 bool comms_update(const uint8_t *data, uint32_t len, uint32_t timeout_ms);
 
+// The comms window (comms_mode window): see comms.cpp.
+bool comms_set_mode(const char *mode);
+const char *comms_get_mode();
+uint32_t comms_window_dropped();
+void comms_window_update();
+
 #endif // COMMS_H

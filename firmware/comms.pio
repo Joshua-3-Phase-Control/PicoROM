@@ -30,6 +30,29 @@ commit:
     push noblock
     jmp start
 
+; 10 instructions
+; The comms window (comms_mode window): each read of a 256-byte page of the ROM pushes its low byte,
+; once a read. A read is /OE and /CE both low. Nothing is written to the ROM.
+; in pins from the first OE pin (BASE_OE_PIN), shifting right; y = the window's page (address >> 8),
+; set by cpu. The two counts marked are set for the board's pins by pio_programs_init.
+.program comms_window
+.wrap_target
+idle:
+    wait 0 pin 0            ; /OE low
+    mov osr, pins           ; the pins from /OE, round to the address
+    out x, 2                ; /OE and /CE (on a board with one OE pin, the pin above, which reads 0)
+    jmp x-- read_over       ; not both low: not a read of the ROM
+public to_address:
+    out null, 6             ; set: from the OE pins to A0
+    out isr, 8              ; A0-A7
+public page_bits:
+    out x, 8                ; set: A8 and up (the lines addr_mask leaves out read 0)
+    jmp x!=y read_over      ; not the window
+    push noblock            ; the low byte; dropped, not waited on, with the fifo full
+read_over:
+    wait 1 pin 0            ; the read over: /OE high
+.wrap
+
 ; 15 instructions
 ; matching address in y, set by cpu
 .program comms_clock

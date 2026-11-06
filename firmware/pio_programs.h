@@ -44,6 +44,7 @@ struct PIOProgram
     pio_sm_config c = prg.config();
 
 extern PIOProgram prg_comms_detect;
+extern PIOProgram prg_comms_window;
 extern PIOProgram prg_comms_clock;
 extern PIOProgram prg_write_tca_bits;
 extern PIOProgram prg_data_output;

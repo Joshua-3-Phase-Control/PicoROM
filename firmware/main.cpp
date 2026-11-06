@@ -60,7 +60,7 @@ static Config config;
 
 static const char *parameter_names[] = {"name",          "rom_name",   "addr_mask", "rom_size",     "initial_reset",
                                         "default_reset", "reset",      "status",    "startup_time", "build_config",
-                                        "build_version", "build_time", nullptr};
+                                        "build_version", "build_time", "comms_mode",   "comms_dropped", nullptr};
 
 bool set_parameter(const char *name, const char *value)
 {
@@ -97,6 +97,10 @@ bool set_parameter(const char *name, const char *value)
             flash_save_config(&config);
             return true;
         }
+    }
+    else if (streq(name, "comms_mode"))
+    {
+        return comms_set_mode(value); // block or window, with no session open; not kept in flash
     }
     else if (streq(name, "reset"))
     {
@@ -164,6 +168,16 @@ bool get_parameter(const char *name, char *value, size_t value_size)
     else if (streq(name, "build_config"))
     {
         strcpyz(value, value_size, PICOROM_CONFIG_NAME);
+        return true;
+    }
+    else if (streq(name, "comms_mode"))
+    {
+        strcpyz(value, value_size, comms_get_mode());
+        return true;
+    }
+    else if (streq(name, "comms_dropped"))
+    {
+        snprintf(value, value_size, "%u", (unsigned)comms_window_dropped());
         return true;
     }
     else if (streq(name, "build_version"))
@@ -392,5 +406,6 @@ int main()
         }
 
         comms_update(nullptr, 0, 5000);
+        comms_window_update();
     }
 }

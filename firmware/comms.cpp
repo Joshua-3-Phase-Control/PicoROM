@@ -9,6 +9,9 @@
 
 #include "hardware/pio.h"
 #include "pico/time.h"
+#include "str_util.h"
+
+#include <tusb.h>
 
 FIFO<32> comms_out_fifo;
 FIFO<32> comms_in_fifo;
@@ -46,8 +49,41 @@ static_assert(sizeof(CommsRegisters) == 1024);
 static CommsRegisters *comms_reg = (CommsRegisters *)0x0;
 static uint32_t comms_reg_addr = 0;
 
+// The comms window (comms_mode window, comms.pio's comms_window): the low byte of each read of a
+// 256-byte page goes to the PC as CommsData, and nothing is written to the ROM. The bytes wait here
+// for the PC; past WINDOW_QUEUE they are dropped, so nothing waits on a PC that isn't reading. A
+// packet goes as WINDOW_PACKET bytes come, or once a millisecond with fewer; it carries no more,
+// so the 64-byte USB buffer keeps room for the answer to a request (pl_can_send_unasked).
+static constexpr uint32_t WINDOW_QUEUE = 1024;
+static constexpr uint32_t WINDOW_PACKET = 24;
+static constexpr uint32_t WINDOW_SEND_US = 1000;
+static FIFO<WINDOW_QUEUE> window_fifo;
+static bool window_mode = false;
+static volatile bool window_active = false;
+static uint32_t window_dropped = 0;
+static uint32_t window_sent_us = 0;
+
+static void comms_window_irq()
+{
+    PIO p = prg_comms_window.pio();
+    while (!pio_sm_is_rx_fifo_empty(p, prg_comms_window.sm))
+    {
+        uint8_t b = (uint8_t)pio_sm_get(p, prg_comms_window.sm);
+        if (window_fifo.is_full())
+            window_dropped++;
+        else
+            window_fifo.push(b);
+    }
+}
+
 void comms_irq_handler()
 {
+    if (window_active)
+    {
+        comms_window_irq();
+        return;
+    }
+
     uint32_t addr = pio_sm_get(prg_comms_detect.pio(), prg_comms_detect.sm);
     comms_reg->debug2 = addr;
     if (addr & 0x100)
@@ -101,6 +137,85 @@ static void pio_set_y(PIO p, uint sm, uint32_t v)
     }
     pio_sm_exec(p, sm, instr_mov);
     p->sm[sm].shiftctrl &= shift_save;
+}
+
+static void comms_window_stop()
+{
+    if (!window_active)
+        return;
+    PRG_LOCAL(prg_comms_window, p, sm, offset, cfg);
+    irq_set_enabled(PIO_IRQ_NUM(p, 0), false);
+    pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), false);
+    pio_sm_set_enabled(p, sm, false);
+    pio_sm_clear_fifos(p, sm);
+    window_active = false;
+    window_fifo.clear();
+}
+
+// A session's window: the 256-byte page of the ROM at the address. A session open is dropped, as a
+// block's is.
+static void comms_window_begin(uint32_t addr)
+{
+    comms_window_stop();
+    PRG_LOCAL(prg_comms_window, p, sm, offset, cfg);
+    sm_config_set_in_pins(&cfg, BASE_OE_PIN);
+    pio_sm_init(p, sm, offset, &cfg);
+    pio_set_y(p, sm, (addr & ADDR_MASK) >> 8);
+    window_fifo.clear();
+    window_sent_us = time_us_32();
+    window_active = true;
+    pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
+    irq_set_exclusive_handler(PIO_IRQ_NUM(p, 0), comms_irq_handler);
+    irq_set_enabled(PIO_IRQ_NUM(p, 0), true);
+    pio_sm_set_enabled(p, sm, true);
+}
+
+bool comms_set_mode(const char *mode)
+{
+    if (window_active || comms_reg != nullptr)
+        return false; // with no session open only
+    if (streq(mode, "block"))
+        window_mode = false;
+    else if (streq(mode, "window"))
+        window_mode = true;
+    else
+        return false;
+    return true;
+}
+
+const char *comms_get_mode()
+{
+    return window_mode ? "window" : "block";
+}
+
+uint32_t comms_window_dropped()
+{
+    return window_dropped;
+}
+
+void comms_window_update()
+{
+    if (!window_active)
+        return;
+    if (!tud_mounted())
+    {
+        comms_window_stop(); // USB gone: the session ends
+        return;
+    }
+    uint32_t now = time_us_32();
+    while (window_fifo.count() >= WINDOW_PACKET || (!window_fifo.is_empty() && now - window_sent_us >= WINDOW_SEND_US))
+    {
+        uint32_t count = window_fifo.count();
+        if (count > WINDOW_PACKET)
+            count = WINDOW_PACKET;
+        if (!pl_can_send_unasked(count))
+            break; // the PC isn't taking packets: the bytes wait, and past the queue are dropped
+        uint8_t bytes[WINDOW_PACKET];
+        for (uint32_t i = 0; i < count; i++)
+            bytes[i] = window_fifo.pop();
+        pl_send_payload(PacketType::CommsData, bytes, count);
+        window_sent_us = now;
+    }
 }
 
 static void comms_start_programs(uint32_t addr, CommsRegisters *regs)
@@ -203,6 +318,12 @@ static void update_comms_out(uint8_t *outbytes, int *outcount, int max_outcount)
 
 void comms_begin_session(uint32_t addr, uint8_t *rom_base)
 {
+    if (window_mode)
+    {
+        comms_window_begin(addr);
+        return;
+    }
+
     comms_out_fifo.clear();
     comms_in_fifo.clear();
     comms_out_deferred_ack = 0;
@@ -224,6 +345,7 @@ void comms_begin_session(uint32_t addr, uint8_t *rom_base)
 
 void comms_end_session()
 {
+    comms_window_stop();
     if (comms_reg == nullptr) return;
 
     comms_end_programs();
