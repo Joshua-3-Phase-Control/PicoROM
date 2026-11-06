@@ -13,7 +13,7 @@
 void map_unit_init(uint8_t *rom, uint32_t addr_mask);
 void map_unit_set_mask(uint32_t addr_mask);
 
-// The PC's writes and reads of the image: the unit's pages hold its answers, and the PC sees the
+// The PC's writes and reads of the image: the unit's page holds its answers, and the PC sees the
 // image as it wrote it there.
 void map_unit_write(uint32_t offset, const uint8_t *data, uint32_t size);
 void map_unit_read(uint32_t offset, uint8_t *into, uint32_t size);

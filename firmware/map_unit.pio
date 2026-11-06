@@ -1,11 +1,11 @@
-; 11 instructions
-; The map unit's window (FEATURE_MAP_UNIT, map_unit.cpp): each read of the image's 1 KiB at 3C00h
-; (/OE and /CE low, A10 and up 0Fh) pushes its A0-A9 once the read is over (/OE high), so an answer
-; the CPU writes never changes a byte the 8051 is reading. The pins are taken 7 cycles (26 ns at
-; 270 MHz) after /OE falls: margin only, as the DME grounds /CE and has the address out long before
-; /PSEN falls (951digit.pdf). In pins from the first OE pin, shifting right; y = 0Fh (3C00h >> 10),
-; set by cpu. The two counts marked are set for the board's pins as the program loads
-; (pio_programs.cpp).
+; 16 instructions
+; The map unit's window (FEATURE_MAP_UNIT, map_unit.cpp): each read of its page (/OE and /CE low, A8
+; and up y) pushes its A0-A7 once the read is over (/OE high), so an answer the CPU writes never
+; changes a byte the 8051 is reading; a read of 0000h, where the 8051 starts after a reset, pushes
+; FFFFFFFFh. The pins are taken 7 cycles (26 ns at 270 MHz) after /OE falls: margin only, as the DME
+; grounds /CE and has the address out long before /PSEN falls (951digit.pdf). In pins from the first
+; OE pin, shifting right; y = the window's page (address >> 8, 1 to 1Fh: inside the 8 KiB), set by
+; cpu. The two counts marked are set for the board's pins as the program loads (pio_programs.cpp).
 .program map_window
 .wrap_target
     wait 0 pin 0 [7]        ; /OE low, and 7 cycles more
@@ -14,12 +14,19 @@
     jmp x-- read_over       ; not both low: not a read of the ROM
 public to_address:
     out null, 6             ; set: from the OE pins to A0
-    out isr, 10             ; A0-A9
-public window_bits:
-    out x, 6                ; set: A10 and up (the lines addr_mask leaves out read 0)
+    out isr, 8              ; A0-A7
+public page_bits:
+    out x, 8                ; set: A8 and up (the lines addr_mask leaves out read 0)
+    jmp !x page_zero        ; page 0: the 8051's start?
     jmp x!=y read_over      ; not the window
+    jmp report
+page_zero:
+    mov x, isr
+    jmp x-- read_over       ; not 0000h
+    mov isr, ~null          ; 0000h: FFFFFFFFh
+report:
     wait 1 pin 0            ; the read over
-    push noblock            ; then A0-A9
+    push noblock            ; then A0-A7 (or the start)
 read_over:
     wait 1 pin 0            ; /OE high
 .wrap

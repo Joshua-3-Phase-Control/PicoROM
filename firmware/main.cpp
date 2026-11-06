@@ -63,8 +63,8 @@ static const char *parameter_names[] = {"name",          "rom_name",   "addr_mas
                                         "default_reset", "reset",      "status",    "startup_time", "build_config",
                                         "build_version", "build_time", "comms_mode",   "comms_dropped",
 #if defined(FEATURE_MAP_UNIT)
-                                        "map_unit",      "map_lookup", "map_bench", "map_bus",      "map_bus_cycles",
-                                        "map_cycles",    "map_stack",
+                                        "map_unit",      "map_counts", "map_lookup", "map_bench",   "map_bus",
+                                        "map_bus_cycles", "map_cycles", "map_stack",
 #endif
                                         nullptr};
 

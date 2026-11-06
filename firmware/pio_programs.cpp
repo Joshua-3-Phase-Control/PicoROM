@@ -40,13 +40,12 @@ static void set_comms_window_counts()
     p->instr_mem[prg_comms_window.offset + comms_window_offset_page_bits] = pio_encode_out(pio_x, N_ADDR_PINS - 8);
 }
 
-// map_window's two counts for this board's pins (map_unit.pio), as comms_window's: to A0, then A10 up.
-static_assert(N_ADDR_PINS > 10, "the map window's count of the lines above A9 is 1 to 32");
+// map_window's two counts for this board's pins (map_unit.pio), as comms_window's: to A0, then A8 up.
 static void set_map_window_counts()
 {
     PIO p = prg_map_window.pio();
     p->instr_mem[prg_map_window.offset + map_window_offset_to_address] = pio_encode_out(pio_null, WINDOW_TO_ADDRESS);
-    p->instr_mem[prg_map_window.offset + map_window_offset_window_bits] = pio_encode_out(pio_x, N_ADDR_PINS - 10);
+    p->instr_mem[prg_map_window.offset + map_window_offset_page_bits] = pio_encode_out(pio_x, N_ADDR_PINS - 8);
 }
 
 void pio_programs_reset()

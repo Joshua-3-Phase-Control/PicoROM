@@ -3,6 +3,7 @@
 A build of the fork's firmware (2.0-map, with 2.0-window's comms window) in which the board looks
 maps up for the DME's 8051: DME-Sim's map unit prototype (its `experiments/coproc_maps` and
 `MapUnit`) on an RP2040. The 8051 keeps a byte a map; the maps, and the lookups, are the board's.
+Nothing on the DME changes: the 8051 asks through one page of its 8 KiB.
 
 ## Builds
 
@@ -24,36 +25,41 @@ powershell -ExecutionPolicy Bypass -File firmware/load_uf2.ps1 -Board dme `
 
 ## Using it
 
-1. Wire the 8051's A13 (P2.5) to the socket's pin 26, and set `addr_mask` to `0x3fff`. The DME
-   ties pin 26 to +5 V (and /CE to ground: 951digit.pdf), and the owner rules out changing it, so
-   this build is a measurement: see Open.
-2. Write an image whose second 8 KiB holds the unit's maps, index and mark (DME-Sim's
-   `tools/coproc_maps/make_coproc.py` makes rom_lean's). The unit is on while the mark is there
-   and A13 is served.
-3. The 8051 asks by the addresses it reads, the socket having no write line:
+1. Write an image whose first 8 KiB is the 8051's and whose second holds the unit's mark, index and
+   maps (DME-Sim's `tools/coproc_maps/make_coproc.py` makes rom_lean's), and set `addr_mask` to
+   `0x1fff`, as for any 2764 image: the DME ties the socket's A13-A15 high (951digit.pdf), so the
+   8051 reads only the first 8 KiB and the rest is the board's own. The unit is on while the mark
+   is there and the mask is 0x1fff.
+2. The 8051 asks by the addresses it reads in the window, a page of its 8 KiB that the mark names,
+   the socket having no write line. The unit fills the page with each answer:
 
-| Read       | Asks                    | The byte read                                       |
-|------------|-------------------------|-----------------------------------------------------|
-| 3C00h + id | for map id              | its first input's RAM address                       |
-| 3D00h + v  | v, the map's next input | the next input's RAM address, or 0                  |
-| 3E00h      | for the map's value     | as rom_lean's Map_Lookup or Map_Lookup_2D, exactly  |
-| 3F00h      | (the mark, not read)    | "MAPU", format 1, the maps, the index's address     |
+| Read          | Asks                         | The byte read                                  |
+|---------------|------------------------------|------------------------------------------------|
+| window + id   | for map id                   | the page as written: its first input's address |
+| window + v    | v, the map's next input      | the next input's RAM address, or 0             |
+| window + any  | after the last: the value    | as rom_lean's Map_Lookup or Map_Lookup_2D      |
+| 0000h         | nothing: the 8051's start    | the image's (the page as written again after)  |
 
-The index holds 3 bytes a map: its address (high, low) and its axes. An answer is ready a few
-microseconds after the read that asks; DME-Sim's routine reads each 4 machine cycles (8 us) or more
-after.
+After the value the page is as written again, and the unit waits for a pick. The mark, at 2000h:
+"MAPU", format 2, the window's page (1 to 1Fh), the number of maps and the index's address, high
+byte first. The index holds 3 bytes a map: its address (high, low) and its axes. An answer is
+ready a few microseconds after the read that asks; DME-Sim's routine reads each 4 machine cycles
+(8 us) or more after.
 
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
-  load) pushes A0-A9 of each read of 3C00h-3FFFh once the read is over, so an answer never changes
-  a byte the 8051 is reading. It takes the pins 26 ns after /OE falls: margin only, the DME having
-  /CE grounded and the address out long before /PSEN falls.
+  load) pushes A0-A7 of each read of the window's page once the read is over, so an answer never
+  changes a byte the 8051 is reading, and FFFFFFFFh for a read of 0000h. It takes the pins 26 ns
+  after /OE falls: margin only, the DME having /CE grounded and the address out long before /PSEN
+  falls.
 - Its interrupt (priority 0, above USB and the timers) runs on core 0 from the unit's bank and calls
-  nothing outside it. A pick fills the input page with the next answer; the last send looks the map
-  up and fills the value page. A page fills 16 bytes a store, in about 105 cycles.
-- The PC reads and writes the image as it wrote it: the three pages keep a copy for it (the shadow),
-  and a commit writes that copy to flash.
+  nothing outside it. A pick or a send fills the page with the next answer, the last send looks the
+  map up and fills the page with its value, and the value's read (or a start) copies the page as
+  written back. A fill takes about 105 cycles; the interrupt's own times are under Measured.
+- The PC reads and writes the image as it wrote it: the page is kept for it (the shadow), and a
+  commit writes that. While the unit is on, the PC's bytes for the page reach the 8051 once the page
+  is as written again (after the next lookup, or the 8051's start).
 - The main stack is 1,536 bytes in these builds; the comms window's queue moved to the unit's bank
   to make room. With 640, as in the stock builds, a parameter's answer in the USB callback with an
   interrupt on top ran past the stack into TinyUSB's state, and USB stopped; the deepest since has
@@ -63,49 +69,57 @@ after.
 
 | Name           | Set               | Get                                                       |
 |----------------|-------------------|-----------------------------------------------------------|
-| map_unit       |                   | off, or the maps and the lookups made                     |
+| map_unit       |                   | off, or the maps and the window                           |
+| map_counts     |                   | the lookups made and the starts seen                      |
 | map_lookup     | id,first[,second] | the value and its cycles                                  |
 | map_bench      | id                | every input: the values' CRC-32, cycles least, mean, most |
 | map_bus        | n                 | the bus bench: n lookups, then done, wrong, late, lost    |
-| map_bus_cycles |                   | its times from each read's end: mean and most             |
-| map_cycles     |                   | the interrupt's own times since start (in a car too)      |
+| map_bus_cycles |                   | its times from each read's end, by kind: mean and most    |
+| map_cycles     |                   | the interrupt's own times by kind since start             |
 | map_probe      | address           | one read: the pins, map_window's place, reads answered    |
 | map_stack      |                   | how much of the main stack has never been used            |
 
-The bus bench and the probe make reads on the board itself, through the GPIO input overrides: no pin
-is driven and the data buffer is held off, but the board serves no 8051 meanwhile. Core 1 plays the
-8051, reading as coproc_maps' routine does: each read 465 ns long, one every 8 us. Times are in
-cycles of the 270 MHz clock.
+The kinds: a pick or a send before the last; the last send (the lookup); the page as written again
+(the value's read, or a start). The bus bench and the probe make reads on the board itself, through
+the GPIO input overrides: no pin is driven and the data buffer is held off, but the board serves
+no 8051 meanwhile. Core 1 plays the 8051, reading as coproc_maps' routine does: each read 465 ns
+long, one every 8 us, 20 us between lookups, and one lookup in 64 broken off after its pick (and,
+one time in two, an input) by a read of 0000h. Times are in cycles of the 270 MHz clock. An
+answer is 35 characters at most (a packet's payload).
 
 ## Measured
 
-A POG (RP2040 at 270 MHz) with coproc_maps' image for the 951 (42 maps), 2026-11-06, by DME-Sim's
+A POG (RP2040 at 270 MHz) with coproc_maps' images, 2026-11-06, by DME-Sim's
 `tools/coproc_maps/BoardCheck`:
 
-- Every map at every input (467,712 lookups) gives MapUnit.Lookup's value, the 944's image's too.
-- A lookup takes 134 cycles (0.50 us) on one axis, 154 at most; 243 (0.90 us) on two, 293 (1.09 us)
-  at most.
-- The bus bench, 200,000 lookups (633,000 reads of the window) with USB quiet, then as many with the
-  PC reading the image throughout: none wrong, none late, none lost.
+- Every map at every input (467,712 lookups an image) gives MapUnit.Lookup's value, both cars.
+- A lookup takes 127 cycles (0.47 us) on one axis, 147 at most; 238 (0.88 us) on two, 287 (1.06
+  us) at most.
+- The bus bench, each image: 200,000 lookups (and 3,125 broken off by a start) with USB quiet, then
+  as many with the PC reading the image throughout: none wrong, none late, none lost.
 
 | From the end of the 8051's read to the answer | Mean    | Most, USB quiet | Most, USB busy |
 |-----------------------------------------------|---------|-----------------|----------------|
-| A pick's or a send's (the input page)         | 0.67 us | 2.23 us         | 2.58 us        |
-| The lookup's (the value page)                 | 1.46 us | 3.24 us         | 3.29 us        |
+| A pick's, or a send's before the last         | 0.91 us | 4.24 us         | 3.93 us        |
+| The last send's (the lookup)                  | 1.44 us | 4.38 us         | 4.25 us        |
+| The page as written again (value, start)      | 1.18 us | 5.56 us         | 5.86 us        |
 
-The 8051 reads the next answer 7.5 us after a read ends. The interrupt itself takes 0.41 us (0.76
-at most) for a pick and 1.20 us (1.73) for a lookup; the rest is reaching it while core 0 finishes
-what it was doing.
+The 8051 reads 7.5 us after a pick or a send ends, and 19.5 us or more after the value. The
+interrupt itself takes 0.65 us (0.70 at most) for a pick or a send, 1.14 us (1.68) for the lookup
+and 0.90 us to put the page back; the rest is the time to reach it (core 0 finishing what it was
+doing) and to see the answer (the bench's core 1 polls for it, running from flash). The unit saw
+one start more than the benches made in one run: with no DME on its pins the board's inputs float,
+and a read of 0000h can appear outside the benches.
 
 ## Open
 
-- No A13 wire (owner, 2026-11-06: no change to the DME). The window goes inside the 8 KiB, as the
-  comms window does, and the maps into the board's own memory, where only the unit reads them.
 - Run it on a P28 in the DME.
 - A commit with the unit on (the shadow to flash) hasn't been tried on a board.
-- The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles, slowing the
-  lookup's reads of the maps a little. map_bench runs with core 1 serving, so its times are a car's.
+- The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles (with the bus
+  priority), slowing the unit's fills and copies of the page a little. map_bench runs with core 1
+  serving, so its times are a car's.
 - `picorom()` takes one define after the config: the 100ns builds have never had
   FEATURE_STABLE_ADDRESS (upstream's too). The map builds pass theirs as one list.
 - The stock builds' 640-byte stack may be short as well: by the compiler's figures, a parameter's
   snprintf in the USB callback is about 540 bytes deep before an interrupt comes on top.
+- `build_time` is set when CMake configures, so a rebuild keeps the time before.
