@@ -104,6 +104,7 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | map_counts     |                   | the lookups made and the starts seen                      |
 | map_lookup     | id,first[,second] | the value and its cycles                                  |
 | map_bench      | id                | every input: the values' CRC-32, cycles least, mean, most |
+| map_task       | id                | a task's cases: the outputs' CRC-32, cycles as map_bench  |
 | map_bus        | n                 | the bus bench: n lookups, then done, wrong, late, lost    |
 | map_bus_cycles |                   | its times from each read's end, by kind: mean and most    |
 | map_cycles     |                   | the interrupt's own times by kind since start             |
@@ -115,8 +116,12 @@ The kinds: a pick or a send before the last; the last send (the lookup); the pag
 the GPIO input overrides (`bus_bench.cpp`, shared with the snoop's): no pin is driven and the data
 buffer is held off, but the board serves no 8051 meanwhile. Core 1 plays the 8051, reading as
 coproc_maps' routine does: each read 465 ns long, one every 8 us, 20 us between lookups, and one
-lookup in 64 broken off after its pick (and, one time in two, an input) by a read of 0000h. Times
-are in cycles of the 270 MHz clock. An answer is 35 characters at most (a packet's payload).
+lookup in 64 broken off after its pick (and, one time in two, an input) by a read of 0000h. A task
+(format 3) it asks as coproc_slow's Co_Task does, its inputs at random: its first output read 12 us
+after its last input, each output checked against the task worked out on core 1. map_task takes a
+task's cases as DME-Sim's UnitTasks.Cases does: every value of each input byte (a byte of bits 00h
+and FFh), then each of those bits alone over the first other input's range. Times are in cycles of
+the 270 MHz clock. An answer is 35 characters at most (a packet's payload).
 
 ## Measured
 
@@ -147,7 +152,7 @@ of 0000h can appear outside the benches.
 ## Open
 
 - Run it on a P28 in the DME.
-- The tasks have run in DME-Sim only; the bus bench and map_bench take maps alone.
+- The tasks on a board: map_task and the bus bench take them, not yet run.
 - A commit with the unit on (the shadow to flash) hasn't been tried on a board.
 - The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles (with the bus
   priority), slowing the unit's fills and copies of the page a little. map_bench runs with core 1

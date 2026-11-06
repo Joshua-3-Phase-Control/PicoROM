@@ -559,6 +559,8 @@ void map_unit_show()
 // of the system clock.
 
 static constexpr uint32_t GAP = 4 * MACHINE_CYCLE;                      // a read to the next, at least
+static constexpr uint32_t TASK_GAP = 6 * MACHINE_CYCLE;                 // a task's last input to its first
+                                                                        //   output (coproc_slow's Co_Task)
 static constexpr uint32_t PAUSE = 10 * MACHINE_CYCLE;                   // from a lookup to the next
 static constexpr uint32_t LOST = 50 * CYCLES_PER_US;                    // no answer by then: lost
 
@@ -571,9 +573,9 @@ enum : uint32_t
 
 enum : uint32_t
 {
-    ANSWER, // a pick's or a send's before the last: the next read GAP after
-    VALUE,  // the last send's: the lookup, the next read GAP after
-    RESTORE // the value's read, or a start: the page as written, the next lookup PAUSE after
+    ANSWER, // a pick's, a send's before the last, a task's output's
+    VALUE,  // the last send's: the lookup or the task
+    RESTORE // the value's read, a task's last, or a start: the page as written again
 };
 
 struct Times
@@ -593,6 +595,9 @@ struct Bus
 static Bus bus UNIT_DATA = {};
 static char bench_text[40] UNIT_DATA = {};
 static char lookup_text[40] UNIT_DATA = {};
+static char task_text[40] UNIT_DATA = {};
+static uint8_t bench_ram[0x80] UNIT_DATA = {}; // the 8051's RAM bytes for map_task's runs
+static uint8_t bus_ram[0x80] = {};             // core 1's for the bus bench's tasks
 
 static __force_inline uint32_t crc32_byte(uint32_t crc, uint32_t byte)
 {
@@ -631,9 +636,83 @@ static void UNIT_CODE(bench_map)(uint32_t map, uint32_t axes, uint32_t *crc, uin
     *crc = ~*crc;
 }
 
+// One of map_task's runs, from the inputs in bench_ram: timed as bench_map times a lookup, its outputs
+// into the CRC.
+static __force_inline void bench_run(uint32_t task, uint32_t description, uint32_t outputs, uint32_t empty,
+                                     uint32_t *crc, uint32_t *least, uint32_t *sum, uint32_t *most)
+{
+    uint32_t ints = save_and_disable_interrupts();
+    uint32_t start = systick_hw->cvr;
+    unit_task(task, description, unit.rom, bench_ram);
+    uint32_t cycles = since(start) - empty;
+    restore_interrupts(ints);
+    for (uint32_t j = 0; j < at(outputs); j++)
+        *crc = crc32_byte(*crc, bench_ram[at(outputs + 1 + j) & 0x7F]);
+    *sum += cycles;
+    if (cycles < *least)
+        *least = cycles;
+    if (cycles > *most)
+        *most = cycles;
+}
+
+// The task at each case of its inputs as DME-Sim's UnitTasks.Cases takes them: every value of each
+// input byte, the last fastest, a byte of bits (20h-2Fh) 00h and FFh; then each of its bits alone (the
+// other inputs 80h) over the first other input's range. The outputs' CRC-32, and the cases.
+static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t *crc, uint32_t *least, uint32_t *sum,
+                                  uint32_t *most, uint32_t *cases)
+{
+    uint32_t n = at(description), outputs = description + 1 + n, address[4], count[4], place[4] = {};
+    uint32_t flags = 4, other = 4;
+    if (n > 4)
+        n = 4; // (none has more)
+    for (uint32_t i = 0; i < n; i++)
+    {
+        address[i] = at(description + 1 + i) & 0x7F;
+        bool bits = address[i] >= 0x20 && address[i] < 0x30;
+        count[i] = bits ? 2 : 256;
+        if (bits && flags == 4)
+            flags = i;
+        if (!bits && other == 4)
+            other = i;
+    }
+    systick_start();
+    uint32_t t = systick_hw->cvr, empty = since(t);
+    *crc = 0xFFFFFFFF;
+    *least = 0xFFFFFFFF;
+    *sum = 0;
+    *most = 0;
+    *cases = 0;
+    for (;;)
+    {
+        for (uint32_t i = 0; i < n; i++)
+            bench_ram[address[i]] = count[i] == 2 ? (place[i] ? 0xFF : 0x00) : place[i];
+        bench_run(task, description, outputs, empty, crc, least, sum, most);
+        ++*cases;
+        uint32_t i = n;
+        while (i > 0 && ++place[i - 1] == count[i - 1])
+            place[--i] = 0;
+        if (i == 0)
+            break;
+    }
+    if (flags < 4 && other < 4)
+        for (uint32_t bit = 0; bit < 8; bit++)
+            for (uint32_t v = 0; v < 256; v++)
+            {
+                for (uint32_t i = 0; i < n; i++)
+                    bench_ram[address[i]] = 0x80;
+                bench_ram[address[flags]] = 1u << bit;
+                bench_ram[address[other]] = v;
+                bench_run(task, description, outputs, empty, crc, least, sum, most);
+                ++*cases;
+            }
+    *crc = ~*crc;
+}
+
 // A read wait after the one that started at after: checked against what the 8051 should read, then
-// the unit's answer timed from the read's end. Returns when the read started.
-static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32_t expect, uint32_t kind)
+// the unit's answer timed from the read's end, late if not in place due after the read's start (the
+// next read's). Returns when the read started.
+static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32_t expect, uint32_t kind,
+                         uint32_t due)
 {
     while (since(after) < wait)
     {
@@ -650,7 +729,7 @@ static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32
         bus.lost++;
         return start;
     }
-    if (cycles > (kind == RESTORE ? PAUSE : GAP) - READ_CYCLES)
+    if (cycles > due - READ_CYCLES)
         bus.late++; // after the next read would have begun
     Times *times = &bus.times[kind];
     times->count++;
@@ -660,38 +739,73 @@ static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32
     return start;
 }
 
-// Core 1: each map in turn at random inputs, as coproc_maps' Map_Lookup reads them. One lookup in 64
-// is broken off after its pick (and, one time in two, an input) by a read of 0000h, as the 8051's
-// start after a reset would; the lookup after it must be right.
+static __force_inline uint32_t xorshift(uint32_t seed)
+{
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    return seed ^ seed << 5;
+}
+
+// A task as coproc_slow's Co_Task asks for it, its inputs at random: each output checked against the
+// task worked out here (core 1's own RAM bytes). The first output read 6 machine cycles after the last
+// send, the rest 4 or more apart. Returns when the last read started.
+static uint32_t bus_task(uint32_t t, uint32_t window, uint32_t id, uint32_t task, uint32_t description, uint32_t *seed)
+{
+    uint32_t n = at(description), outputs = description + 1 + n;
+    for (uint32_t k = 1; k <= n; k++)
+    {
+        *seed = xorshift(*seed);
+        bus_ram[at(description + k) & 0x7F] = *seed & 0xFF;
+    }
+    unit_task(task, description, unit.rom, bus_ram);
+    t = bus_step(t, PAUSE, window + id, at(description + 1), ANSWER, GAP);
+    for (uint32_t k = 1; k <= n; k++) // send k: the byte read is input k + 1's address, or 0
+        t = bus_step(t, GAP, window + bus_ram[at(description + k) & 0x7F], k < n ? at(description + 1 + k) : 0,
+                     k < n ? ANSWER : VALUE, k < n ? GAP : TASK_GAP);
+    uint32_t wait = TASK_GAP;
+    for (uint32_t j = 0; j < at(outputs); j++)
+    {
+        uint32_t address = at(outputs + 1 + j) & 0x7F;
+        t = bus_step(t, wait, window, address, ANSWER, GAP);
+        t = bus_step(t, GAP, window + address, bus_ram[address], ANSWER, GAP);
+        wait = GAP;
+    }
+    return bus_step(t, wait, window, 0, RESTORE, PAUSE); // the 0 after the last output: the page as written
+}
+
+// Core 1: each map and task in turn at random inputs, as coproc_maps' Map_Lookup and coproc_slow's
+// Co_Task read them. One lookup in 64 is broken off after its pick (and, one time in two, an input) by
+// a read of 0000h, as the 8051's start after a reset would; the lookup after it must be right.
 static void bus_run()
 {
     systick_start();
     uint32_t count = at(MARK + 6), index = at(MARK + 7) << 8 | at(MARK + 8), window = unit.window;
-    while (count > 0 && at(index + 3 * count - 1) & TASK)
-        count--; // the maps alone (the tasks come after them)
     uint32_t seed = 0x2545F491, id = 0, t = systick_hw->cvr;
     for (uint32_t n = 0; n < bus.want; n++)
     {
         uint32_t entry = index + 3 * id;
         uint32_t map = at(entry) << 8 | at(entry + 1), axes = at(entry + 2);
-        seed ^= seed << 13;
-        seed ^= seed >> 17;
-        seed ^= seed << 5;
-        uint32_t first = seed & 0xFF, second = seed >> 8 & 0xFF;
-        uint32_t next = axes > 1 ? at(map + 9) : 0; // the answer to the first input
-        if ((n & 63) == 63)
+        if (axes & TASK)
+            t = bus_task(t, window, id, axes & ~TASK, map, &seed);
+        else
         {
-            t = bus_step(t, PAUSE, window + id, at(map), ANSWER);
-            if (seed & 0x10000)
-                t = bus_step(t, GAP, window + (second ^ 0x5A), next, axes > 1 ? ANSWER : VALUE);
-            t = bus_step(t, GAP, 0, at(0), RESTORE);
+            seed = xorshift(seed);
+            uint32_t first = seed & 0xFF, second = seed >> 8 & 0xFF;
+            uint32_t next = axes > 1 ? at(map + 9) : 0; // the answer to the first input
+            if ((n & 63) == 63)
+            {
+                t = bus_step(t, PAUSE, window + id, at(map), ANSWER, GAP);
+                if (seed & 0x10000)
+                    t = bus_step(t, GAP, window + (second ^ 0x5A), next, axes > 1 ? ANSWER : VALUE, GAP);
+                t = bus_step(t, GAP, 0, at(0), RESTORE, PAUSE);
+            }
+            uint32_t value = map_unit_lookup(map, axes, first, second);
+            t = bus_step(t, PAUSE, window + id, at(map), ANSWER, GAP);
+            t = bus_step(t, GAP, window + first, next, axes > 1 ? ANSWER : VALUE, GAP);
+            if (axes > 1)
+                t = bus_step(t, GAP, window + second, 0, VALUE, GAP);
+            t = bus_step(t, GAP, window, value, RESTORE, PAUSE);
         }
-        uint32_t value = map_unit_lookup(map, axes, first, second);
-        t = bus_step(t, PAUSE, window + id, at(map), ANSWER);
-        t = bus_step(t, GAP, window + first, next, axes > 1 ? ANSWER : VALUE);
-        if (axes > 1)
-            t = bus_step(t, GAP, window + second, 0, VALUE);
-        t = bus_step(t, GAP, window, value, RESTORE);
         bus.done = n + 1;
         if (++id == count)
             id = 0;
@@ -808,6 +922,19 @@ bool map_unit_set_parameter(const char *name, const char *value)
                  (unsigned)((sum + count / 2) / count), (unsigned)most);
         return true;
     }
+    if (streq(name, "map_task"))
+    {
+        if (!unit.on || args[0] >= at(MARK + 6))
+            return false;
+        uint32_t entry = entry_of(args[0]), kind = at(entry + 2);
+        if (!(kind & TASK))
+            return false; // a map's id
+        uint32_t crc, least, sum, most, cases;
+        bench_task(kind & ~TASK, at(entry) << 8 | at(entry + 1), &crc, &least, &sum, &most, &cases);
+        snprintf(task_text, sizeof(task_text), "crc %08x cycles %u %u %u", (unsigned)crc, (unsigned)least,
+                 (unsigned)((sum + cases / 2) / cases), (unsigned)most);
+        return true;
+    }
     if (streq(name, "map_bus"))
         return bus_start(args[0]);
     if (streq(name, "map_probe"))
@@ -843,6 +970,11 @@ bool map_unit_get_parameter(const char *name, char *value, size_t value_size)
     if (streq(name, "map_bench"))
     {
         strcpyz(value, value_size, bench_text[0] ? bench_text : "none");
+        return true;
+    }
+    if (streq(name, "map_task"))
+    {
+        strcpyz(value, value_size, task_text[0] ? task_text : "none");
         return true;
     }
     if (streq(name, "map_bus"))
