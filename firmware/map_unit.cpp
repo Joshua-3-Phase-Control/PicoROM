@@ -951,10 +951,16 @@ bool map_unit_get_parameter(const char *name, char *value, size_t value_size)
 {
     if (streq(name, "map_unit"))
     {
-        if (unit.on)
-            snprintf(value, value_size, "%u maps, window %04x", (unsigned)at(MARK + 6), (unsigned)unit.window);
-        else
+        if (!unit.on)
             strcpyz(value, value_size, "off");
+        else
+        {
+            uint32_t count = at(MARK + 6), maps = 0;
+            while (maps < count && !(at(entry_of(maps) + 2) & TASK))
+                maps++; // the tasks come after the maps
+            snprintf(value, value_size, "%u maps, %u tasks, window %04x", (unsigned)maps, (unsigned)(count - maps),
+                     (unsigned)unit.window);
+        }
         return true;
     }
     if (streq(name, "map_counts"))

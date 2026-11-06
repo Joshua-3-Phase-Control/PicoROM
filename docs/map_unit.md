@@ -149,10 +149,17 @@ doing) and to see the answer (the bench's core 1 polls for it). The most is a fe
 more than the benches made in one run: with no DME on its pins the board's inputs float, and a read
 of 0000h can appear outside the benches.
 
+The tasks (e7406ca, coproc_slow's 951 image, 2026-11-06): each task's outputs at each of its cases
+(map_task) have the CRC-32 of rom_lean's routine's. A task takes 265 to 308 cycles (Slow_WarmUp), 420
+to 552 (Slow_Fuel), 628 to 726 (Main_Ign) and 311 to 350 (Slow_Charge). On the bus bench, with the
+tasks among the maps: 200,000 requests, USB quiet and busy, none wrong, late or lost; the last send's
+answer (a lookup's or a task's) 1.65 us on average, 4.4 us at most, and the interrupt itself 3.66 us at
+most (a task's 12 us before the 8051 reads its first output).
+
 ## Open
 
 - Run it on a P28 in the DME.
-- The tasks on a board: map_task and the bus bench take them, not yet run.
+- The tasks on a P28 in a DME (run on a POG's benches only).
 - A commit with the unit on (the shadow to flash) hasn't been tried on a board.
 - The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles (with the bus
   priority), slowing the unit's fills and copies of the page a little. map_bench runs with core 1
