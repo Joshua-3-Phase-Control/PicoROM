@@ -24,8 +24,9 @@ powershell -ExecutionPolicy Bypass -File firmware/load_uf2.ps1 -Board dme `
 
 ## Using it
 
-1. Wire the 8051's A13 (P2.5) to the socket's pin 26 (Motronic Link's M8 wire), and set
-   `addr_mask` to `0x3fff`.
+1. Wire the 8051's A13 (P2.5) to the socket's pin 26, and set `addr_mask` to `0x3fff`. The DME
+   ties pin 26 to +5 V (and /CE to ground: 951digit.pdf), and the owner rules out changing it, so
+   this build is a measurement: see Open.
 2. Write an image whose second 8 KiB holds the unit's maps, index and mark (DME-Sim's
    `tools/coproc_maps/make_coproc.py` makes rom_lean's). The unit is on while the mark is there
    and A13 is served.
@@ -46,8 +47,8 @@ after.
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
   load) pushes A0-A9 of each read of 3C00h-3FFFh once the read is over, so an answer never changes
-  a byte the 8051 is reading. It takes the pins 26 ns after /OE falls, so a /CE that falls with it
-  still counts.
+  a byte the 8051 is reading. It takes the pins 26 ns after /OE falls: margin only, the DME having
+  /CE grounded and the address out long before /PSEN falls.
 - Its interrupt (priority 0, above USB and the timers) runs on core 0 from the unit's bank and calls
   nothing outside it. A pick fills the input page with the next answer; the last send looks the map
   up and fills the value page. A page fills 16 bytes a store, in about 105 cycles.
@@ -98,6 +99,8 @@ what it was doing.
 
 ## Open
 
+- No A13 wire (owner, 2026-11-06: no change to the DME). The window goes inside the 8 KiB, as the
+  comms window does, and the maps into the board's own memory, where only the unit reads them.
 - Run it on a P28 in the DME.
 - A commit with the unit on (the shadow to flash) hasn't been tried on a board.
 - The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles, slowing the

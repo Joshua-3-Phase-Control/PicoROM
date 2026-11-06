@@ -2,9 +2,10 @@
 ; The map unit's window (FEATURE_MAP_UNIT, map_unit.cpp): each read of the image's 1 KiB at 3C00h
 ; (/OE and /CE low, A10 and up 0Fh) pushes its A0-A9 once the read is over (/OE high), so an answer
 ; the CPU writes never changes a byte the 8051 is reading. The pins are taken 7 cycles (26 ns at
-; 270 MHz) after /OE falls, so a /CE that falls with it, a little later, still counts. In pins from
-; the first OE pin, shifting right; y = 0Fh (3C00h >> 10), set by cpu. The two counts marked are set
-; for the board's pins as the program loads (pio_programs.cpp).
+; 270 MHz) after /OE falls: margin only, as the DME grounds /CE and has the address out long before
+; /PSEN falls (951digit.pdf). In pins from the first OE pin, shifting right; y = 0Fh (3C00h >> 10),
+; set by cpu. The two counts marked are set for the board's pins as the program loads
+; (pio_programs.cpp).
 .program map_window
 .wrap_target
     wait 0 pin 0 [7]        ; /OE low, and 7 cycles more

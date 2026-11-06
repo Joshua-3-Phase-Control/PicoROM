@@ -511,8 +511,8 @@ static __force_inline void bus_pin(uint32_t pin, uint32_t ctrl, uint32_t over)
     io_bank0_hw->io[pin].ctrl = ctrl | over;
 }
 
-// The bench's bus at rest: /CE low throughout (as if tied low; map_window samples it a few ns after
-// /OE falls, so it must be down first), /OE (the 8051's /PSEN) high.
+// The bench's bus at rest: /CE low throughout, as the DME grounds it (951digit.pdf), and /OE (the
+// 8051's /PSEN) high.
 static void bus_rest()
 {
     for (uint32_t i = 0; i < N_ADDR_PINS; i++)
