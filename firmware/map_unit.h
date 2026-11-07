@@ -33,6 +33,10 @@ extern const char *const map_unit_parameter_names[];
 // From the main loop: ends a bus bench that has finished.
 void map_unit_update();
 
+// From the snoop's interrupt: an ADC result on the channel, which the bytes the unit makes from it
+// take (format 4).
+void map_unit_adc(uint32_t channel);
+
 #else
 
 static inline void map_unit_hide() {}

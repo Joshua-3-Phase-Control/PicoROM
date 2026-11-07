@@ -86,9 +86,11 @@ bytes are the address of a table: a count, then for each byte its RAM address, i
 way and a map's id. The ways are rom_lean's: 0 the channel's last result (the battery, the fuel
 quality), 1 its last two averaged as Ring_Average (the AFM, the MAP sensor), 2 its last complemented,
 through the map (Ntc_Linearise: the temperatures). A description's input with 80h set is one of
-those, its RAM address below: the unit makes it before the task, and names only the others to the
-8051 (Co_Task sends one at least, so a task keeps one sent). The board's bytes are its latest: the
-8051's AFM and MAP bytes were the tick's, its temperatures the slow work's.
+those, its RAM address below: the unit names only the others to the 8051 (Co_Task sends one at least,
+so a task keeps one sent), and copies it in before the task. The unit makes each byte as its
+channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's answer waits for no
+map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
+temperatures the slow work's.
 
 ## How it works
 

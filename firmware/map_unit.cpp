@@ -107,6 +107,7 @@ struct Unit
 static Unit unit UNIT_DATA = {};
 static uint32_t shadow[PAGE / 4] UNIT_DATA = {}; // the page as the PC wrote it
 static uint8_t ram[0x80] UNIT_DATA = {};         // the 8051's RAM bytes a task was sent, and it made
+static uint8_t made[0x80] UNIT_DATA = {};        // the RAM bytes the snoop makes (format 4), as of its last
 
 // ceil(2^16 / d): x / d = x * it >> 16, exact below 256. Made as the firmware is built, so the image of
 // the unit's bank holds it (DME-Sim runs that image).
@@ -287,7 +288,8 @@ static __force_inline uint32_t output_address(uint32_t j)
 // unit's memory says (from the mark's ninth byte, its address): a count, then for each its RAM address,
 // its channel, the way (LAST: the last result; AVERAGE: the last two, rom_lean's Ring_Average; MAPPED:
 // the last complemented, through the map whose id follows, as Main_Slow linearises a temperature) and
-// that map's id. 0 before the channel's first result, or for a byte the table doesn't name.
+// that map's id. 0 before the channel's first result, or for a byte the table doesn't name. Made as
+// each result comes (map_unit_adc, from the snoop's interrupt), so that a task only copies it.
 enum : uint32_t
 {
     LAST,
@@ -360,7 +362,7 @@ static __force_inline bool send(uint32_t input)
     {
         uint32_t address = at(unit.map + k);
         if (address & SNOOPED)
-            ram[address & 0x7F] = snooped(address & 0x7F);
+            ram[address & 0x7F] = made[address & 0x7F];
     }
     unit_task(unit.task, unit.map, unit.rom, ram);
     unit.tasks++;
@@ -451,6 +453,19 @@ static void UNIT_CODE(map_unit_irq)()
                 continue; // the snoop's alone
         }
         unit_read(word, start);
+    }
+}
+
+void UNIT_CODE(map_unit_adc)(uint32_t channel)
+{
+    if (!unit.on || at(MARK + 4) < 4)
+        return;
+    uint32_t table = at(MARK + 9) << 8 | at(MARK + 10);
+    for (uint32_t i = 0, n = at(table); i < n; i++)
+    {
+        uint32_t entry = table + 1 + 4 * i;
+        if (at(entry + 1) == channel)
+            made[at(entry) & 0x7F] = snooped(at(entry) & 0x7F);
     }
 }
 

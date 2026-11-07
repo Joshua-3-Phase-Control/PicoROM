@@ -27,6 +27,7 @@
 #include "hardware/structs/timer.h"
 
 #include "bus_bench.h"
+#include "map_unit.h"
 #include "pio_programs.h"
 #include "str_util.h"
 #include "system.h"
@@ -100,6 +101,7 @@ static __force_inline void gap(uint32_t strobe, uint32_t before)
             snoop.adc_before[channel] = snoop.adc[channel];
             snoop.adc[channel] = data;
             snoop.adc_count[channel]++;
+            map_unit_adc(channel);
         }
         snoop.reads++;
     }
