@@ -4,8 +4,8 @@
 //
 //   the tooth: each tooth's routine (INT1's vector, snoop_page_read) moves it on one, round the
 //   firing's teeth; each of the 8051's slot reads (an ADC read at a crank event) says which tooth it is
-//   on, and sets it there when the count was off (a tooth taken inside another's routine, which the
-//   snoop doesn't see begin, or one the reference's check drops: a slip).
+//   on, and sets it there when the count was off (a slip): short by the teeth the 8051 took inside
+//   another's routine, which the snoop doesn't see begin; over by one the chain set back.
 //   the firing's length: from one read of slot 0 to the next, in microseconds, as the 8051 takes it
 //   from Timer 1 at slot 0.
 //
@@ -38,6 +38,8 @@ struct Crank
     volatile uint32_t period;     // the last firing's length (us)
     volatile uint32_t periods;    // firings measured
     uint32_t log[LOG];            // the last firings' lengths (us), by periods
+    volatile uint32_t missed;     // teeth the count was short at slot reads, summed (taken unseen)
+    volatile uint32_t extra;      // teeth it was over (the 8051's chain set back a tooth)
 };
 
 static Crank crank UNIT_DATA = {};
@@ -79,7 +81,14 @@ void UNIT_CODE(crank_read)(uint32_t after, uint32_t now)
         if (crank.tooth != tooth)
         {
             if (crank.tooth != NONE)
+            {
                 crank.slips++;
+                uint32_t short_by = tooth >= crank.tooth ? tooth - crank.tooth : tooth + crank.teeth - crank.tooth;
+                if (short_by <= crank.teeth / 2)
+                    crank.missed += short_by;
+                else
+                    crank.extra += crank.teeth - short_by;
+            }
             crank.tooth = tooth;
         }
         if (slot == 0)
