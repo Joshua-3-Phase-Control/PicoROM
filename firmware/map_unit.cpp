@@ -62,6 +62,8 @@ static constexpr uint32_t MARK = 0x2000;          // the unit's own memory, afte
 static constexpr uint32_t EIGHT_KIB = 0x1FFF;     // the address mask the unit works with
 static constexpr uint32_t PAGE = 0x100;
 static constexpr uint32_t TASK = 0x80; // an index entry's kind: a task, its number below (format 3)
+static constexpr uint32_t SNOOPED = 0x80; // a task's input the snoop makes, its RAM address below (format 4)
+static constexpr uint32_t MOST_SENT = 16; // a task's inputs the 8051 sends, at most
 static constexpr uint32_t MAP = ~0u;   // unit.task: a map picked
 
 enum : uint32_t
@@ -99,6 +101,7 @@ struct Unit
     uint32_t task;            // the task picked (its number), or MAP (after the fields DME-Sim reads)
     uint32_t output;          // the task's next output
     volatile uint32_t tasks;  // tasks worked out
+    uint8_t sent_inputs[MOST_SENT]; // the task's inputs the 8051 sends: their RAM addresses (format 4)
 };
 
 static Unit unit UNIT_DATA = {};
@@ -262,21 +265,58 @@ static __force_inline void as_written()
     unit.phase = PICK_DUE;
 }
 
-// The RAM address of the picked map's or task's input k (from 1), or 0 past its last. A map's are its
-// axes' first bytes; a task's description lists them after their count.
+// The RAM address of the picked map's or task's input k (from 1) that the 8051 sends, or 0 past its last.
+// A map's are its axes' first bytes; a task's, those of its description's (after their count) that the
+// snoop doesn't make (pick lists them).
 static __force_inline uint32_t input_address(uint32_t k)
 {
     if (k > unit.axes)
         return 0;
-    return unit.task == MAP ? at(unit.map + 9 * (k - 1)) : at(unit.map + k);
+    return unit.task == MAP ? at(unit.map + 9 * (k - 1)) : unit.sent_inputs[k - 1];
 }
 
 // The RAM address of the picked task's output j (from 0), or 0 past its last: the description lists
 // them, after their count, after the inputs.
 static __force_inline uint32_t output_address(uint32_t j)
 {
-    uint32_t outputs = unit.map + 1 + unit.axes;
+    uint32_t outputs = unit.map + 1 + at(unit.map);
     return j < at(outputs) ? at(outputs + 1 + j) : 0;
+}
+
+// Format 4: a RAM byte of the 8051's that the snoop makes from the ADC's results, as its table in the
+// unit's memory says (from the mark's ninth byte, its address): a count, then for each its RAM address,
+// its channel, the way (LAST: the last result; AVERAGE: the last two, rom_lean's Ring_Average; MAPPED:
+// the last complemented, through the map whose id follows, as Main_Slow linearises a temperature) and
+// that map's id. 0 before the channel's first result, or for a byte the table doesn't name.
+enum : uint32_t
+{
+    LAST,
+    AVERAGE,
+    MAPPED
+};
+
+static uint32_t UNIT_CODE(snooped)(uint32_t address)
+{
+    if (at(MARK + 4) < 4)
+        return 0;
+    uint32_t table = at(MARK + 9) << 8 | at(MARK + 10);
+    for (uint32_t i = 0, n = at(table); i < n; i++)
+    {
+        uint32_t entry = table + 1 + 4 * i;
+        if (at(entry) != address)
+            continue;
+        uint32_t channel = at(entry + 1), way = at(entry + 2);
+        if (snoop_results(channel) == 0)
+            return 0;
+        uint32_t last = snoop_result(channel, 0);
+        if (way == AVERAGE)
+            return (last + snoop_result(channel, 1) + 1) >> 1;
+        if (way != MAPPED)
+            return last;
+        uint32_t found = entry_of(at(entry + 3)); // the map's index entry
+        return map_unit_lookup(at(found) << 8 | at(found + 1), 1, ~last & 0xFF, 0);
+    }
+    return 0;
 }
 
 static __force_inline void pick(uint32_t id)
@@ -286,7 +326,10 @@ static __force_inline void pick(uint32_t id)
     uint32_t entry = entry_of(id), kind = at(entry + 2);
     unit.map = at(entry) << 8 | at(entry + 1);
     unit.task = kind & TASK ? kind & ~TASK : MAP;
-    unit.axes = unit.task == MAP ? kind : at(unit.map); // the inputs
+    unit.axes = unit.task == MAP ? kind : 0; // the inputs the 8051 sends
+    for (uint32_t k = 1, n = unit.task == MAP ? 0 : at(unit.map); k <= n && unit.axes < MOST_SENT; k++)
+        if (!(at(unit.map + k) & SNOOPED))
+            unit.sent_inputs[unit.axes++] = at(unit.map + k);
     unit.sent = 0;
     unit.phase = INPUT_DUE;
     fill(input_address(2)); // the second input's address, or none
@@ -312,6 +355,12 @@ static __force_inline bool send(uint32_t input)
         unit.phase = VALUE_DUE;
         unit.lookups++;
         return true;
+    }
+    for (uint32_t k = 1, n = at(unit.map); k <= n; k++) // the inputs the snoop makes
+    {
+        uint32_t address = at(unit.map + k);
+        if (address & SNOOPED)
+            ram[address & 0x7F] = snooped(address & 0x7F);
     }
     unit_task(unit.task, unit.map, unit.rom, ram);
     unit.tasks++;
@@ -427,7 +476,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 3)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 4)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

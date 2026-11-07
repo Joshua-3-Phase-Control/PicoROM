@@ -63,6 +63,7 @@ struct Snoop
     uint32_t entry_time[5];       // when the last began (us)
     uint32_t channel;             // the last ADC read's channel (the conversion it started), or NO_CHANNEL
     uint32_t pins;                // A0's GPIO, D0's << 8, /OE's << 16 (system.h): for DME-Sim's model of the pushes
+    uint8_t adc_before[8];        // each channel's result before its last
 };
 
 static Snoop snoop UNIT_DATA = {};
@@ -96,6 +97,7 @@ static __force_inline void gap(uint32_t strobe, uint32_t before)
         snoop.channel = (address >> 8) & 7;
         if (channel != NO_CHANNEL)
         {
+            snoop.adc_before[channel] = snoop.adc[channel];
             snoop.adc[channel] = data;
             snoop.adc_count[channel]++;
         }
@@ -136,6 +138,16 @@ void UNIT_CODE(snoop_page_read)(uint32_t address)
         return;
     snoop.entries[k]++;
     snoop.entry_time[k] = timer_hw->timerawl;
+}
+
+uint32_t UNIT_CODE(snoop_result)(uint32_t channel, uint32_t back)
+{
+    return back ? snoop.adc_before[channel & 7] : snoop.adc[channel & 7];
+}
+
+uint32_t UNIT_CODE(snoop_results)(uint32_t channel)
+{
+    return snoop.adc_count[channel & 7];
 }
 
 void UNIT_CODE(snoop_start)(const uint8_t *rom)

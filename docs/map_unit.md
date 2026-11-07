@@ -78,6 +78,18 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 6    | Fuel_Time          | InjTimeH:L; the dead time           |
 | 7    | Load_Tick_Run      | LoadHi, LoadMid: the load, filtered |
 
+### Inputs the snoop makes (format 4)
+
+Format 4 (DME-Sim's `experiments/coproc_adc`) lets the board make a task's ADC bytes itself, from
+the reads its snoop sees (`docs/snoop.md`), so the 8051 doesn't send them. The mark's ninth and tenth
+bytes are the address of a table: a count, then for each byte its RAM address, its ADC channel, the
+way and a map's id. The ways are rom_lean's: 0 the channel's last result (the battery, the fuel
+quality), 1 its last two averaged as Ring_Average (the AFM, the MAP sensor), 2 its last complemented,
+through the map (Ntc_Linearise: the temperatures). A description's input with 80h set is one of
+those, its RAM address below: the unit makes it before the task, and names only the others to the
+8051 (Co_Task sends one at least, so a task keeps one sent). The board's bytes are its latest: the
+8051's AFM and MAP bytes were the tick's, its temperatures the slow work's.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds

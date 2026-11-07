@@ -18,6 +18,11 @@ void snoop_start(const uint8_t *rom);
 // From the map unit's interrupt, each read of page 0 (A0-A7): its vectors.
 void snoop_page_read(uint32_t address);
 
+// An ADC channel's last result (back 0) or the one before it (back 1), 0 before there is one, and how
+// many results it has had.
+uint32_t snoop_result(uint32_t channel, uint32_t back);
+uint32_t snoop_results(uint32_t channel);
+
 // The 8051 read the board since the last call (the activity LED).
 bool snoop_activity();
 
