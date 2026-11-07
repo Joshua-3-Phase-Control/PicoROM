@@ -169,6 +169,10 @@ late or lost; the answers' times as before. (A first run counted task 5's output
 is its input's byte, and the bench sent the byte it had worked the output into; it sends the inputs
 it chose now.)
 
+The pulse's time too (f9356d6, coproc_time's 951 image): all seven tasks have rom_lean's CRCs (the
+random cases now with edge values), task 6 taking 453 to 883 cycles. The bus bench, all seven tasks
+among the maps: 200,000 requests, none wrong, late or lost; the last send's answer 5.7 us at most.
+
 ## Open
 
 - Run it on a P28 in the DME.
