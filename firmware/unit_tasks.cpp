@@ -110,6 +110,42 @@ __force_inline uint32_t sum_map(const Task &t, uint32_t sum, uint32_t id)
     return (value(t, id) + sum - 0x14) & 0xFF;
 }
 
+// R7:R6 = 50 / the speed as an 8.8 number: DIV AB's quotient, then Divide_Fraction's byte (the
+// remainder x 256 / the speed, a bit at a time); together 3200h / the speed, made here by the same
+// restoring division. The speed 0: DIV AB keeps A and B (32h and 0, as DME-Sim's 8051 does; the
+// manual leaves them undefined) and each of Divide_Fraction's subtractions goes (CPL A: FFh).
+__force_inline uint32_t per_turn(uint32_t rpm)
+{
+    if (rpm == 0)
+        return 0x32FF;
+    uint32_t quotient = 0, rest = 0;
+    for (uint32_t bit = 0x2000; bit != 0; bit >>= 1)                    // 3200h's 14 bits, the top first
+    {
+        rest = rest << 1 | ((0x3200 & bit) != 0);
+        quotient <<= 1;
+        if (rest >= rpm)
+        {
+            rest -= rpm;
+            quotient |= 1;
+        }
+    }
+    return quotient;
+}
+
+// Afm_Airflow: the air flow (g/min) at the AFM's code from Afm_Flow's 65 points (high byte first, one
+// every 4 codes): the lower point, plus the rise to the next x the code's quarters + 2 (R5:R4), its
+// high byte's product kept to 8 bits (ADD A,R5), / 4; R1:R0, 16 bits.
+__force_inline uint32_t airflow(const Task &t, uint32_t table, uint32_t code)
+{
+    table += (code & 0xFC) >> 1;                                        // ANL A,#0FCh; RR A
+    uint32_t lower = at(t.rom, table) << 8 | at(t.rom, table + 1);
+    uint32_t rise = (at(t.rom, table + 2) << 8 | at(t.rom, table + 3)) - lower;   // SUBB, SUBB
+    uint32_t quarters = code & 3;
+    uint32_t low = (rise & 0xFF) * quarters + 2;                        // MUL AB; ADD A,#02h; ADDC A,#00h
+    uint32_t high = ((rise >> 8 & 0xFF) * quarters + (low >> 8)) & 0xFF;  // MUL AB (B dropped); ADD A,R5
+    return (lower + ((high << 8 | (low & 0xFF)) >> 2)) & 0xFFFF;        // RRC x 4; ADD A,R0; ADDC A,R5
+}
+
 } // namespace
 
 // Step_Table_Lookup: a one-axis table's value of the interval its input is in, as Map_Axis finds it.
@@ -244,6 +280,29 @@ static void UNIT_CODE(injection_time)(const Task &t)
     put(t, 3, dead);                                                    // DeadNow
 }
 
+// Load_Tick's running path (the 8051 keeps the starting one): 50 / the speed x the air flow / 256
+// (Mul16x16), held to 16 bits, x Cal_LoadScale / 256 (Mul16x8) and doubled unless its top bit is set:
+// the new load; filtered by LoadK (Lag_Filter24, its low byte 0) into LoadHi:LoadMid. Inputs, in turn:
+// Rpm, Afm, LoadK, LoadHi, LoadMid. Data: Constants' address; Cal_LoadScale's place there; Afm_Flow's
+// address. Out: LoadHi, LoadMid.
+static void UNIT_CODE(load)(const Task &t)
+{
+    uint32_t wide = per_turn(input(t, 0)) * airflow(t, word(t, 3), input(t, 1)) >> 8;   // R7:R6:R5
+    if (wide > 0xFFFF)                                                  // MOV A,R7; JZ Load_Tick_Fits
+        wide = 0xFFFF;                                                  // MOV R6,#0FFh; MOV R5,#0FFh
+    wide *= at(t.rom, word(t, 0) + get(t, 2));                          // x Cal_LoadScale: R7:R6:R5
+    if (!(wide & 0x800000))                                             // JB ACC.7,Load_Tick_Twice
+        wide <<= 1;                                                     // RLC A: R5's top bit, R6, R7
+    uint32_t fresh = wide >> 8 & 0xFFFF, k = input(t, 2);              // R4:R3; R5 = LoadK
+    uint32_t old = input(t, 3) << 8 | input(t, 4), state = old << 8;   // R2:R1:R0, R0 = 0
+    if (fresh >= old)                                                   // SUBB, SUBB: no borrow
+        state += (fresh - old) * k;                                     // Mul16x8; ADD, ADDC, ADDC
+    else
+        state -= (old - fresh) * k;                                     // negated; Mul16x8; SUBB x 3
+    put(t, 0, state >> 16);                                             // LoadHi: R2
+    put(t, 1, state >> 8);                                              // LoadMid: R1
+}
+
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
 {
     uint32_t outputs = description + 1 + at(rom, description); // their count, then their addresses
@@ -262,6 +321,8 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         offset(t);
     else if (task == TASK_TIME)
         injection_time(t);
+    else if (task == TASK_LOAD)
+        load(t);
     else
         return false;
     return true;

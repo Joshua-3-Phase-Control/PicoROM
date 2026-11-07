@@ -49,10 +49,10 @@ ready a few microseconds after the read that asks; DME-Sim's routine reads each 
 
 ### Tasks (format 3)
 
-Format 3 adds tasks: work the board does for the 8051, rom_lean's slow work so far (DME-Sim's
-`experiments/coproc_slow`, `unit_tasks.cpp`). A task's index entry is its description's address and
-80h + its number. The 8051 picks it and sends its inputs as a map's. After the last input, each read
-gives what comes next:
+Format 3 adds tasks: work the board does for the 8051, rom_lean's main loop a stage at a time
+(DME-Sim's `experiments/coproc_slow` to `coproc_load`; `unit_tasks.cpp`). A task's index entry is
+its description's address and 80h + its number. The 8051 picks it and sends its inputs as a map's.
+After the last input, each read gives what comes next:
 
 | After                    | The byte read                                        |
 |--------------------------|------------------------------------------------------|
@@ -76,6 +76,7 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 4    | Ign_Advance        | Handover: the maps summed           |
 | 5    | Ign_Offset's start | Handover: the target                |
 | 6    | Fuel_Time          | InjTimeH:L; the dead time           |
+| 7    | Load_Tick_Run      | LoadHi, LoadMid: the load, filtered |
 
 ## How it works
 

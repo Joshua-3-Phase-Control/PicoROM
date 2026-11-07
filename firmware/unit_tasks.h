@@ -20,6 +20,7 @@ enum : uint32_t
     TASK_ADVANCE, // Ign_Advance: the advance's maps summed (the pipeline's stage 3)
     TASK_OFFSET,  // Ign_Offset to Ign_Halve: the target, the sum with the speed's offset, clamped, halved
     TASK_TIME,    // Fuel_Time: the injection time a turn and the dead time (the pipeline's stage 6)
+    TASK_LOAD,    // Load_Tick's running path: the load a tick, filtered
 };
 
 // Works task out from its description; false if there is no such task.
