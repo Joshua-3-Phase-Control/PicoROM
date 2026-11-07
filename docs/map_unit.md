@@ -174,6 +174,11 @@ The pulse's time too (f9356d6, coproc_time's 951 image): all seven tasks have ro
 random cases now with edge values), task 6 taking 453 to 883 cycles. The bus bench, all seven tasks
 among the maps: 200,000 requests, none wrong, late or lost; the last send's answer 5.7 us at most.
 
+The load too (31bb5ba, coproc_load's 951 image): all eight tasks have rom_lean's CRCs, task 7 taking
+310 to 393 cycles. The bus bench, all eight tasks among the maps: 200,000 requests, none wrong, late
+or lost; the last send's answer 5.8 us at most. A pick's or a send's answer took 6.6 us once with
+USB busy (the 8051 reads 7.5 us after), the interrupt itself 0.82 us of it at most.
+
 ## Open
 
 - Run it on a P28 in the DME.
