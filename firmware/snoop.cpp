@@ -4,7 +4,10 @@
 //   each MOVX: the program snoop (map_unit.pio) finds /OE high for longer than a read's gap after a
 //   read, and pushes all the pins 1.5 us after that read's end (A0-A12 the data address, D0-D7 the
 //   byte), then those of the read itself, of the byte after the MOVX's opcode: the image says read
-//   or write. An ADC read's channel is A8-A10.
+//   or write. Every read is the ADC's (its OE, START and ALE are all NOT /RD: DME-Sim's
+//   docs/Hardware.md): A8-A10 the channel it starts, and its byte the result of the conversion the
+//   read before started, on that read's channel (done by then: a conversion takes 64 us, and
+//   rom_lean's reads are five teeth or more apart).
 //   each interrupt: map_window pushes every read of page 0 (map_unit.cpp); a vector the firmware uses
 //   read, then the byte after it, is its routine starting.
 //
@@ -31,6 +34,7 @@
 
 static constexpr uint32_t CODE_MASK = 0x1FFF; // the 8051's 8 KiB, as the socket shows them
 static constexpr uint32_t NONE = 0x100;       // no read of page 0 before
+static constexpr uint32_t NO_CHANNEL = 8;     // no ADC read before
 
 enum : uint32_t
 {
@@ -57,6 +61,8 @@ struct Snoop
     uint32_t adc_count[8];
     volatile uint32_t entries[5]; // each vector's routines begun
     uint32_t entry_time[5];       // when the last began (us)
+    uint32_t channel;             // the last ADC read's channel (the conversion it started), or NO_CHANNEL
+    uint32_t pins;                // A0's GPIO, D0's << 8, /OE's << 16 (system.h): for DME-Sim's model of the pushes
 };
 
 static Snoop snoop UNIT_DATA = {};
@@ -86,9 +92,13 @@ static __force_inline void gap(uint32_t strobe, uint32_t before)
     uint32_t address = (strobe >> BASE_ADDR_PIN) & CODE_MASK, data = (strobe >> BASE_DATA_PIN) & 0xFF;
     if (kind == READ)
     {
-        uint32_t channel = (address >> 8) & 7;
-        snoop.adc[channel] = data;
-        snoop.adc_count[channel]++;
+        uint32_t channel = snoop.channel; // the conversion this read collects
+        snoop.channel = (address >> 8) & 7;
+        if (channel != NO_CHANNEL)
+        {
+            snoop.adc[channel] = data;
+            snoop.adc_count[channel]++;
+        }
         snoop.reads++;
     }
     else
@@ -133,6 +143,8 @@ void UNIT_CODE(snoop_start)(const uint8_t *rom)
     snoop.rom = rom;
     snoop.vectors = 0x1F;
     snoop.previous = NONE;
+    snoop.channel = NO_CHANNEL;
+    snoop.pins = BASE_ADDR_PIN | BASE_DATA_PIN << 8 | BASE_OE_PIN << 16;
 }
 
 void snoop_init(const uint8_t *rom)

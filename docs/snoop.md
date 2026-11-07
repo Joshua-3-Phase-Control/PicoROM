@@ -12,13 +12,17 @@ address and byte) and each interrupt the 8051 takes. The 8051 sends the board no
   program (map_unit.pio; pio1's state machine 1, report_data_access's) times /OE high after each
   read; past 1 us it takes all the pins at 1.5 us (A0-A12 the data address, D0-D7 the byte) and
   pushes them with the pins of the read before. That read was of the byte after the MOVX's opcode:
-  the image says read (E0h, E2h, E3h) or write (F0h, F2h, F3h). An ADC read's channel is A8-A10.
+  the image says read (E0h, E2h, E3h) or write (F0h, F2h, F3h). Every read is the ADC's: its OE,
+  START and ALE are all NOT /RD (DME-Sim's docs/Hardware.md). A8-A10 is the channel the read starts,
+  and its byte is the result of the conversion the read before started, so `snoop_adc` files it
+  under that read's channel.
 - **An interrupt**: `map_window` pushes every read of page 0 (tagged odd; the window's are even),
-  and the map unit's interrupt hands them to the snoop. A vector's read followed by the byte after it is
-  its routine starting; a RETI's or a jump's dropped reads of a vector aren't followed by that. Code
-  that runs through an unused vector's address is (rom_lean's injection routine runs on through
-  0023h), so only the vectors set in `snoop_vectors` count. `map_window` runs from start-up, the
-  unit on or off.
+  and the map unit's interrupt hands them to the snoop. They are most of its words (about eight a
+  tooth), so they take a short way through it; only 0000h's is the unit's as well. A vector's read
+  followed by the byte after it is its routine starting; a RETI's or a jump's dropped reads of a
+  vector aren't followed by that. Code that runs through an unused vector's address is (rom_lean's
+  injection routine runs on through 0023h), so only the vectors set in `snoop_vectors` count.
+  `map_window` runs from start-up, the unit on or off.
 - The snoop's interrupt (priority 40h: above USB and the timers, below the map unit's) and its data
   live in the unit's bank. It takes report_data_access's place, so the activity LED follows its
   pushes.

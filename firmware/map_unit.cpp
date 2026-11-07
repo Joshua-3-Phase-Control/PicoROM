@@ -350,45 +350,58 @@ static __force_inline void note(Cycles *cycles, uint32_t taken)
         cycles->most = taken;
 }
 
-// Above USB and the timers (priority 0): a lookup waits for nothing but the one before it.
+// The unit's part of a read: a read of the window, or of 0000h (the 8051's start), its word as pushed;
+// start, when the interrupt took it (SysTick).
+static void UNIT_CODE(unit_read)(uint32_t word, uint32_t start)
+{
+    uint32_t read = word >> 1;
+    Cycles *cycles = nullptr;
+    if (word & 1) // 0000h
+    {
+        unit.starts++;
+        if (unit.phase != PICK_DUE)
+        {
+            as_written();
+            cycles = &unit.restores;
+        }
+    }
+    else if (!unit.on)
+        return; // a window's read pushed before the unit went off
+    else if (unit.phase == PICK_DUE)
+    {
+        pick(read);
+        cycles = &unit.answers;
+    }
+    else if (unit.phase == INPUT_DUE)
+        cycles = send(read) ? &unit.values : &unit.answers;
+    else if (unit.phase != VALUE_DUE)
+        cycles = output();
+    else
+    {
+        as_written(); // the value read
+        cycles = &unit.restores;
+    }
+    unit.served++;
+    if (cycles != nullptr)
+        note(cycles, since(start));
+}
+
+// Above USB and the timers (priority 0): a lookup waits for nothing but the one before it. Most words
+// are page 0's reads, the snoop's alone (its vectors: about eight a tooth), so they take the short
+// way, and the unit's part has a function of its own.
 static void UNIT_CODE(map_unit_irq)()
 {
     while (!(MAP_UNIT_PIO->fstat & (1u << (PIO_FSTAT_RXEMPTY_LSB + MAP_UNIT_SM))))
     {
         uint32_t start = systick_hw->cvr;
-        uint32_t word = MAP_UNIT_PIO->rxf[MAP_UNIT_SM], read = word >> 1;
-        Cycles *cycles = nullptr;
+        uint32_t word = MAP_UNIT_PIO->rxf[MAP_UNIT_SM];
         if (word & 1) // page 0
         {
-            snoop_page_read(read);
-            if (read != 0)
+            snoop_page_read(word >> 1);
+            if (word != 1)
                 continue; // the snoop's alone
-            unit.starts++;
-            if (unit.phase != PICK_DUE)
-            {
-                as_written();
-                cycles = &unit.restores;
-            }
         }
-        else if (!unit.on)
-            continue; // a window's read pushed before the unit went off
-        else if (unit.phase == PICK_DUE)
-        {
-            pick(read);
-            cycles = &unit.answers;
-        }
-        else if (unit.phase == INPUT_DUE)
-            cycles = send(read) ? &unit.values : &unit.answers;
-        else if (unit.phase != VALUE_DUE)
-            cycles = output();
-        else
-        {
-            as_written(); // the value read
-            cycles = &unit.restores;
-        }
-        unit.served++;
-        if (cycles != nullptr)
-            note(cycles, since(start));
+        unit_read(word, start);
     }
 }
 
