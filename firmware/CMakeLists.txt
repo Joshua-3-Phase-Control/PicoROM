@@ -32,6 +32,7 @@ function(picorom BUILD_CONFIG DEFINES)
         map_unit.cpp
         unit_tasks.cpp
         snoop.cpp
+        crank.cpp
         bus_bench.cpp
         pio_programs.cpp
         str_util.cpp
@@ -137,7 +138,7 @@ picorom(POG_27C020_70ns_MAP "BOARD_32P_TCA=1;FEATURE_MAP_UNIT=1")
 # The unit's bank calls nothing outside it (the map unit's, its tasks', the snoop's and the bus
 # bench's code): no loop may become a memset call, nor a chain of tests a jump table (libgcc's case
 # helpers are in flash).
-set_source_files_properties(map_unit.cpp unit_tasks.cpp snoop.cpp bus_bench.cpp PROPERTIES COMPILE_OPTIONS
+set_source_files_properties(map_unit.cpp unit_tasks.cpp snoop.cpp crank.cpp bus_bench.cpp PROPERTIES COMPILE_OPTIONS
     "-fno-tree-loop-distribute-patterns;-fno-jump-tables")
 
 foreach(TARGET ${ALL_FIRMWARE_TARGETS})

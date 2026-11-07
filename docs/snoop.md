@@ -23,6 +23,11 @@ address and byte) and each interrupt the 8051 takes. The 8051 sends the board no
   vector aren't followed by that. Code that runs through an unused vector's address is (rom_lean's
   injection routine runs on through 0023h), so only the vectors set in `snoop_vectors` count.
   `map_window` runs from start-up, the unit on or off.
+- **The crank model** (`crank.cpp`; format 5, DME-Sim's experiments/coproc_crank): each tooth's
+  routine moves the tooth the engine is at on one, round the firing; each of the 8051's slot reads,
+  known by its instruction, says which tooth it is on (and sets it there if the count slipped: a
+  tooth taken inside another's routine). Slot 0's reads time each firing, as the 8051's Timer 1
+  capture there does.
 - The snoop's interrupt (priority 40h: above USB and the timers, below the map unit's) and its data
   live in the unit's bank. It takes report_data_access's place, so the activity LED follows its
   pushes.

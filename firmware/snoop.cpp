@@ -27,6 +27,7 @@
 #include "hardware/structs/timer.h"
 
 #include "bus_bench.h"
+#include "crank.h"
 #include "map_unit.h"
 #include "pio_programs.h"
 #include "str_util.h"
@@ -104,6 +105,7 @@ static __force_inline void gap(uint32_t strobe, uint32_t before)
             map_unit_adc(channel);
         }
         snoop.reads++;
+        crank_read((before >> BASE_ADDR_PIN) & CODE_MASK, timer_hw->timerawl);
     }
     else
         snoop.writes++;
@@ -140,6 +142,8 @@ void UNIT_CODE(snoop_page_read)(uint32_t address)
         return;
     snoop.entries[k]++;
     snoop.entry_time[k] = timer_hw->timerawl;
+    if (k == 2) // INT1: a tooth
+        crank_tooth(snoop.entry_time[k]);
 }
 
 uint32_t UNIT_CODE(snoop_result)(uint32_t channel, uint32_t back)
@@ -159,6 +163,7 @@ void UNIT_CODE(snoop_start)(const uint8_t *rom)
     snoop.previous = NONE;
     snoop.channel = NO_CHANNEL;
     snoop.pins = BASE_ADDR_PIN | BASE_DATA_PIN << 8 | BASE_OE_PIN << 16;
+    crank_start(rom);
 }
 
 void snoop_init(const uint8_t *rom)
