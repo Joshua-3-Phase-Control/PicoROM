@@ -61,9 +61,12 @@ __force_inline uint32_t input(const Task &t, uint32_t k)
 }
 
 // Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
-// count left.
+// count left. A value not 0 reaches the top bit within 23 shifts; 0 shifts its whole count away (up
+// to 255 turns on the 8051), so that ends here at once with the count 0, as there.
 __force_inline uint32_t shift_left(uint32_t *wide, uint32_t count)
 {
+    if (*wide == 0)
+        return 0;
     while (count != 0 && !(*wide & 0x800000))
     {
         *wide <<= 1;
