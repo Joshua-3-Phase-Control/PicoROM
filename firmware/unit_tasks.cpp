@@ -12,12 +12,13 @@
 namespace
 {
 
-// A task at work: the image, the 8051's RAM bytes, where its description lists its outputs, and its data.
+// A task at work: the image, the 8051's RAM bytes, where its description lists its inputs and its
+// outputs, and its data.
 struct Task
 {
     const uint8_t *rom;
     uint8_t *ram;
-    uint32_t outputs, data;
+    uint32_t inputs, outputs, data;
 };
 
 __force_inline uint32_t at(const uint8_t *rom, uint32_t address)
@@ -51,6 +52,48 @@ __force_inline uint32_t bit(const Task &t, uint32_t address)
 __force_inline uint32_t byte_of(const Task &t, uint32_t i)
 {
     return t.ram[get(t, i) & 0x7F];
+}
+
+// The task's input k (from 0, in its description's order), as sent.
+__force_inline uint32_t input(const Task &t, uint32_t k)
+{
+    return t.ram[at(t.rom, t.inputs + k) & 0x7F];
+}
+
+// Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
+// count left.
+__force_inline uint32_t shift_left(uint32_t *wide, uint32_t count)
+{
+    while (count != 0 && !(*wide & 0x800000))
+    {
+        *wide <<= 1;
+        count--;
+    }
+    return count;
+}
+
+// Mul_Normalise: R7:R6 x a / 256 by Mul16x8 (R7:R6:R5), then Shift_Left by the exponent + 1 (INC A, 8
+// bits), the count left the exponent (FuelShift).
+__force_inline void normalise(uint32_t *r, uint32_t *shift, uint32_t a)
+{
+    uint32_t wide = *r * a;
+    *shift = shift_left(&wide, (*shift + 1) & 0xFF);
+    *r = wide >> 8 & 0xFFFF;
+}
+
+// Mul_OnePlus: R7:R6 x (1 + a / 128): none for 0 (JZ); 128 + a (ADD A,#80h), when it carries halved
+// (RRC A, the carry in) with the exponent a step on (INC FuelShift); then Mul_Normalise.
+__force_inline void one_plus(uint32_t *r, uint32_t *shift, uint32_t a)
+{
+    if (a == 0)
+        return;
+    a += 0x80;
+    if (a > 0xFF)
+    {
+        a = 0x80 | (a & 0xFF) >> 1;
+        *shift = (*shift + 1) & 0xFF;
+    }
+    normalise(r, shift, a);
 }
 
 __force_inline uint32_t value(const Task &t, uint32_t id)
@@ -101,17 +144,11 @@ static void UNIT_CODE(fuel)(const Task &t)
     uint32_t constants = word(t, 2);
     uint32_t step = step_table(t.rom, t.ram, word(t, 0));
     uint32_t trim = at(t.rom, constants + ((step + get(t, 4)) & 0xFF)); // ADD A,#(Cal_FuelTrim - Constants); MOVC
-    uint32_t product = trim * value(t, get(t, 6));                      // Fuel_AirTemp; MUL AB: R7:R6
-    uint32_t wide = product * at(t.rom, constants + get(t, 5));         // Mul16x8 by Cal_InjScale: R7:R6:R5
-    uint32_t shift = 3;                                                 // FuelShift 2; INC A (Mul_Normalise)
-    while (shift != 0 && !(wide & 0x800000))                            // Shift_Left: to R7's top bit
-    {
-        wide <<= 1;
-        shift--;
-    }
-    put(t, 0, wide >> 8);                                               // R6
-    put(t, 1, wide >> 16);                                              // R7
-    put(t, 2, shift);                                                   // the shifts left over
+    uint32_t r = trim * value(t, get(t, 6)), shift = 2;                 // Fuel_AirTemp; MUL AB: R7:R6; FuelShift
+    normalise(&r, &shift, at(t.rom, constants + get(t, 5)));            // x Cal_InjScale (Mul_Normalise)
+    put(t, 0, r);                                                       // R6
+    put(t, 1, r >> 8);                                                  // R7
+    put(t, 2, shift);                                                   // the exponent
 }
 
 // Main_Ign. Data: Ign_Coolant's id, Ign_Coolant_Cold's, Ign_AirTemp's, Accel_MapGain's, ColdStartIgn's
@@ -167,10 +204,47 @@ static void UNIT_CODE(offset)(const Task &t)
     put(t, 0, kept >> 1 | (kept & 0x80));                               // MOV C,ACC.7; RRC A
 }
 
+// Fuel_Time: the injection time a turn on the slow factor (FuelShift its exponent, kept as it was:
+// PUSH and POP). Running (Handover 80h): x (1 + WarmWeight / 128) x (1 + AfterStart / 128) x the main
+// map / 128 (InjTimeL), by Mul_OnePlus and Mul_Normalise. Starting: x the cranking fuel's factor (in
+// InjTimeL; 0: none) / 256, shifted by the exponent and its own (Handover). Then the base time
+// (LoadHi:LoadMid, starting Cal_StartLoad x 25) x (1 + AccelEnrich / 128), x the factor (Mul16x16:
+// R7:R6:R5), shifted by the exponent. Inputs, in turn: FuelFactorL, FuelFactorH, FuelShift, Handover,
+// WarmWeight, AfterStart, InjTimeL, LoadHi, LoadMid, AccelEnrich, StartMode's byte, Inj_DeadTime's
+// input. Data: Inj_DeadTime's id; Constants' address; Cal_StartLoad's place there; StartMode's bit.
+// Out: InjTimeL, InjTimeH; the dead time by battery in Handover and DeadNow.
+static void UNIT_CODE(injection_time)(const Task &t)
+{
+    uint32_t r = input(t, 1) << 8 | input(t, 0), shift = input(t, 2), handover = input(t, 3), map = input(t, 6);
+    if (handover == 0x80)                                               // CJNE A,#80h,Fuel_Time_Crank
+    {
+        one_plus(&r, &shift, input(t, 4));                              // WarmWeight
+        one_plus(&r, &shift, input(t, 5));                              // AfterStart
+        normalise(&r, &shift, map);                                     // the main map
+    }
+    else if (map != 0)                                                  // JZ Fuel_Time_Base
+    {
+        uint32_t wide = r * map;                                        // Mul16x8
+        shift = shift_left(&wide, (shift + handover) & 0xFF);           // ADD A,Handover; Shift_Left
+        r = wide >> 8 & 0xFFFF;
+    }
+    uint32_t base = input(t, 7) << 8 | input(t, 8);                     // R7:R6 = LoadHi:LoadMid
+    if (bit(t, get(t, 4)))
+        base = at(t.rom, word(t, 1) + get(t, 3)) * 0x19;                // MOVC; MOV B,#19h; MUL AB
+    one_plus(&base, &shift, input(t, 9));                               // AccelEnrich
+    uint32_t wide = base * r >> 8;                                      // Mul16x16
+    shift_left(&wide, shift);                                           // MOV A,FuelShift; Shift_Left
+    uint32_t dead = value(t, get(t, 0));                                // Inj_DeadTime
+    put(t, 0, wide >> 8);                                               // InjTimeL: R6
+    put(t, 1, wide >> 16);                                              // InjTimeH: R7
+    put(t, 2, dead);                                                    // Handover
+    put(t, 3, dead);                                                    // DeadNow
+}
+
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
 {
     uint32_t outputs = description + 1 + at(rom, description); // their count, then their addresses
-    Task t = {rom, ram, outputs + 1, outputs + 1 + at(rom, outputs)};
+    Task t = {rom, ram, description + 1, outputs + 1, outputs + 1 + at(rom, outputs)};
     if (task == TASK_WARMUP)
         warm_up(t);
     else if (task == TASK_FUEL)
@@ -183,6 +257,8 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         advance(t);
     else if (task == TASK_OFFSET)
         offset(t);
+    else if (task == TASK_TIME)
+        injection_time(t);
     else
         return false;
     return true;

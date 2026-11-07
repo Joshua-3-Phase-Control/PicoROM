@@ -75,6 +75,7 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 3    | Slow_Charge's sum  | ChargeL, ChargeH                    |
 | 4    | Ign_Advance        | Handover: the maps summed           |
 | 5    | Ign_Offset's start | Handover: the target                |
+| 6    | Fuel_Time          | InjTimeH:L; the dead time           |
 
 ## How it works
 
@@ -123,8 +124,10 @@ lookup in 64 broken off after its pick (and, one time in two, an input) by a rea
 after its last input, each output checked against the task worked out on core 1. map_task takes a
 task's cases as DME-Sim's UnitTasks.Cases does: every value of each input byte (a byte of bits 00h
 and FFh), then each of those bits alone over the first other input's range; beyond 2^18 of those,
-2^18 at random instead (each input in turn a byte of xorshift32's from 2545F491h). Times are in
-cycles of the 270 MHz clock. An answer is 35 characters at most (a packet's payload).
+2^18 at random instead: each input in turn from xorshift32's next (from 2545F491h), its low byte,
+or with bit 8 set one of the edges 00h, 01h, 40h, 7Fh, 80h, 81h, FEh and FFh by bits 9-11, so that
+a value a path turns on (Fuel_Time's Handover 80h) comes often. Times are in cycles of the 270 MHz
+clock. An answer is 35 characters at most (a packet's payload).
 
 ## Measured
 

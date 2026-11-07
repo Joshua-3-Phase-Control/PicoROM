@@ -669,14 +669,25 @@ static __force_inline void bench_run(uint32_t task, uint32_t description, uint32
         *most = cycles;
 }
 
-static constexpr uint32_t INPUTS = 8;          // a task's inputs, at most
+static constexpr uint32_t INPUTS = 16;         // a task's inputs, at most
 static constexpr uint32_t CASES = 1u << 18;    // a task's exhaustive cases, at most; beyond, as many at random
 static constexpr uint32_t SEED = 0x2545F491;   // the random cases' (UnitTasks.Seed)
+
+// A random case's byte from xorshift's: its low byte, or with bit 8 set one of the edges (00h, 01h,
+// 40h, 7Fh, 80h, 81h, FEh, FFh) by bits 9-11, so that a byte one value takes a path on (Fuel_Time's
+// Handover 80h) comes often (UnitTasks.RandomByte).
+static __force_inline uint32_t random_byte(uint32_t seed)
+{
+    if (!(seed & 0x100))
+        return seed & 0xFF;
+    uint32_t k = seed >> 9 & 7;
+    return (k < 4 ? 0x7F400100u >> 8 * k : 0xFFFE8180u >> 8 * (k - 4)) & 0xFF;
+}
 
 // The task at each case of its inputs as DME-Sim's UnitTasks.Cases takes them: every value of each
 // input byte, the last fastest, a byte of bits (20h-2Fh) 00h and FFh; then each of its bits alone (the
 // other inputs 80h) over the first other input's range. More than CASES of those: CASES cases at
-// random instead, each input a byte of xorshift's in turn. The outputs' CRC-32, and the cases.
+// random instead, each input in turn picked from xorshift's next. The outputs' CRC-32, and the cases.
 static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t *crc, uint32_t *least, uint32_t *sum,
                                   uint32_t *most, uint32_t *cases)
 {
@@ -711,7 +722,7 @@ static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t 
             for (uint32_t i = 0; i < n; i++)
             {
                 seed = xorshift(seed);
-                bench_ram[address[i]] = seed & 0xFF;
+                bench_ram[address[i]] = random_byte(seed);
             }
             bench_run(task, description, outputs, empty, crc, least, sum, most);
         }
