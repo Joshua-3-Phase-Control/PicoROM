@@ -37,6 +37,10 @@ void pair_start_over();
 void pair_guard_period();
 void pair_tick_sent();
 
+// Format 10 (the tick's work on the unit, DME-Sim's docs/Paired_Tick.md): from task 12's end, the
+// tick's work (task 15) for the pipeline's level, once a ping has come since the 8051's start.
+void pair_tick_work();
+
 // The pipeline's level: SPARE_IRQ_0's handler, at the lowest priority (the bus's interrupts break into
 // it); it does the jobs the bus level queued, in turn.
 void pair_control();

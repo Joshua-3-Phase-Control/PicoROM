@@ -742,6 +742,9 @@ static void UNIT_CODE(advance_rest)(const Task &t)
 // the inputs IsvRamp, TickCount and Coolant), the speed byte's address, ColdStartFuel's and
 // ColdStartIgn's bits after the data (the variants kept here too, which the pipeline's advance reads),
 // and the guard's period handed to the pipeline's level, which keeps BoostCount (pair_guard_period).
+// Format 10: the snoop's Afm a fourth input and AfmFilt's address after the data: at start mode's end
+// the AFM's filter the AFM here (the unit's own); then the tick's work (task 15) queued for the
+// pipeline's level (pair_tick_work).
 
 namespace
 {
@@ -752,7 +755,8 @@ enum : uint32_t
     START_COLD_FUEL = 2, // ColdStartFuel ...
     START_COLD_IGN = 4, // ... and ColdStartIgn, made (START_VARIANTS)
     START_VARIANTS = 8, // starting: the variants made
-    START_OVER = 0x10,  // start mode over: Inj720Odd cleared, the AFM's filter the AFM (the 8051's)
+    START_OVER = 0x10,  // start mode over: Inj720Odd cleared, the AFM's filter the AFM (the 8051's; format
+                        //   10, the unit's)
 };
 
 } // namespace
@@ -783,6 +787,8 @@ static void UNIT_CODE(start_mode)(const Task &t)
         starting = false;
         flags |= START_OVER;
         pair_start_over();
+        if (at(t.rom, 0x2004) >= TICK_FORMAT)
+            own(t, 12, input(t, 3));                                    // MOV AfmFilt,Afm (the unit's own)
     }
     if (starting)
         flags |= START_MODE;
@@ -799,6 +805,8 @@ static void UNIT_CODE(start_mode)(const Task &t)
     else if (left == 0 && byte_of(t, 8) != 0)                           // JNZ; MOV A,BoostCount; JZ
         own(t, 8, byte_of(t, 8) - 1);                                   // DEC BoostCount
     put(t, 0, flags);
+    if (at(t.rom, 0x2004) >= TICK_FORMAT)
+        pair_tick_work();                                               // the tick's work next (task 15)
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -808,12 +816,16 @@ static void UNIT_CODE(start_mode)(const Task &t)
 // AdvanceDyn, each into the unit's copy as it is sent. Here the switches into their bits (RRC A twice:
 // the full-load switch bit 0, the idle switch bit 1), the unit's StartMode and FuelCut in that byte
 // left as they are; then pair.cpp's pipeline makes the waiting pulse again. Data: IdleSwitch's bit,
-// FullLoadSwitch's. No outputs.
+// FullLoadSwitch's. No outputs. Format 10: LamInt and IdleTarget alone, the rest the unit's own (task
+// 15), no data.
 static void UNIT_CODE(tick_values)(const Task &t)
 {
-    uint32_t switches = input(t, 8);
-    set_bit(t, get(t, 1), switches & 1);                                // MOV FullLoadSwitch,C
-    set_bit(t, get(t, 0), switches >> 1 & 1);                           // MOV IdleSwitch,C
+    if (at(t.rom, 0x2004) < TICK_FORMAT)
+    {
+        uint32_t switches = input(t, 8);
+        set_bit(t, get(t, 1), switches & 1);                            // MOV FullLoadSwitch,C
+        set_bit(t, get(t, 0), switches >> 1 & 1);                       // MOV IdleSwitch,C
+    }
     pair_tick_sent();
 }
 
@@ -964,10 +976,282 @@ static void UNIT_CODE(speed)(const Task &t)
     idle_spark(t);
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Task 15 (format 10): the tick's work, rom_lean's in its order, which pair.cpp's tick job runs on its
+// copy of the RAM after task 12 (the 8051 never asks for it): the throttle switches (Main_Tick's), the
+// after-start enrichment and the acceleration enrichment's decay (Main_Tick_After, Main_Tick_Accel),
+// the dynamic spark's filter (Spark_Dyn), the AFM's rise (Accel_Tick), the load filter's coefficient
+// (Main_Tick_Filter's LoadK: here always, rom_lean's waited while its last load did), the load
+// (Main_Load: Load_Tick, its running path task 7), the tip-in retard and the enrichment's test
+// (Accel_Raise, Accel_Enrich), the load's byte and the warm-up's weight (Main_Byte: Load_Byte,
+// Load_Weight). The tick counter is task 12's input, one on (as Main_Tick moved it after start mode).
+// Data: below (TW_). No inputs or outputs.
+
+namespace
+{
+
+// Task 15's data, by place: Constants' address and Throttle_Switches_Table's (words); the places in
+// Constants of Cal_Prescalers, Cal_AfterStartHot, Cal_SparkDynRpm, Cal_RpmFilterGain,
+// Cal_SparkDynLoad, Cal_SparkAccel, Cal_SparkDecel, Cal_StartLoad, Cal_LoadMax and Cal_LoadMin;
+// RISE_MIN; FIRINGS; the ids of AfterStart_Coolant, AfterStart_AirTemp, Load_Filter, Ign_TipIn,
+// Accel_PulseRise, Accel_Coolant, Accel_SpeedLoad, Fuel_WarmUpWeight and Fuel_WarmUpWeightIdle; task
+// 7's description's address (a word); the bits StartMode, IdleSwitch, FullLoadSwitch and NotSynced;
+// the addresses of TickCount, AfterStart, AccelEnrich, Coolant, Rpm, RpmFilt, AdvanceDyn, AfmFilt, Afm,
+// AccelPart, LoadK, Load, LoadHi, LoadMid, WarmUp and WarmWeight.
+enum : uint32_t
+{
+    TW_CONSTANTS = 0,
+    TW_SWITCHES = 2,
+    TW_PRESCALERS = 4,
+    TW_AFTER_HOT,
+    TW_DYN_RPM,
+    TW_FILTER_GAIN,
+    TW_DYN_LOAD,
+    TW_SPARK_ACCEL,
+    TW_SPARK_DECEL,
+    TW_START_LOAD,
+    TW_LOAD_MAX,
+    TW_LOAD_MIN,
+    TW_RISE_MIN,
+    TW_FIRINGS,
+    TW_AFTER_COOLANT,
+    TW_AFTER_AIR,
+    TW_LOAD_FILTER,
+    TW_TIP_IN,
+    TW_PULSE_RISE,
+    TW_ACCEL_COOLANT,
+    TW_ACCEL_SPEED_LOAD,
+    TW_WEIGHT,
+    TW_WEIGHT_IDLE,
+    TW_LOAD_TASK,       // a word
+    TW_START = TW_LOAD_TASK + 2,
+    TW_IDLE,
+    TW_FULL,
+    TW_NOT_SYNCED,
+    TW_TICK_COUNT,
+    TW_AFTER,
+    TW_ACCEL,
+    TW_COOLANT,
+    TW_RPM,
+    TW_RPM_FILT,
+    TW_DYN,
+    TW_AFM_FILT,
+    TW_AFM,
+    TW_ACCEL_PART,
+    TW_LOAD_K,
+    TW_LOAD,
+    TW_LOAD_HI,
+    TW_LOAD_MID,
+    TW_WARM_UP,
+    TW_WARM_WEIGHT,
+};
+
+// A task as its description places it: the input count and the inputs, the output count and the
+// outputs, then the data.
+__force_inline Task task_of(const uint8_t *rom, uint8_t *ram, uint32_t description)
+{
+    uint32_t outputs = description + 1 + at(rom, description);
+    return Task{rom, ram, description + 1, outputs + 1, outputs + 1 + at(rom, outputs)};
+}
+
+// Tick_Due: the tick counter's remainder by the period at Constants + place (DIV AB's B; by 0, B
+// kept: 0), by subtraction (the bank calls no library).
+__force_inline uint32_t tick_due(const Task &t, uint32_t place, uint32_t tick)
+{
+    uint32_t period = at(t.rom, word(t, TW_CONSTANTS) + (place & 0xFF)), left = 0;
+    if (period != 0)
+        for (left = tick; left >= period;)
+            left -= period;
+    return left;
+}
+
+// Afm_Rise: the AFM's rise against its filter before this tick's step: d = Afm less AfmFilt, the step
+// d x 85 / 256 rounded (Afm_Third), signed (R2); for a positive d the rise d and the step, at most FFh,
+// else 0 (R3).
+__force_inline void afm_rise(const Task &t, uint32_t *rise, uint32_t *step)
+{
+    uint32_t afm = byte_of(t, TW_AFM), filt = byte_of(t, TW_AFM_FILT);
+    if (afm < filt)                                                     // SUBB A,AfmFilt; JNC Afm_Rise_Up
+    {
+        uint32_t third = ((filt - afm) * 0x55 + 0x80) >> 8;             // CPL A; INC A; Afm_Third
+        *step = (0x100 - third) & 0xFF;                                 // CPL A; INC A
+        *rise = 0;                                                      // MOV R3,#00h
+        return;
+    }
+    uint32_t d = afm - filt, third = (d * 0x55 + 0x80) >> 8;            // MUL AB; ADD A,#80h; ADDC A,B
+    *step = third;
+    *rise = d + third > 0xFF ? 0xFF : d + third;                        // ADD A,R3; JNC; MOV A,#0FFh
+}
+
+} // namespace
+
+// Spark_Dyn_Adj: under Cal_SparkDynLoad and Cal_SparkDynRpm, the speed over its filter Cal_SparkAccel,
+// under it Cal_SparkDecel, at it none; over the load or the speed none.
+static uint32_t UNIT_CODE(spark_dyn_adj)(const Task &t)
+{
+    uint32_t c = word(t, TW_CONSTANTS), rpm = byte_of(t, TW_RPM), filt = byte_of(t, TW_RPM_FILT);
+    if (at(t.rom, c + get(t, TW_DYN_LOAD)) < byte_of(t, TW_LOAD))       // CJNE A,Load; JC Spark_Dyn_Zero
+        return 0;
+    if (at(t.rom, c + get(t, TW_DYN_RPM)) < rpm)                        // CJNE A,Rpm; JC Spark_Dyn_Zero
+        return 0;
+    if (filt == rpm)                                                    // CJNE A,Rpm,Spark_Dyn_Moved
+        return 0;
+    return at(t.rom, c + get(t, filt < rpm ? TW_SPARK_ACCEL : TW_SPARK_DECEL));
+}
+
+// Spark_Dyn: under Cal_SparkDynRpm and in step, the speed filter a count toward the speed byte on the
+// ticks where the tick counter x the step, mod 128, is under the step (|the speed less the filter| x
+// Cal_RpmFilterGain, at most 127); over it or out of step the filter the speed.
+static void UNIT_CODE(spark_dyn)(const Task &t, uint32_t tick)
+{
+    uint32_t c = word(t, TW_CONSTANTS), rpm = byte_of(t, TW_RPM), filt = byte_of(t, TW_RPM_FILT);
+    if (at(t.rom, c + get(t, TW_DYN_RPM)) < rpm || bit(t, get(t, TW_NOT_SYNCED)))
+    {
+        own(t, TW_RPM_FILT, rpm);                                       // Spark_Dyn_Follow
+        return;
+    }
+    if (rpm == filt)                                                    // JZ Spark_Dyn_Out
+        return;
+    bool down = rpm < filt;                                             // MOV DynDown,C
+    uint32_t d = down ? filt - rpm : rpm - filt;                        // CPL A; INC A
+    uint32_t product = d * at(t.rom, c + get(t, TW_FILTER_GAIN));       // MUL AB
+    uint32_t step = (product & 0x80) || product > 0xFF ? 0x7F : product; // JB ACC.7; XCH A,B; JZ
+    if ((tick * step & 0x7F) >= step)                                   // MUL AB; ANL A,#7Fh; SUBB A,R1; JNC
+        return;
+    own(t, TW_RPM_FILT, down ? filt - 1 : filt + 1);                    // DEC A, or INC A
+}
+
+// Accel_Tick: at idle the filter's step alone; off idle, starting or with a rise under RISE_MIN,
+// AdvanceDyn the dynamic spark's adjustment and the step; else the enrichment's test next (true:
+// AccelRaise; the step its).
+static bool UNIT_CODE(accel_tick)(const Task &t)
+{
+    uint32_t rise, step;
+    afm_rise(t, &rise, &step);
+    if (!bit(t, get(t, TW_IDLE)))                                       // JB IdleSwitch,Accel_Tick_Step
+    {
+        if (!bit(t, get(t, TW_START)) && rise >= get(t, TW_RISE_MIN))   // JB StartMode; CJNE A,#RISE_MIN; JC
+            return true;                                                // SETB AccelRaise
+        own(t, TW_DYN, spark_dyn_adj(t));                               // Accel_Tick_Dyn
+    }
+    own(t, TW_AFM_FILT, byte_of(t, TW_AFM_FILT) + step);                // MOV A,AfmFilt; ADD A,R2
+    return false;
+}
+
+// Accel_Raise: the tip-in retard, AdvanceDyn the dynamic spark's adjustment less Ign_TipIn by the rise
+// (63 at most); the enrichment's first part by the rise (Accel_PulseRise: AccelPart); the filter's
+// step. Both maps take the rise from R3 (03h), as Map_Lookup leaves it. True: the next test
+// (EnrichDue).
+static bool UNIT_CODE(accel_raise)(const Task &t)
+{
+    uint32_t rise, step;
+    afm_rise(t, &rise, &step);
+    t.ram[3] = rise;                                                    // R3
+    uint32_t tip = value(t, get(t, TW_TIP_IN));
+    if (tip >= 0x40)                                                    // CJNE A,#40h; JC; MOV A,#3Fh
+        tip = 0x3F;
+    own(t, TW_DYN, spark_dyn_adj(t) + ((0x100 - tip) & 0xFF));          // CPL A; INC A; ADD A,R1
+    uint32_t part = value(t, get(t, TW_PULSE_RISE));
+    own(t, TW_ACCEL_PART, part);
+    own(t, TW_AFM_FILT, byte_of(t, TW_AFM_FILT) + step);                // Accel_Raise_Step
+    return part != 0;                                                   // JZ; SETB EnrichDue
+}
+
+// Accel_Enrich: the first part x Accel_Coolant by coolant / 256 x Accel_SpeedLoad by speed and load /
+// 256 (none: none), into AccelEnrich if over it.
+static void UNIT_CODE(accel_enrich)(const Task &t)
+{
+    uint32_t by_coolant = value(t, get(t, TW_ACCEL_COOLANT));
+    if (by_coolant == 0)                                                // JZ Accel_Enrich_Out
+        return;
+    uint32_t b = by_coolant * byte_of(t, TW_ACCEL_PART) >> 8;           // MUL AB; MOV A,B
+    if (b == 0)
+        return;
+    uint32_t v = value(t, get(t, TW_ACCEL_SPEED_LOAD)) * b >> 8;        // Map_Lookup_2D (B kept); MUL AB
+    if (v > byte_of(t, TW_ACCEL))                                       // CJNE A,AccelEnrich; JC
+        own(t, TW_ACCEL, v);
+}
+
+// Load_Tick: starting, rom_dual's fixed load (Cal_StartLoad, the filter's load it x FIRINGS x 25, the
+// first product's low byte); else task 7's running path, as its description says.
+static void UNIT_CODE(load_tick)(const Task &t)
+{
+    if (!bit(t, get(t, TW_START)))                                      // JNB StartMode,Load_Tick_Run
+    {
+        load(task_of(t.rom, t.ram, word(t, TW_LOAD_TASK)));
+        return;
+    }
+    uint32_t start = at(t.rom, word(t, TW_CONSTANTS) + get(t, TW_START_LOAD));
+    own(t, TW_LOAD, start);
+    uint32_t v = (start * get(t, TW_FIRINGS) & 0xFF) * 0x19;            // MUL AB; MOV B,#19h; MUL AB
+    own(t, TW_LOAD_HI, v >> 8);
+    own(t, TW_LOAD_MID, v);
+}
+
+// Load_Byte: not starting, LoadHi:LoadMid clamped to Cal_LoadMax and Cal_LoadMin (x 25 each), x 164 /
+// 256 (Mul16x8), its nibbles as SWAP takes them (/ 16 while the high byte is under 16).
+static void UNIT_CODE(load_byte)(const Task &t)
+{
+    if (bit(t, get(t, TW_START)))                                       // JB StartMode,Load_Byte_Out
+        return;
+    uint32_t c = word(t, TW_CONSTANTS), r = byte_of(t, TW_LOAD_HI) << 8 | byte_of(t, TW_LOAD_MID);
+    uint32_t most = at(t.rom, c + get(t, TW_LOAD_MAX)) * 0x19;
+    uint32_t least = at(t.rom, c + get(t, TW_LOAD_MIN)) * 0x19;
+    if (most < r)                                                       // Clamp_Upper: C, the most less r
+        r = most;
+    if (least >= r)                                                     // Clamp_Lower: CPL C
+        r = least;
+    r = r * 0xA4 >> 8;                                                  // MOV A,#0A4h; Mul16x8
+    uint32_t r7 = r >> 8, r6 = r & 0xFF;
+    own(t, TW_LOAD, ((r7 << 4 | r7 >> 4) & 0xFF) | r6 >> 4);            // SWAP A; XCH A,R6; SWAP A; ANL; ORL
+}
+
+// Load_Weight: the warm-up x its weight / 256 (off idle by speed and load, at idle by speed; the
+// warm-up 0: none).
+static void UNIT_CODE(load_weight)(const Task &t)
+{
+    uint32_t warm = byte_of(t, TW_WARM_UP), weight = 0;
+    if (warm != 0)                                                      // JZ Load_Weight_Out
+        weight = value(t, get(t, bit(t, get(t, TW_IDLE)) ? TW_WEIGHT_IDLE : TW_WEIGHT)) * warm >> 8;
+    own(t, TW_WARM_WEIGHT, weight);                                     // MUL AB; MOV A,B
+}
+
+static void UNIT_CODE(tick_work)(const Task &t)
+{
+    uint32_t switches = step_table(t.rom, t.ram, word(t, TW_SWITCHES)); // Step_Table_Lookup
+    set_bit(t, get(t, TW_FULL), switches & 1);                          // RRC A; MOV FullLoadSwitch,C
+    set_bit(t, get(t, TW_IDLE), switches >> 1 & 1);                     // RRC A; MOV IdleSwitch,C
+    uint32_t tick = (byte_of(t, TW_TICK_COUNT) + 1) & 0xFF;             // the tick counter as moved on
+    if (tick == 180)
+        tick = 0;
+    if (!bit(t, get(t, TW_START)))                                      // JB StartMode,Main_Tick_Start
+    {
+        uint32_t after = byte_of(t, TW_AFTER);                          // one less each Cal_Prescalers'
+        if (tick_due(t, get(t, TW_PRESCALERS), tick) == 0 && after != 0) //   first ticks, to 0
+            own(t, TW_AFTER, after - 1);
+    }
+    else                                                                // starting: by coolant, or over
+    {                                                                   //   Cal_AfterStartHot by air
+        uint32_t hot = at(t.rom, word(t, TW_CONSTANTS) + get(t, TW_AFTER_HOT));
+        uint32_t id = get(t, hot < byte_of(t, TW_COOLANT) ? TW_AFTER_AIR : TW_AFTER_COOLANT);
+        own(t, TW_AFTER, value(t, id));                                 // CJNE A,Coolant; JNC; Map_Lookup
+    }
+    uint32_t accel = byte_of(t, TW_ACCEL);                              // one less each Cal_Prescalers'
+    if (tick_due(t, get(t, TW_PRESCALERS) + 1, tick) == 0 && accel != 0) //   second ticks, to 0
+        own(t, TW_ACCEL, accel - 1);
+    spark_dyn(t, tick);
+    bool raise = accel_tick(t);
+    own(t, TW_LOAD_K, value(t, get(t, TW_LOAD_FILTER)));                // Main_Tick_Filter
+    load_tick(t);                                                       // Main_Load
+    if (raise && accel_raise(t))                                        // Accel_Raise, then Accel_Enrich
+        accel_enrich(t);
+    load_byte(t);                                                       // Main_Byte
+    load_weight(t);
+}
+
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
 {
-    uint32_t outputs = description + 1 + at(rom, description); // their count, then their addresses
-    Task t = {rom, ram, description + 1, outputs + 1, outputs + 1 + at(rom, outputs)};
+    Task t = task_of(rom, ram, description);
     if (task == TASK_WARMUP)
         warm_up(t);
     else if (task == TASK_FUEL)
@@ -996,6 +1280,8 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         tick_values(t);
     else if (task == TASK_SPEED)
         speed(t);
+    else if (task == TASK_TICKWORK)
+        tick_work(t);
     else
         return false;
     return true;

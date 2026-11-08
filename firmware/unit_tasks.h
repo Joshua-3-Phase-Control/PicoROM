@@ -32,12 +32,20 @@ enum : uint32_t
                   //   bits, then pair.cpp's pulse made again
     TASK_SPEED,   // the pipeline's stage 2 (format 9): Speed_Count and Idle_Spark, which pair.cpp's
                   //   pipeline runs (the 8051 never asks for it)
+    TASK_TICKWORK, // the tick's work (format 10): the switches, the enrichments, the dynamic spark's
+                   //   filter, the AFM's rise, the load and its byte, the warm-up's weight, which
+                   //   pair.cpp's tick job runs after task 12 (the 8051 never asks for it)
 };
 
 // Format 9 (DME-Sim's docs/Paired_Pipeline.md): the pipeline is pair.cpp's, and the bytes it keeps the
 // unit's own: tasks 7 and 12 take the speed byte so, and task 12 hands the overboost guard's periods
 // to the pipeline's level.
 static constexpr uint32_t PIPELINE_FORMAT = 9;
+
+// Format 10 (DME-Sim's docs/Paired_Tick.md): the tick's work is pair.cpp's too (task 15, queued at
+// task 12's end, which sets the AFM's filter at start mode's end); task 13 sends lambda's integrator
+// and the idle target alone.
+static constexpr uint32_t TICK_FORMAT = 10;
 
 // The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
 // the unit did with its own count and bits (format 8), as rom_lean's routines did.

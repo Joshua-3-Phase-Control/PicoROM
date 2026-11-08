@@ -88,6 +88,8 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 13   | (format 9)         | none: the tick's values, sent       |
 | 14   | Speed_Count and    | none sent: the board's Rpm,         |
 |      | Idle_Spark (fmt 9) | IdlePrev, AdvanceDyn at idle        |
+| 15   | the tick's work    | none sent: the board's switches,    |
+|      | (format 10)        | load, enrichments, filters          |
 
 ### Inputs the snoop makes (format 4)
 
@@ -103,7 +105,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 9)
+### The paired core (formats 6 to 10)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -188,6 +190,25 @@ the board, which runs it itself at slot 0's tooth:
 - The table adds the take's places (the count, the switch, both copies), Cal_PipeRpm's and
   Cal_RemakeRpm's numbers and the bytes the take carries. The firing's and the injection's marks and
   Main_Turn's SJMP are gone (0 in the table).
+
+Format 10 (step 3.5, DME-Sim's docs/Paired_Tick.md) moves the tick's work onto the board too:
+- **The tick's job.** At the end of start mode's task (12), once a ping has come since the 8051's
+  start, the board queues task 15 for its pipeline's level. It runs rom_lean's tick work bit for
+  bit and in its order: the throttle switches (Throttle_Switches_Table, by the throttle's byte,
+  which the snoop makes from slot 4's read: a new Co_Snoop entry, channel 6), the after-start
+  enrichment and the acceleration enrichment's decay (on the tick counter task 12 was sent, one on),
+  the dynamic spark's speed filter, the AFM's rise (with the tip-in retard and the enrichment's
+  test), the load filter's coefficient, the load (task 7), the load's byte and the warm-up's weight.
+- **The take** grows: each copy also moves the load's byte, the acceleration and after-start
+  enrichments (the 8051's stream sends them) and AdvanceDyn, now the board's at idle and off idle,
+  and copies the two switches' bits. MOV R2's operand counts the tick's results: a new count starts
+  the 8051's lambda. A copy is 57 bytes (format 9's 41).
+- **Start mode's task** takes the snooped AFM too, and at start mode's end sets the AFM's filter to
+  it in the board's copy; the first stop's run after the 8051's start sets it too (as
+  Power_Up_Inputs did).
+- **The tick's send** (task 13) carries lambda's integrator and the idle target alone.
+- The table adds the RAM addresses the take copies (Load, AccelEnrich, AfterStart), the switches'
+  bits, AfmFilt's and Afm's. Format 9's take is not read any more.
 
 ## How it works
 
