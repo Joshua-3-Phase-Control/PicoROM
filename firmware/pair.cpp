@@ -25,7 +25,7 @@
 //   a late run: one that finds more than one new tooth. The teeth after the first ran what the
 //   vector held: an event again, counted, or a RETI where one was due, which goes on the next tooth
 //   (the arm with its load from there, or not at all if that is too near its spark; a charge only
-//   before its arm).
+//   before its arm: else its spark fires not, the 8051's arm refusing an uncharged coil).
 //   the heartbeat: each ping (0016h, then 0017h) moves the operand at 0017h on. A mark at 0006h
 //   says the count is lost (the engine stopped, or the P28 back after its heartbeat stood still): a
 //   RETI in the vector, and no event till the next reference. The 8051's start (0000h) is the same,
@@ -403,20 +403,31 @@ static __force_inline uint32_t handler_of(uint32_t event)
     return event == CHARGE ? pair.charge_handler : event == ARM ? pair.arm_handler : pair.event_handler[event];
 }
 
-// The vector to hold event: a RETI, or an AJMP to its handler (its operand, then its opcode; from
-// another event through a RETI).
+// The vector to hold event: a RETI (one byte), or an AJMP to its handler. From a RETI its operand,
+// then its opcode; from another event in the same page (the image keeps the handlers in one) its
+// operand alone, one byte; from one in another page through a RETI. Whenever the 8051 fetches it,
+// it reads a whole instruction, the old one or the new.
 static void UNIT_CODE(steer)(uint32_t event)
 {
     if (event == pair.vector)
         return;
-    if (pair.vector != NOTHING)
-        write(VECTOR, RETI);
+    uint32_t was = pair.vector;
     pair.vector = event;
     if (event == NOTHING)
+    {
+        write(VECTOR, RETI);
         return;
-    uint32_t handler = handler_of(event);
+    }
+    uint32_t handler = handler_of(event), opcode = AJMP | (handler >> 8 & 7) << 5;
+    if (was != NOTHING && (handler_of(was) ^ handler) >> 8 == 0)
+    {
+        write(VECTOR + 1, handler & 0xFF);
+        return;
+    }
+    if (was != NOTHING)
+        write(VECTOR, RETI);
     write(VECTOR + 1, handler & 0xFF);
-    write(VECTOR, AJMP | (handler >> 8 & 7) << 5);
+    write(VECTOR, opcode);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -530,8 +541,9 @@ static void UNIT_CODE(reference)(uint32_t now)
 // The coil.
 
 // The spark in the firing whose fall 1 has count base planned: its arm, the read it moves late, and
-// its charge but at a start (the arm charges the coil then, short, as rom_lean's Coil_Start).
-static void UNIT_CODE(plan)(int32_t base, bool start)
+// its charge (NONE if its tooth has passed: the 8051's arm then fires no spark, as it is not
+// charging).
+static void UNIT_CODE(plan)(int32_t base)
 {
     int32_t arm, late_tooth;
     uint32_t late;
@@ -549,25 +561,22 @@ static void UNIT_CODE(plan)(int32_t base, bool start)
         pair.late_to = pair.late_from + (int32_t)late;
         pair.late_event = event_on(in_firing(late_tooth));
     }
-    pair.charge_at = NONE;
-    if (!start)
-    {
-        uint32_t charge = map_unit_ram(pair.charge_h) << 8 | map_unit_ram(pair.charge_l);
-        pair.charge_at = base + charge_plan(pair.plan_adv, arm, charge) - 1;
-        if (pair.charge_at <= (int32_t)pair.count)
-            pair.charge_at = NONE;                              // passed: the arm charges
-    }
+    uint32_t charge = map_unit_ram(pair.charge_h) << 8 | map_unit_ram(pair.charge_l);
+    pair.charge_at = base + charge_plan(pair.plan_adv, arm, charge) - 1;
+    if (pair.charge_at <= (int32_t)pair.count)
+        pair.charge_at = NONE;                                  // passed
     pair.coil_on = true;
     pair.plans++;
 }
 
-// The coil's events from now: the spark of this firing if its arm is still to come, else the next.
+// The coil's events from now: the spark of this firing if its charge is still to come, else the
+// next firing's (rom_lean's Coil_Start charged the first at its arm, short).
 static void UNIT_CODE(start)()
 {
     int32_t base = (int32_t)pair.count - (int32_t)pair.tif + 1;
-    plan(base, true);
-    if (pair.arm_at <= (int32_t)pair.count)
-        plan(base + (int32_t)pair.teeth, true);
+    plan(base);
+    if (pair.charge_at == NONE || pair.arm_at <= (int32_t)pair.count)
+        plan(base + (int32_t)pair.teeth);
 }
 
 // The crank event of the tooth count back from the latest (a late run's teeth).
@@ -667,7 +676,7 @@ void UNIT_CODE(pair_after)()
         pair.spark_due = false;
         pair.sparks++;
         if (pair.fire_valid)
-            plan((int32_t)pair.count - (int32_t)pair.tif + 1 + (int32_t)pair.teeth, false);
+            plan((int32_t)pair.count - (int32_t)pair.tif + 1 + (int32_t)pair.teeth);
     }
     if (pair.count == pair.steered)
         return;                                                 // no new tooth
