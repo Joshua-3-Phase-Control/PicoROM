@@ -30,11 +30,18 @@
 //   says the count is lost (the engine stopped, or the P28 back after its heartbeat stood still): a
 //   RETI in the vector, and no event till the next reference. The 8051's start (0000h) is the same,
 //   with the flags' opcodes as built.
+//   TH0's loads (format 7, step 3.2): the pulse is the unit's task 9 (unit_tasks.cpp: rom_lean's
+//   Fuel_Maps or Fuel_Crank, Fuel_Time and Fuel_Mode), and its load (TH0's start and its overflows)
+//   goes into the 8051's code, where TH0 takes it: at a pulse's end (Inj_Next) and while TH0 is
+//   stopped (Inj_Apply). Each place has two copies of its two loads and a switch, an AJMP's operand:
+//   the copies not in use are written, then the switches turned to them, so the 8051 takes a whole
+//   load, the old one or the new. A pulse made again (task 10) after its reference is not written.
 //
 // The live bytes, all it writes of the 8 KiB (DME-Sim checks that): 0013h and 0014h, the arm's two
 // operands, 0017h, and the opcodes at Pair_Synced (SETB NotSynced till in step, then CLR) and at
-// Pair_Fault (CLR ToothFault; SETB after a fault). Format 6's table (Co_Pair), which the mark's 13th
-// and 14th bytes point to, gives their places, the crank events and the coil's numbers.
+// Pair_Fault (CLR ToothFault; SETB after a fault); format 7, the copies' loads and the switches.
+// Format 6's table (Co_Pair), which the mark's 13th and 14th bytes point to, gives their places, the
+// crank events and the coil's numbers; format 7's adds the switches and the copies.
 
 #include "pair.h"
 
@@ -45,6 +52,7 @@
 
 static constexpr uint32_t MARK = 0x2000;
 static constexpr uint32_t FORMAT = 6;
+static constexpr uint32_t INJECTION = 7; // the format with TH0's loads (pair_pulse)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -108,6 +116,9 @@ struct Pair
     uint32_t dj;                    // 92: the charge's teeth before its spark's (Dwell_Plan's, kept)
     int32_t sarm;                   // 96: the arm's tooth in its spark's firing
     uint32_t pos;                   // 100: the latest tooth's place in its turn (0: fall 1)
+    volatile uint32_t pulses;       // 104: TH0's loads written (format 7)
+    volatile uint32_t late_pulses;  // 108: pulses made again after their reference: none written
+    uint32_t load;                  // 112: the last load written: TH0's start, its overflows << 8
     // The image and its table (Co_Pair).
     volatile uint8_t *rom;
     bool on;
@@ -135,6 +146,13 @@ struct Pair
     // The vector.
     uint32_t vector;                // what it holds: an event (NOTHING: a RETI)
     uint32_t steered;               // the count the vector was last written after
+    // TH0's loads (format 7): each switch (an AJMP's operand) and its two copies (MOV TH0,#start; MOV
+    // InjHi,#overflows), at the pulse's end (Inj_Next) and while TH0 is stopped (Inj_Apply).
+    bool inject;
+    uint32_t next_switch, next_copy[2], apply_switch, apply_copy[2];
+    uint32_t side;                  // the copies in use
+    uint32_t built;                 // TH0's load as built (the copies' first): start, overflows << 8
+    uint32_t pulse_reference;       // the references by the turn's pulse (a pulse made again after: late)
 };
 
 static Pair pair UNIT_DATA = {};
@@ -438,6 +456,58 @@ static void UNIT_CODE(steer)(uint32_t event)
     write(VECTOR, opcode);
 }
 
+// TH0's load (format 7): a copy's two operands (MOV TH0,#start at +2, MOV InjHi,#overflows at +5).
+static __force_inline void write_load(uint32_t copy, uint32_t load)
+{
+    write(copy + 2, load & 0xFF);
+    write(copy + 5, load >> 8 & 0xFF);
+}
+
+// The load into the copies not in use, then each switch (one byte) turned to them: the 8051 loads a
+// whole pair, the old or the new, whenever the writes land (a copy is written again only at the
+// next pulse, long after the 8051 left it).
+static void UNIT_CODE(load_pulse)(uint32_t load)
+{
+    uint32_t side = pair.side ^ 1;
+    write_load(pair.next_copy[side], load);
+    write_load(pair.apply_copy[side], load);
+    write(pair.next_switch + 1, pair.next_copy[side] & 0xFF);
+    write(pair.apply_switch + 1, pair.apply_copy[side] & 0xFF);
+    pair.side = side;
+    pair.load = load;
+}
+
+// As the 8051 starts: both copies' loads and the switches as built.
+static void UNIT_CODE(loads_as_built)()
+{
+    for (uint32_t side = 0; side < 2; side++)
+    {
+        write_load(pair.next_copy[side], pair.built);
+        write_load(pair.apply_copy[side], pair.built);
+    }
+    write(pair.next_switch + 1, pair.next_copy[0] & 0xFF);
+    write(pair.apply_switch + 1, pair.apply_copy[0] & 0xFF);
+    pair.side = 0;
+    pair.load = pair.built;
+    pair.pulse_reference = pair.references;
+}
+
+bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
+{
+    if (!pair.inject)
+        return true;
+    if (again && pair.references != pair.pulse_reference)
+    {
+        pair.late_pulses++;                                     // its reference came: it started
+        return false;
+    }
+    if (!again)
+        pair.pulse_reference = pair.references;
+    load_pulse((start & 0xFF) | (overflows & 0xFF) << 8);
+    pair.pulses++;
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------------------
 // The crank.
 
@@ -698,6 +768,8 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
     {
         pair.fault = false;
         unsync();
+        if (pair.inject)
+            loads_as_built();
         return;
     }
     if (address != previous + 1)
@@ -752,6 +824,7 @@ void UNIT_CODE(pair_after)()
 void UNIT_CODE(pair_start)(uint8_t *rom)
 {
     pair.on = false;
+    pair.inject = false;
     pair.synced = 0;
     if (rom == nullptr)
         return;                                                 // no unit
@@ -799,6 +872,25 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
     bool reach = pair.charge_handler < 0x800 && pair.arm_handler < 0x800; // within the vector's AJMP
     for (uint32_t i = 0; i < pair.events; i++)
         reach = reach && pair.event_handler[i] < 0x800;
+    pair.inject = false;
+    if (at(MARK + 4) >= INJECTION)                              // TH0's loads: each switch and its copies
+    {
+        pair.next_switch = word(u + 29);
+        pair.next_copy[0] = word(u + 31);
+        pair.next_copy[1] = word(u + 33);
+        pair.apply_switch = word(u + 35);
+        pair.apply_copy[0] = word(u + 37);
+        pair.apply_copy[1] = word(u + 39);
+        pair.built = at(pair.next_copy[0] + 2) | at(pair.next_copy[0] + 5) << 8;
+        pair.side = 0;
+        pair.load = pair.built;
+        pair.pulse_reference = 0;
+        // Each switch's AJMP reaches its copies, both in one page (the operand alone tells them).
+        bool pages = pair.next_copy[0] >> 8 == pair.next_copy[1] >> 8 && pair.apply_copy[0] >> 8 == pair.apply_copy[1] >> 8;
+        bool near = ((pair.next_switch + 2) ^ pair.next_copy[0]) < 0x800 && ((pair.apply_switch + 2) ^ pair.apply_copy[0]) < 0x800;
+        pair.inject = pages && near;
+        reach = reach && pair.inject;
+    }
     pair.on = reach;
 }
 

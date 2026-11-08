@@ -22,6 +22,11 @@ void pair_after();
 // take.
 void pair_advance(uint32_t advance);
 
+// Tasks 9 and 10 (format 7): TH0's load for the next pulse, its start and its overflows, written
+// into the copies of the 8051's loads not in use, then the switches turned to them. False for a pulse
+// made again (again) after its reference came: none written.
+bool pair_pulse(uint32_t start, uint32_t overflows, bool again);
+
 // DME-Sim's checks of the ported routines: routine's inputs and outputs in pair_case (pair.cpp).
 uint32_t pair_test(uint32_t routine);
 

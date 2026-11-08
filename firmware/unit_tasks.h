@@ -22,6 +22,9 @@ enum : uint32_t
     TASK_TIME,    // Fuel_Time: the injection time a turn and the dead time (the pipeline's stage 6)
     TASK_LOAD,    // Load_Tick's running path: the load a tick, filtered
     TASK_COIL,    // the coil's advance (format 6): sent alone, pair.cpp's plans take it from the RAM
+    TASK_PULSE,   // the pulse (format 7): Fuel_Maps or Fuel_Crank, Fuel_Time and Fuel_Mode, TH0's load
+                  //   written into the 8051's code (pair_pulse)
+    TASK_AGAIN,   // the same, the pulse made again before its reference
 };
 
 // Works task out from its description; false if there is no such task.
