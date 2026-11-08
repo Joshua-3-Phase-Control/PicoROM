@@ -41,6 +41,11 @@ void map_unit_adc(uint32_t channel);
 // takes the advance and the charge's time so).
 uint32_t map_unit_ram(uint32_t address);
 
+// Format 8: a RAM byte the unit keeps for the 8051 changed (pair.cpp's counts at its marks), and the
+// bytes from..to cleared (as the 8051's Power_Up clears its own).
+void map_unit_ram_write(uint32_t address, uint32_t value);
+void map_unit_ram_clear(uint32_t from, uint32_t to);
+
 #else
 
 static inline void map_unit_hide() {}

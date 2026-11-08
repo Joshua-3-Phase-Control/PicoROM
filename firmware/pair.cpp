@@ -36,12 +36,22 @@
 //   stopped (Inj_Apply). Each place has two copies of its two loads and a switch, an AJMP's operand:
 //   the copies not in use are written, then the switches turned to them, so the 8051 takes a whole
 //   load, the old one or the new. A pulse made again (task 10) after its reference is not written.
+//   the injection's phase (format 8, step 3.3): which reference injects (rom_lean's Inj720Odd, the
+//   unit's now): the reference's AJMP's operand (0004h) to the injection's handler or past it, and
+//   at the turn's first firing Main_Turn's SJMP to its pulse, none, or a cut. The counts the unit's
+//   tasks keep for the 8051 (SlewCount, InjCount, CrankDecay: their own, never sent) change at the
+//   8051's marks, where rom_lean's 8051 changed them: Pair_Stopped (the engine stopped: the count
+//   lost as at 0006h, InjCount 0, CrankDecay cleared), Mark_Firing (each firing: SlewCount one less,
+//   to 0) and Mark_Counted (an injection counted, starting or cut: InjCount one more, to 80h). The
+//   8051's start clears the unit's RAM, as its Power_Up its own.
 //
 // The live bytes, all it writes of the 8 KiB (DME-Sim checks that): 0013h and 0014h, the arm's two
 // operands, 0017h, and the opcodes at Pair_Synced (SETB NotSynced till in step, then CLR) and at
-// Pair_Fault (CLR ToothFault; SETB after a fault); format 7, the copies' loads and the switches.
+// Pair_Fault (CLR ToothFault; SETB after a fault); format 7, the copies' loads and the switches;
+// format 8, 0004h, Main_Turn's SJMP's offset and the phase's opcode at Main_Reference.
 // Format 6's table (Co_Pair), which the mark's 13th and 14th bytes point to, gives their places, the
-// crank events and the coil's numbers; format 7's adds the switches and the copies.
+// crank events and the coil's numbers; format 7's adds the switches and the copies; format 8's the
+// phase's places and what its cut reads, then the counts' marks and places.
 
 #include "pair.h"
 
@@ -164,6 +174,9 @@ struct Pair
     bool phased;
     uint32_t ref_inject, ref_skip, turn_at, turn_due, turn_speed, turn_cut, phase_op;
     uint32_t rev_limit, rpm_at, start_bit, fuel_cut_bit, boost_cut_bit;
+    // The counts the unit keeps for the 8051 (format 8): the marks (page 0: the engine stopped, a
+    // firing, an injection counted) and the RAM bytes and the bit they change.
+    uint32_t stop_mark, fire_mark, count_mark, slew_at, inj_at, decay_bit;
 };
 
 static Pair pair UNIT_DATA = {};
@@ -533,8 +546,8 @@ static void UNIT_CODE(phase_at_reference)()
 
 // The turn's first firing, at slot 0's tooth (before the 8051's Main_Turn, rom_lean's Turn_Cut there):
 // starting, its pulse (each firing's); a turn 720 degrees leaves out, none; else a cut (over
-// Cal_RevLimit, the overrun's or the overboost guard's) leaves the next reference out, counted by the
-// 8051; else its pulse.
+// Cal_RevLimit, the overrun's or the overboost guard's) leaves the next reference out, counted at the
+// 8051's mark there (Mark_Counted); else its pulse.
 static void UNIT_CODE(turn)()
 {
     uint32_t target = pair.turn_due;
@@ -561,6 +574,30 @@ void UNIT_CODE(pair_start_over)()
         return;
     pair.next_skips = 0;                                        // rom_lean's CLR Inj720Odd
     write_reference();
+}
+
+// The counts at the 8051's marks (format 8), as rom_lean's 8051 kept them there: a firing's
+// (Main_Turn's Turn_Start), an injection counted (starting, there; a turn's cut, Main_Turn_Cut), the
+// engine stopped (Tick_Stop).
+static void UNIT_CODE(at_firing)()
+{
+    uint32_t slew = map_unit_ram(pair.slew_at);
+    if (slew != 0)                                              // MOV A,SlewCount; JZ; DEC SlewCount
+        map_unit_ram_write(pair.slew_at, slew - 1);
+}
+
+static void UNIT_CODE(at_counted)()
+{
+    uint32_t count = map_unit_ram(pair.inj_at);
+    if (count < 0x80)                                           // MOV A,InjCount; JB ACC.7; INC InjCount
+        map_unit_ram_write(pair.inj_at, count + 1);
+}
+
+static void UNIT_CODE(at_stopped)()
+{
+    map_unit_ram_write(pair.inj_at, 0);                         // MOV InjCount,#00h
+    uint32_t byte = 0x20 + (pair.decay_bit >> 3 & 0x0F);        // CLR CrankDecay
+    map_unit_ram_write(byte, map_unit_ram(byte) & ~(1u << (pair.decay_bit & 7)));
 }
 
 // As the 8051 starts: the next reference left out (Power_Up's SETB Inj720Odd), Main_Turn's pulse made.
@@ -855,7 +892,10 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
         if (pair.inject)
             loads_as_built();
         if (pair.phased)
+        {
             phase_as_built();
+            map_unit_ram_clear(0x00, 0x7F);                     // the counts from 0, as Power_Up's RAM
+        }
         return;
     }
     if (address != previous + 1)
@@ -874,6 +914,17 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
         write(pair.ping + 1, ++pair.beat & 0xFF);
     else if (previous == pair.lost)
         unsync();
+    else if (!pair.phased)
+        return;
+    else if (previous == pair.fire_mark)
+        at_firing();
+    else if (previous == pair.count_mark)
+        at_counted();
+    else if (previous == pair.stop_mark)
+    {
+        unsync();
+        at_stopped();
+    }
 }
 
 void UNIT_CODE(pair_after)()
@@ -996,6 +1047,12 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         pair.start_bit = at(u + 58);
         pair.fuel_cut_bit = at(u + 59);
         pair.boost_cut_bit = at(u + 60);
+        pair.stop_mark = at(u + 61);                            // the counts' marks and places
+        pair.fire_mark = at(u + 62);
+        pair.count_mark = at(u + 63);
+        pair.slew_at = at(u + 64);
+        pair.inj_at = at(u + 65);
+        pair.decay_bit = at(u + 66);
         pair.next_skips = 1;
         pair.turn_cuts = pair.turns = 0;
         // The reference's handlers in one page within 0003h's AJMP; the SJMP's targets within its reach.

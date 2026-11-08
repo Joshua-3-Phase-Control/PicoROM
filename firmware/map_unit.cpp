@@ -463,6 +463,17 @@ uint32_t UNIT_CODE(map_unit_ram)(uint32_t address)
     return ram[address & 0x7F];
 }
 
+void UNIT_CODE(map_unit_ram_write)(uint32_t address, uint32_t value)
+{
+    ram[address & 0x7F] = value;
+}
+
+void UNIT_CODE(map_unit_ram_clear)(uint32_t from, uint32_t to)
+{
+    for (uint32_t a = from; a <= to && a < 0x80; a++)
+        ram[a] = 0;
+}
+
 void UNIT_CODE(map_unit_adc)(uint32_t channel)
 {
     if (!unit.on || at(MARK + 4) < 4)
