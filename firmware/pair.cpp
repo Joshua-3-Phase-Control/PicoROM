@@ -49,6 +49,7 @@ static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
 static constexpr uint32_t MOST_MISSED = 4;
+static constexpr uint32_t MOVES = 2; // reads moved off a spark at once: the last spark's, the next's
 static constexpr int32_t NONE = -0x40000000;
 static constexpr uint32_t LOOPS = 600; // a plan's loop's turns at most (rom_lean's end long before)
 
@@ -72,6 +73,13 @@ struct Place
 struct Load
 {
     uint32_t start, overflows;
+};
+
+// A read moved off a spark: its tooth's count, the count it goes on, the read (NONE: none).
+struct Move
+{
+    int32_t from, to;
+    uint32_t event;
 };
 
 struct Pair
@@ -121,8 +129,8 @@ struct Pair
     bool fire_valid;
     // The coil.
     bool coil_on, spark_due;
-    int32_t late_from, late_to;     // a read moved off a spark: its tooth's count, the one it goes on
-    uint32_t late_event;
+    Move moves[MOVES];              // reads moved off a spark, till they have run: the plan after a
+                                    //   spark comes before its moved read
     uint32_t missed_events[MOST_MISSED], missed_count; // crank events a late run passed, to place
     // The vector.
     uint32_t vector;                // what it holds: an event (NOTHING: a RETI)
@@ -452,7 +460,8 @@ static void UNIT_CODE(drop_coil)()
     pair.coil_on = false;
     pair.spark_due = false;
     pair.arm_at = pair.charge_at = pair.spark_at = NONE;
-    pair.late_from = pair.late_to = NONE;
+    for (uint32_t i = 0; i < MOVES; i++)
+        pair.moves[i] = {NONE, NONE, NOTHING};
     pair.missed_count = 0;
 }
 
@@ -554,12 +563,15 @@ static void UNIT_CODE(plan)(int32_t base)
     pair.sarm = arm;
     pair.arm_at = base + arm - 1;
     pair.spark_at = base + spark_place(pair.plan_adv, pair.spark_b, pair.t64).tooth - 1;
-    pair.late_from = pair.late_to = NONE;
-    if (late_tooth != NONE)
+    if (late_tooth != NONE)                                     // in a slot whose read has run
     {
-        pair.late_from = base + late_tooth - 1;
-        pair.late_to = pair.late_from + (int32_t)late;
-        pair.late_event = event_on(in_firing(late_tooth));
+        Move *move = &pair.moves[0];
+        for (uint32_t i = 0; i < MOVES; i++)
+            if (pair.moves[i].to <= (int32_t)pair.count)
+                move = &pair.moves[i];
+        move->from = base + late_tooth - 1;
+        move->to = move->from + (int32_t)late;
+        move->event = event_on(in_firing(late_tooth));
     }
     uint32_t charge = map_unit_ram(pair.charge_h) << 8 | map_unit_ram(pair.charge_l);
     pair.charge_at = base + charge_plan(pair.plan_adv, arm, charge) - 1;
@@ -577,6 +589,24 @@ static void UNIT_CODE(start)()
     plan(base);
     if (pair.charge_at == NONE || pair.arm_at <= (int32_t)pair.count)
         plan(base + (int32_t)pair.teeth);
+}
+
+// A moved read's event on the tooth whose count is c (NOTHING: none), and whether a read moved from
+// there.
+static uint32_t UNIT_CODE(moved_to)(int32_t c)
+{
+    for (uint32_t i = 0; i < MOVES; i++)
+        if (pair.moves[i].to == c)
+            return pair.moves[i].event;
+    return NOTHING;
+}
+
+static bool UNIT_CODE(moved_from)(int32_t c)
+{
+    for (uint32_t i = 0; i < MOVES; i++)
+        if (pair.moves[i].from == c)
+            return true;
+    return false;
 }
 
 // The crank event of the tooth count back from the latest (a late run's teeth).
@@ -608,7 +638,9 @@ static void UNIT_CODE(late_run)(uint32_t fresh)
             pair.missed++;
             pair.charge_at = pair.arm_at != NONE && next < pair.arm_at ? next : NONE;
         }
-        uint32_t event = c == pair.late_to ? pair.late_event : c == pair.late_from ? NOTHING : event_back(back);
+        uint32_t event = moved_to(c);
+        if (event == NOTHING && !moved_from(c))
+            event = event_back(back);
         if (event != NOTHING && pair.missed_count < MOST_MISSED)
         {
             pair.missed++;
@@ -625,9 +657,10 @@ static uint32_t UNIT_CODE(next_event)()
         return ARM;
     if (next == pair.charge_at)
         return CHARGE;
-    if (next == pair.late_to)
-        return pair.late_event;
-    uint32_t event = next == pair.late_from ? NOTHING : event_on(pair.tif == pair.teeth ? 1 : pair.tif + 1);
+    uint32_t event = moved_to(next);
+    if (event != NOTHING)
+        return event;
+    event = moved_from(next) ? NOTHING : event_on(pair.tif == pair.teeth ? 1 : pair.tif + 1);
     if (event == NOTHING && pair.missed_count != 0)             // a passed crank event, on a free tooth
     {
         event = pair.missed_events[0];
