@@ -77,6 +77,7 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 5    | Ign_Offset's start | Handover: the target                |
 | 6    | Fuel_Time          | InjTimeH:L; the dead time           |
 | 7    | Load_Tick_Run      | LoadHi, LoadMid: the load, filtered |
+| 8    | (format 6)         | none: pair.cpp takes the advance    |
 
 ### Inputs the snoop makes (format 4)
 
@@ -91,6 +92,38 @@ so a task keeps one sent), and copies it in before the task. The unit makes each
 channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's answer waits for no
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
+
+### The paired core (format 6)
+
+Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
+keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
+(0013h), and the board writes that vector before each tooth: a RETI for a plain tooth, or an AJMP
+to the event of the tooth to come (an ADC read, the KLR strobe, the coil's charge, the spark's arm).
+It counts the teeth by the vector's fetches, takes the latch's tooth at each reference by the
+teeth's times, times each firing at slot 0's tooth, and plans the coil after each spark with
+rom_lean's arithmetic: Spark_Plan, Dwell_Plan, Spark_Load, Period_T64, bit for bit. It writes the
+arm's TL0 load into the arm's handler a tooth before it.
+
+The mark's 13th and 14th bytes are the address of its table (Co_Pair):
+- the teeth a firing and the firings a turn;
+- the crank events: each its tooth in its firing and its handler;
+- the coil's handlers;
+- the live bytes: the arm's two operands, and the opcodes of NotSynced's and ToothFault's at the
+  8051's reference;
+- page 0's marks: the ping (the heartbeat's operand after it), the count lost, the spark;
+- the coil's numbers (SPARK_B, ARM_OFS_S, ARM_MIN_S, MARGIN, FLOOR_TEETH, RECIP32) and the
+  latch's (TEETH_HIGH, MARK_G);
+- the RAM bytes it takes from the unit: the charge's time (task 3's outputs) and the advance
+  (task 8's input).
+
+Of the 8 KiB the board writes only the window's page and these live bytes, so that the 8051 never
+fetches a torn instruction:
+- A RETI is one byte.
+- An AJMP goes operand first, then opcode.
+- The handlers are in one page, so one event follows another by the operand alone.
+
+Each ping moves the heartbeat on, and a ping that stands still for 45 ms stops the engine (the
+8051's). `pair_test` runs the ported routines for DME-Sim's checks.
 
 ## How it works
 
