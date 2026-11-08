@@ -809,4 +809,8 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     return 1;
 }
 
+// pair_test is called by DME-Sim alone: this keeps it in the bank (the linker drops what nothing
+// refers to).
+static uint32_t (*volatile pair_entry)(uint32_t) UNIT_DATA = pair_test;
+
 #endif // FEATURE_MAP_UNIT
