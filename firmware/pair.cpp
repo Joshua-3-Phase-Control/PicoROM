@@ -460,8 +460,11 @@ static void UNIT_CODE(drop_coil)()
     pair.coil_on = false;
     pair.spark_due = false;
     pair.arm_at = pair.charge_at = pair.spark_at = NONE;
-    for (uint32_t i = 0; i < MOVES; i++)
-        pair.moves[i] = {NONE, NONE, NOTHING};
+    for (uint32_t i = 0; i < MOVES; i++)                        // (field by field: no initializer in flash)
+    {
+        pair.moves[i].from = pair.moves[i].to = NONE;
+        pair.moves[i].event = NOTHING;
+    }
     pair.missed_count = 0;
 }
 
