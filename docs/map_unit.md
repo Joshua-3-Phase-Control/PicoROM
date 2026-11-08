@@ -78,9 +78,13 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 6    | Fuel_Time          | InjTimeH:L; the dead time           |
 | 7    | Load_Tick_Run      | LoadHi, LoadMid: the load, filtered |
 | 8    | (format 6)         | none: pair.cpp takes the advance    |
-| 9    | Fuel_Maps to       | InjTimeH:L, DeadNow, InjCount, its  |
-|      | Fuel_Mode (fmt 7)  | flags; TH0's load in 8051 code      |
+| 9    | Fuel_Maps to       | InjTimeH:L, DeadNow, its flags;     |
+|      | Fuel_Mode (fmt 7)  | TH0's load in 8051 code             |
 | 10   | the same, again    | the same (none after its reference) |
+| 11   | Ign_Offset to      | Advance, its flags (the cuts the    |
+|      | Ign_Slew (fmt 8)   | 8051's; counts, flags its own)      |
+| 12   | Main_Tick's start  | StartFlags; BoostCount its own      |
+|      | mode (fmt 8)       |                                     |
 
 ### Inputs the snoop makes (format 4)
 
@@ -96,7 +100,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 and 7)
+### The paired core (formats 6 to 8)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -136,6 +140,25 @@ stopped), each an AJMP whose operand is a switch, and its two copies of `MOV TH0
 InjHi,#overflows`. The board writes the copies not in use, then turns each switch (one byte), so the
 8051 loads a whole pair, the old or the new. A pulse made again after a reference is not written.
 The task takes up to about 11 us, so the 8051 reads its first output 34 us after its last input.
+
+Format 8 (step 3.3) adds the advance's rest, start mode and the injection's phase:
+- Task 11 works out rom_lean's pipeline stage 4 (Ign_Offset to Ign_Slew: the target, the overboost
+  guard, the overrun cut and its resume, the slew), and task 12 the tick's start mode with its
+  cold-start variants and the overboost guard's periods, bit for bit.
+- The tasks keep their own state in the board's copy of the 8051's RAM, never sent or taken back:
+  the counts (SlewCount, BoostCount, InjCount), the advance's target, and the flags only they read.
+  Task 11 takes 3 bytes and gives 2. The 8051 tells the board where it moved those counts, by three
+  more page-0 marks (each a RET): the engine stopped (the count lost too; InjCount 0, CrankDecay
+  cleared), a firing (SlewCount one less) and an injection counted (InjCount one more, to 80h). The
+  8051's start clears the copy.
+- The board owns the 720-degree phase. At each reference it turns the next one's and writes the
+  reference's AJMP's operand (0004h: to the injection's handler or the one that leaves it out) and
+  the opcode of the 8051's copy. At slot 0's tooth of the turn's first firing it decides the turn
+  (starting, its pulse; a turn the phase leaves out, none; over Cal_RevLimit or in a cut, a cut;
+  else its pulse) and writes Main_Turn's SJMP's offset.
+- The table adds the reference's two handlers, the SJMP and its three targets, the copy's opcode,
+  what the cut reads (Cal_RevLimit, the speed byte, StartMode, FuelCut, BoostCut), then the marks
+  and the places they change.
 
 ## How it works
 
