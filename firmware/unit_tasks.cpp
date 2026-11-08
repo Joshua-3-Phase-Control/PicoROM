@@ -323,6 +323,8 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         injection_time(t);
     else if (task == TASK_LOAD)
         load(t);
+    else if (task == TASK_COIL)
+        ; // its input kept in ram, where pair.cpp's plans read it
     else
         return false;
     return true;

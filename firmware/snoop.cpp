@@ -29,6 +29,7 @@
 #include "bus_bench.h"
 #include "crank.h"
 #include "map_unit.h"
+#include "pair.h"
 #include "pio_programs.h"
 #include "str_util.h"
 #include "system.h"
@@ -138,6 +139,7 @@ void UNIT_CODE(snoop_page_read)(uint32_t address)
     uint32_t previous = snoop.previous, k = previous >> 3;
     snoop.previous = address;
     snoop.activity++;
+    pair_page_read(address, timer_hw->timerawl); // the paired core's marks (format 6)
     if (address != previous + 1 || (previous & 7) != 3 || k > 4 || !((snoop.vectors >> k) & 1))
         return;
     snoop.entries[k]++;

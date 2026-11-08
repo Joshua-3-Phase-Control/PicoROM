@@ -37,6 +37,10 @@ void map_unit_update();
 // take (format 4).
 void map_unit_adc(uint32_t channel);
 
+// The 8051's RAM byte at address as the unit has it: sent with a task, or a task's output (pair.cpp
+// takes the advance and the charge's time so).
+uint32_t map_unit_ram(uint32_t address);
+
 #else
 
 static inline void map_unit_hide() {}

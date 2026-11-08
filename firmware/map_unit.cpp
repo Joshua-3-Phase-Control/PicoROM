@@ -42,6 +42,7 @@
 #include "pico/multicore.h"
 
 #include "bus_bench.h"
+#include "pair.h"
 #include "pio_programs.h"
 #include "rom.h"
 #include "snoop.h"
@@ -454,6 +455,12 @@ static void UNIT_CODE(map_unit_irq)()
         }
         unit_read(word, start);
     }
+    pair_after(); // the next tooth's vector, from the latest tooth (format 6)
+}
+
+uint32_t UNIT_CODE(map_unit_ram)(uint32_t address)
+{
+    return ram[address & 0x7F];
 }
 
 void UNIT_CODE(map_unit_adc)(uint32_t channel)
@@ -491,7 +498,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 5)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 6)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }
@@ -555,6 +562,7 @@ void UNIT_CODE(map_unit_start)(uint8_t *rom, uint32_t addr_mask)
     uint32_t page = marked_page();
     if (page != 0)
         state_on(page);
+    pair_start(page != 0 ? rom : nullptr);
 }
 
 void map_unit_init(uint8_t *rom, uint32_t addr_mask)
