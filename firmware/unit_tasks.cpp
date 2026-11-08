@@ -800,12 +800,13 @@ static void UNIT_CODE(start_mode)(const Task &t)
     if (period != 0)                                                    //   (by 0: B kept, 0)
         for (left = tick; left >= period;)                              // (no division in the bank)
             left -= period;
-    if (left == 0 && own_bytes)
+    bool tick_job = at(t.rom, 0x2004) >= LOG_FORMAT;                   // format 11: in the tick's job, on its
+    if (left == 0 && own_bytes && !tick_job)                            //   copy (at power-up the count is 0)
         pair_guard_period();                                            // the pipeline's level keeps it
     else if (left == 0 && byte_of(t, 8) != 0)                           // JNZ; MOV A,BoostCount; JZ
         own(t, 8, byte_of(t, 8) - 1);                                   // DEC BoostCount
     put(t, 0, flags);
-    if (at(t.rom, 0x2004) >= TICK_FORMAT)
+    if (at(t.rom, 0x2004) == TICK_FORMAT)
         pair_tick_work();                                               // the tick's work next (task 15)
 }
 
@@ -901,16 +902,21 @@ static void UNIT_CODE(speed_count)(const Task &t)
     own(t, 14, rpm);
 }
 
-// Idle_Error: the idle speed's fine error, (IdleTarget x P - SPEED_K) / 1024: the top two bytes of the
+// Idle_Error: the idle speed's fine error, (the target x P - SPEED_K) / 1024: the top two bytes of the
 // 24-bit difference (the low byte's borrow kept), two right with their sign, within -128 and 127,
 // else the range's end by the sign.
-static uint32_t UNIT_CODE(idle_error)(const Task &t, uint32_t p)
+static uint32_t UNIT_CODE(fine_error)(uint32_t target, uint32_t p, uint32_t k)
 {
-    uint32_t difference = (byte_of(t, 18) * p - speed_k(t)) & 0xFFFFFF;  // MUL AB x 2; SUBB x 3
+    uint32_t difference = (target * p - k) & 0xFFFFFF;                  // MUL AB x 2; SUBB x 3
     int32_t v = (int32_t)(int16_t)(difference >> 8 & 0xFFFF) >> 2;     // MOV C,ACC.7; RRC A, twice
     if (v < -128 || v > 127)                                            // RLC A; CLR A; ADDC A,R2; JZ
         return v < 0 ? 0x80 : 0x7F;                                     // MOV A,#7Fh; ADDC A,#00h
     return (uint32_t)v & 0xFF;                                          // MOV A,R1
+}
+
+static uint32_t UNIT_CODE(idle_error)(const Task &t, uint32_t p)
+{
+    return fine_error(byte_of(t, 18), p, speed_k(t));                   // IdleTarget
 }
 
 // Idle_Spark: the length / 16, its low byte, against the last firing's (IdlePrev): its growth less
@@ -1216,11 +1222,18 @@ static void UNIT_CODE(load_weight)(const Task &t)
     own(t, TW_WARM_WEIGHT, weight);                                     // MUL AB; MOV A,B
 }
 
-static void UNIT_CODE(tick_work)(const Task &t)
+// Main_Tick's throttle switches (format 11: the tick's job's first part, TICK_SWITCHES).
+static void UNIT_CODE(tick_switches)(const Task &t)
 {
     uint32_t switches = step_table(t.rom, t.ram, word(t, TW_SWITCHES)); // Step_Table_Lookup
     set_bit(t, get(t, TW_FULL), switches & 1);                          // RRC A; MOV FullLoadSwitch,C
     set_bit(t, get(t, TW_IDLE), switches >> 1 & 1);                     // RRC A; MOV IdleSwitch,C
+}
+
+static void UNIT_CODE(tick_work)(const Task &t)
+{
+    if (at(t.rom, 0x2004) < LOG_FORMAT)                                 // (format 11: made first)
+        tick_switches(t);
     uint32_t tick = (byte_of(t, TW_TICK_COUNT) + 1) & 0xFF;             // the tick counter as moved on
     if (tick == 180)
         tick = 0;
@@ -1247,6 +1260,396 @@ static void UNIT_CODE(tick_work)(const Task &t)
         accel_enrich(t);
     load_byte(t);                                                       // Main_Byte
     load_weight(t);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Task 16 (format 11): lambda, which pair.cpp's tick runs in three parts in rom_lean's order (the 8051
+// never asks for it): Tick_Stop's open loop at the tick's start, Main_Tick's sensor timer after the
+// tick counter, Main_Lambda after the tick's work. The sensor's comparators come with the 8051's marks
+// (their byte: bit 0 O2_NOT_RICH, P1.6; bit 1 O2_LEAN, P1.7). Data: below (LM_). No inputs or outputs.
+
+namespace
+{
+
+// Task 16's data, by place: Constants' address (a word); the places there of Cal_O2Ready,
+// Cal_O2NotReady, Cal_LamRpmMax, Cal_LamRpmClose, Cal_LamCoolantCold, Cal_LamCoolant (two bytes: off
+// idle, at idle), Cal_LamCoolantHyst, Cal_LamJumpRich, Cal_LamIntMax, Cal_LamLoadMax and
+// Cal_LamMapMax; Lambda_Ramp's and Lambda_Jump's ids; the bits StartMode, NotSynced, FuelCut,
+// BoostCut, FullLoadSwitch, IdleSwitch, ColdStartIgn, O2MidBand, O2Active, ClosedLoop, O2WasRich and
+// O2Ready; the addresses of the marks' byte, TickCount, Rpm, Coolant, Load, In5 and LamInt.
+enum : uint32_t
+{
+    LM_CONSTANTS = 0,
+    LM_O2_READY = 2,
+    LM_O2_NOT_READY,
+    LM_RPM_MAX,
+    LM_RPM_CLOSE,
+    LM_COOLANT_COLD,
+    LM_COOLANT,
+    LM_COOLANT_HYST,
+    LM_JUMP_RICH,
+    LM_INT_MAX,
+    LM_LOAD_MAX,
+    LM_MAP_MAX,
+    LM_RAMP,
+    LM_JUMP,
+    LM_START,
+    LM_NOT_SYNCED,
+    LM_FUEL_CUT,
+    LM_BOOST_CUT,
+    LM_FULL,
+    LM_IDLE,
+    LM_COLD_IGN,
+    LM_MID_BAND,
+    LM_ACTIVE,
+    LM_CLOSED,
+    LM_WAS_RICH,
+    LM_READY,
+    LM_PINS,
+    LM_TICK_COUNT,
+    LM_RPM,
+    LM_COOLANT_BYTE,
+    LM_LOAD,
+    LM_IN5,
+    LM_LAM_INT,
+};
+
+// The marks' bits (pair.cpp: the 8051's pins as its Bits routine read them).
+constexpr uint32_t PIN_NOT_RICH = 1, PIN_LEAN = 2, PIN_AC = 4;
+
+__force_inline uint32_t constant(const Task &t, uint32_t place)
+{
+    return at(t.rom, word(t, 0) + get(t, place));
+}
+
+} // namespace
+
+// Lambda_Load_Open: the full-load switch closed, the load over Cal_LamLoadMax or the MAP over
+// Cal_LamMapMax.
+static bool UNIT_CODE(lambda_load_open)(const Task &t)
+{
+    if (bit(t, get(t, LM_FULL)))                                        // MOV C,FullLoadSwitch; JC
+        return true;
+    if (constant(t, LM_LOAD_MAX) < byte_of(t, LM_LOAD))                 // CJNE A,Load: C; JC
+        return true;
+    return constant(t, LM_MAP_MAX) < byte_of(t, LM_IN5);                // CJNE A,In5: C
+}
+
+// Tick_Stop's: so, the loop open at once and the integrator x 1.0.
+static void UNIT_CODE(lambda_open)(const Task &t)
+{
+    if (!lambda_load_open(t))                                           // ACALL Lambda_Load_Open; JNC
+        return;
+    set_bit(t, get(t, LM_CLOSED), false);                               // CLR ClosedLoop
+    own(t, LM_LAM_INT, 0x80);                                           // MOV LamInt,#80h
+}
+
+// Main_Tick's timer: the sensor's period (Cal_O2NotReady in its middle band, else Cal_O2Ready) at its
+// end on the tick counter (Tick_Due; by 0, B kept: due): ready if out of the band, from the period's
+// second end since the state began (O2Active its first).
+static void UNIT_CODE(lambda_timer)(const Task &t)
+{
+    bool mid = bit(t, get(t, LM_MID_BAND));
+    uint32_t period = constant(t, mid ? LM_O2_NOT_READY : LM_O2_READY), left = 0;
+    if (period != 0)                                                    // MOV A,TickCount; DIV AB; MOV A,B
+        for (left = byte_of(t, LM_TICK_COUNT); left >= period;)
+            left -= period;
+    if (left != 0)                                                      // JNZ Main_Tick_Out
+        return;
+    if (bit(t, get(t, LM_ACTIVE)))                                      // JNB O2Active,Main_Tick_Seen
+        set_bit(t, get(t, LM_READY), !mid);                             // MOV C,O2MidBand; CPL C; MOV O2Ready,C
+    set_bit(t, get(t, LM_ACTIVE), true);                                // SETB O2Active
+}
+
+// Main_Lambda: the sensor rich (O2_LEAN low), a switch since the last run clearing O2Active; the loop
+// closed but starting, not in step, in a cut, by Lambda_Load_Open, over the speed (Cal_LamRpmMax,
+// closed again at Cal_LamRpmClose) or not over the coolant's threshold (Cal_LamCoolantCold after a cold
+// start, else Cal_LamCoolant's, at idle its second; Cal_LamCoolantHyst more to close); the sensor's
+// band; closed with the sensor ready, the integrator a step toward its other side (at a switch the
+// jump, Lambda_Jump, toward rich less Cal_LamJumpRich; else the ramp, Lambda_Ramp: a step each 64 and
+// one more on the rest's share of the ticks), within 0 and Cal_LamIntMax; open, x 1.0.
+static void UNIT_CODE(lambda_run)(const Task &t)
+{
+    uint32_t pins = byte_of(t, LM_PINS);
+    bool lean = pins & PIN_LEAN, rich = !lean, was_rich = bit(t, get(t, LM_WAS_RICH)); // MOV C,O2_LEAN; CPL C
+    if (rich != was_rich)                                               // a switch: CLR O2Active
+        set_bit(t, get(t, LM_ACTIVE), false);
+    bool closed = bit(t, get(t, LM_CLOSED));
+    bool open = bit(t, get(t, LM_START)) || bit(t, get(t, LM_NOT_SYNCED)) || bit(t, get(t, LM_FUEL_CUT))
+                || bit(t, get(t, LM_BOOST_CUT)) || lambda_load_open(t);
+    if (!open)                                                          // CJNE A,Rpm: C; JC Main_Lambda_Open
+        open = constant(t, closed ? LM_RPM_MAX : LM_RPM_CLOSE) < byte_of(t, LM_RPM);
+    if (open)
+        closed = false;                                                 // CLR ClosedLoop
+    else
+    {
+        uint32_t threshold = bit(t, get(t, LM_COLD_IGN)) ? constant(t, LM_COOLANT_COLD)
+                             : at(t.rom, word(t, 0) + get(t, LM_COOLANT) + (bit(t, get(t, LM_IDLE)) ? 1 : 0));
+        if (!closed)
+            threshold = (threshold + constant(t, LM_COOLANT_HYST)) & 0xFF; // ADD A,R2
+        closed = threshold < byte_of(t, LM_COOLANT_BYTE);               // CLR C; SUBB A,Coolant; MOV ClosedLoop,C
+    }
+    bool mid = bit(t, get(t, LM_MID_BAND));                             // the band: not rich and not lean
+    if ((pins & PIN_NOT_RICH) && !lean ? !mid : mid)                    // JNB O2_NOT_RICH; JB O2_LEAN; JB O2MidBand
+    {
+        set_bit(t, get(t, LM_MID_BAND), !mid);                          // SETB, or CLR, O2MidBand
+        set_bit(t, get(t, LM_ACTIVE), false);                           // Main_Lambda_Begun
+    }
+    closed = closed && bit(t, get(t, LM_READY));                        // ANL C,O2Ready
+    set_bit(t, get(t, LM_CLOSED), closed);
+    if (!closed)
+        own(t, LM_LAM_INT, 0x80);                                       // Main_Lambda_One
+    else
+    {
+        uint32_t step;
+        if (rich != was_rich)                                           // Main_Lambda_Jump
+        {
+            uint32_t a = value(t, get(t, LM_JUMP));
+            if (rich)                                                   // XCH A,B; CLR C; SUBB A,B
+                a = (a - constant(t, LM_JUMP_RICH)) & 0xFF;
+            step = ((a + 2) & 0xFF) >> 2;                               // ADD A,#02h; RR A; RR A; ANL A,#3Fh
+        }
+        else                                                            // the ramp: R2 the value, R3 its rest
+        {
+            uint32_t a = value(t, get(t, LM_RAMP)), rest = a & 0x3F;
+            uint32_t share = byte_of(t, LM_TICK_COUNT) * rest & 0x3F;   // MUL AB; ANL A,#3Fh; SUBB A,R3: C
+            step = (a >> 6) + (share < rest ? 1 : 0);                   // RL A; RL A; ANL A,#03h; ADDC A,#00h
+        }
+        uint32_t lam = byte_of(t, LM_LAM_INT);
+        if (rich)                                                       // Main_Lambda_Lean: SUBB; JNC; CLR A
+            lam = lam >= step ? lam - step : 0;
+        else                                                            // ADD A,LamInt; JC; CJNE: at most the max
+        {
+            uint32_t most = constant(t, LM_INT_MAX);
+            lam += step;
+            if (lam > 0xFF || most < lam)
+                lam = most;
+        }
+        own(t, LM_LAM_INT, lam);
+    }
+    set_bit(t, get(t, LM_WAS_RICH), rich);                              // MOV C,SignTmp; MOV O2WasRich,C
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Task 17 (format 11): the idle valve's control, rom_lean's R4.2b, which pair.cpp's tick runs every
+// second tick (the 8051 never asks for it): Main_Idle, then, in step, Idle_Duty with Idle_Ramp. The
+// valve's edges stay the 8051's: the high phase goes to it in the take, which moves an open valve's
+// close by the change (Idle_Duty's end). The A/C request comes with the 8051's marks (bit 2: P3.5, low
+// requested). Data: below (ID_). No inputs or outputs.
+
+namespace
+{
+
+// Task 17's data, by place: Constants' address (a word); SPEED_K (three bytes, low first); ISV_PERIOD
+// (a word); Idle_Ramp's two literals (rom_lean's Cal_IsvRampRpm and Cal_IsvRampStep); the places in
+// Constants of Cal_IdleTargetAc, Cal_IdleOpen, Cal_IdleClose, Cal_IsvCorrMax, Cal_IsvCorrMin, Cal_IsvAc,
+// Cal_IsvBasicSetting, Cal_IsvDutyGain and Cal_IsvDutyOffset; the ids of Idle_Target_Map, Idle_Crank,
+// Isv_Base_Map and Isv_Overrun; the bits NotSynced, StartMode, FuelCut, IdleSwitch, FullLoadSwitch and
+// IdleReturn; the addresses of the marks' byte, FirePeriodL, FirePeriodH, IdleTarget, AdvanceDyn,
+// IdleIntLo, IdleIntHi, IsvRamp, Rpm, IsvHighL and IsvHighH.
+enum : uint32_t
+{
+    ID_CONSTANTS = 0,
+    ID_SPEED_K = 2,
+    ID_PERIOD = 5,
+    ID_RAMP_RPM = 7,
+    ID_RAMP_STEP,
+    ID_TARGET_AC,
+    ID_OPEN,
+    ID_CLOSE,
+    ID_CORR_MAX,
+    ID_CORR_MIN,
+    ID_ISV_AC,
+    ID_BASIC,
+    ID_DUTY_GAIN,
+    ID_DUTY_OFFSET,
+    ID_TARGET_MAP,
+    ID_CRANK,
+    ID_BASE,
+    ID_OVERRUN,
+    ID_NOT_SYNCED,
+    ID_START,
+    ID_FUEL_CUT,
+    ID_IDLE,
+    ID_FULL,
+    ID_RETURN,
+    ID_PINS,
+    ID_FIRE_L,
+    ID_FIRE_H,
+    ID_TARGET,
+    ID_DYN,
+    ID_INT_LO,
+    ID_INT_HI,
+    ID_RAMP,
+    ID_RPM,
+    ID_HIGH_L,
+    ID_HIGH_H,
+};
+
+// Add_Saturate: the sum, at most FFh.
+__force_inline uint32_t add_saturate(uint32_t a, uint32_t b)
+{
+    return a + b > 0xFF ? 0xFF : a + b;
+}
+
+// Integrate: r + or - the gain x a (its high byte at most 7Fh, the low byte kept), held within 0 and
+// FFFFh.
+__force_inline uint32_t integrate(uint32_t r, uint32_t gain, uint32_t a, bool down)
+{
+    uint32_t product = gain * a, high = product >> 8;                   // MUL AB
+    if (high & 0x80)                                                    // JNB B.7; MOV B,#7Fh
+        high = 0x7F;
+    uint32_t step = high << 8 | (product & 0xFF);
+    if (down)                                                           // CPL C; CPL A; XRL B,#0FFh; ADDC
+        return r >= step ? r - step : 0;
+    return r + step > 0xFFFF ? 0xFFFF : r + step;                       // ADDC; CPL C; JC: else FFFFh
+}
+
+} // namespace
+
+// Main_Idle: not in step, the integrator neutral and no duty; else the duty due, the target by coolant
+// (with the A/C request at least Cal_IdleTargetAc), and at idle (not starting, no cut, the idle switch
+// alone closed) the integrator on the spark's term (a lead opens at Cal_IdleOpen, a lag closes as much,
+// on the way back to idle at Cal_IdleClose till the speed is at the target), within Cal_IsvCorrMin and
+// Cal_IsvCorrMax; the throttle open or a cut, on the way back (IdleReturn).
+static bool UNIT_CODE(idle_state)(const Task &t)
+{
+    if (bit(t, get(t, ID_NOT_SYNCED)))                                  // Idle_Reset: the duty kept
+    {
+        own(t, ID_INT_HI, 0x80);
+        own(t, ID_INT_LO, 0);
+        return false;
+    }
+    uint32_t target = value(t, get(t, ID_TARGET_MAP));                  // SETB IdleDuty; Idle_Target_Map
+    if (!(byte_of(t, ID_PINS) & PIN_AC))                                // JB AC_REQUEST: requested, low
+    {
+        uint32_t ac = constant(t, ID_TARGET_AC);                        // CJNE A,B; JNC: the larger
+        if (ac >= target)
+            target = ac;
+    }
+    own(t, ID_TARGET, target);
+    if (bit(t, get(t, ID_START)))                                       // starting: held
+        return true;
+    if (bit(t, get(t, ID_FUEL_CUT)) || !bit(t, get(t, ID_IDLE)))        // Idle_Held
+    {
+        set_bit(t, get(t, ID_RETURN), true);
+        return true;
+    }
+    if (bit(t, get(t, ID_FULL)))                                        // the jumper
+        return true;
+    bool back = bit(t, get(t, ID_RETURN));
+    if (back)                                                           // ACALL Idle_Error; JB ACC.7
+    {
+        uint32_t p = byte_of(t, ID_FIRE_H) << 8 | byte_of(t, ID_FIRE_L);
+        uint32_t k = get(t, ID_SPEED_K) | get(t, ID_SPEED_K + 1) << 8 | get(t, ID_SPEED_K + 2) << 16;
+        if (!(fine_error(target, p, k) & 0x80))
+        {
+            back = false;
+            set_bit(t, get(t, ID_RETURN), false);                       // CLR IdleReturn
+        }
+    }
+    uint32_t term = byte_of(t, ID_DYN), gain = ID_OPEN;                 // Idle_Back: AdvanceDyn
+    bool lag = term & 0x80;
+    if (lag)
+    {
+        if (back)
+            gain = ID_CLOSE;
+        term = (0x100 - term) & 0xFF;                                   // CPL A; INC A
+    }
+    uint32_t r = integrate(byte_of(t, ID_INT_HI) << 8 | byte_of(t, ID_INT_LO), constant(t, gain), term, lag);
+    uint32_t r1 = r >> 8;
+    if (r1 & 0x80)                                                      // within the limits: R1 alone
+    {
+        uint32_t most = (0x80 + (constant(t, ID_CORR_MAX) >> 1)) & 0xFF; // CLR C; RRC A; ADD A,#80h
+        if (most < r1)                                                  // CJNE A,01h: C; JNC
+            r1 = most;
+    }
+    else
+    {
+        uint32_t least = (0x80 + (~(constant(t, ID_CORR_MIN) >> 1) & 0xFF)) & 0xFF; // RRC A; CPL A; ADD A,#80h
+        if (least >= r1)                                                // CJNE A,01h: C; JC
+            r1 = least;
+    }
+    own(t, ID_INT_LO, r & 0xFF);
+    own(t, ID_INT_HI, r1);
+    return true;
+}
+
+// Idle_Ramp: under Cal_IsvRampRpm the command the cranking position by coolant (Idle_Crank) and the
+// weight full; past it the weight Cal_IsvRampStep less (to 0), the loop's command moved toward the
+// position by their difference x the weight / 256, rounded (none at 0: the loop's alone). R1:R0 = r.
+static uint32_t UNIT_CODE(idle_ramp)(const Task &t, uint32_t r)
+{
+    uint32_t a;
+    if (byte_of(t, ID_RPM) < get(t, ID_RAMP_RPM))                       // CJNE A,#10: C; JNC Idle_Ramp_Step
+    {
+        own(t, ID_RAMP, 0xFF);
+        a = value(t, get(t, ID_CRANK));
+    }
+    else
+    {
+        uint32_t weight = byte_of(t, ID_RAMP), step = get(t, ID_RAMP_STEP);
+        if (weight == 0)                                                // JZ Idle_Ramp_Out
+            return r;
+        weight = weight >= step ? weight - step : 0;                    // SUBB A,#6; JNC; CLR A
+        own(t, ID_RAMP, weight);
+        uint32_t command = r >> 7 & 0xFF;                               // RLC A twice: / 128 (B)
+        uint32_t position = value(t, get(t, ID_CRANK));
+        bool down = position < command;                                 // SUBB A,B: RampNeg
+        uint32_t size = down ? command - position : position - command; // CPL A; INC A
+        uint32_t moved = (size * weight + 0x80) >> 8;                   // MUL AB; ADD A,#80h; ADDC A,B
+        a = (command + (down ? 0x100 - moved : moved)) & 0xFF;          // CPL A; INC A; ADD A,R2
+    }
+    return a << 7;                                                      // CLR C; RRC A twice: x 128
+}
+
+// Idle_Duty: the base (Isv_Base_Map by speed and coolant; in a cut Isv_Overrun's dashpot by speed, with
+// the A/C request Cal_IsvAc, each Add_Saturate) x 128 and the integrator's correction (its neutral
+// 8000h), within 0 and 7FFFh, through Idle_Ramp; or, both switches closed, not starting and no cut,
+// Cal_IsvBasicSetting alone (the jumper). Its duty: the command x 2 x Cal_IsvDutyGain / 256 (Mul16x8),
+// Cal_IsvDutyOffset on its high byte; its high phase that x ISV_PERIOD / 65536 (Mul16x16).
+static void UNIT_CODE(idle_duty)(const Task &t)
+{
+    uint32_t base = value(t, get(t, ID_BASE));
+    bool cut = bit(t, get(t, ID_FUEL_CUT));
+    if (cut)
+        base = add_saturate(value(t, get(t, ID_OVERRUN)), base);
+    if (!(byte_of(t, ID_PINS) & PIN_AC))
+        base = add_saturate(constant(t, ID_ISV_AC), base);
+    uint32_t r;
+    if (!bit(t, get(t, ID_START)) && !cut && bit(t, get(t, ID_FULL)) && bit(t, get(t, ID_IDLE)))
+        r = constant(t, ID_BASIC) >> 1 << 8;                            // Idle_Basic: RRC A; MOV R0,#00h
+    else
+    {
+        uint32_t integrator = byte_of(t, ID_INT_HI) << 8 | byte_of(t, ID_INT_LO);
+        r = (base * 0x80 + integrator - 0x8000) & 0xFFFF;               // MUL AB; ADD A,R0; ADDC A,R1
+        if (r & 0x8000)                                                 // JNB ACC.7; JNB IsvCorrNeg: 7FFFh,
+            r = integrator >= 0x8000 ? 0x7FFF : 0;                      //   else 0
+        r = idle_ramp(t, r);
+    }
+    uint32_t duty = (r << 1 & 0xFFFF) * constant(t, ID_DUTY_GAIN) >> 8 & 0xFFFF; // Idle_Set; Mul16x8
+    duty = ((duty >> 8) + constant(t, ID_DUTY_OFFSET)) << 8 & 0xFF00 | (duty & 0xFF);  // ADD A,R7
+    uint32_t high = duty * (get(t, ID_PERIOD) << 8 | get(t, ID_PERIOD + 1)) >> 16; // Mul16x16
+    own(t, ID_HIGH_L, high & 0xFF);
+    own(t, ID_HIGH_H, high >> 8 & 0xFF);
+}
+
+bool UNIT_CODE(unit_task_part)(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram)
+{
+    Task t = task_of(rom, ram, description);
+    if (task == TASK_TICKWORK && part == TICK_SWITCHES)
+        tick_switches(t);
+    else if (task == TASK_LAMBDA && part == LAMBDA_OPEN)
+        lambda_open(t);
+    else if (task == TASK_LAMBDA && part == LAMBDA_TIMER)
+        lambda_timer(t);
+    else if (task == TASK_LAMBDA && part == LAMBDA_RUN)
+        lambda_run(t);
+    else if (task == TASK_IDLE && part == IDLE_STATE)
+        return idle_state(t);
+    else if (task == TASK_IDLE && part == IDLE_DUTY)
+        idle_duty(t);
+    return true;
 }
 
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)

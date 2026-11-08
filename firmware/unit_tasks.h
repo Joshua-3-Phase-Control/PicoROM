@@ -35,6 +35,21 @@ enum : uint32_t
     TASK_TICKWORK, // the tick's work (format 10): the switches, the enrichments, the dynamic spark's
                    //   filter, the AFM's rise, the load and its byte, the warm-up's weight, which
                    //   pair.cpp's tick job runs after task 12 (the 8051 never asks for it)
+    TASK_LAMBDA,   // lambda (format 11): Tick_Stop's open loop, Main_Tick's sensor timer, Main_Lambda,
+                   //   which pair.cpp's tick runs in parts (unit_task_part)
+    TASK_IDLE,     // the idle valve's control (format 11): Main_Idle, then Idle_Duty with Idle_Ramp
+};
+
+// Format 11's parts of tasks 15, 16 and 17, which pair.cpp's tick runs in rom_lean's order.
+enum : uint32_t
+{
+    TICK_SWITCHES, // Main_Tick's first: the throttle switches (task 15 then makes none), which the open
+                   //   loop takes
+    LAMBDA_OPEN,  // Tick_Stop's: the loop open at once (Lambda_Load_Open), its integrator x 1.0
+    LAMBDA_TIMER, // Main_Tick's: the sensor's period, ready or not
+    LAMBDA_RUN,   // Main_Lambda
+    IDLE_STATE,   // Main_Idle: the target and the integrator; true if the duty is due (in step)
+    IDLE_DUTY,    // Idle_Duty with Idle_Ramp: the valve's high phase into IsvHighL and IsvHighH
 };
 
 // Format 9 (DME-Sim's docs/Paired_Pipeline.md): the pipeline is pair.cpp's, and the bytes it keeps the
@@ -46,6 +61,12 @@ static constexpr uint32_t PIPELINE_FORMAT = 9;
 // task 12's end, which sets the AFM's filter at start mode's end); task 13 sends lambda's integrator
 // and the idle target alone.
 static constexpr uint32_t TICK_FORMAT = 10;
+
+// Format 11 (DME-Sim's docs/Paired_Lambda_Idle.md): the whole tick is pair.cpp's, at the 8051's ping:
+// task 12 runs there (the window asks for it at power-up alone), then the tick's work, lambda (task
+// 16) and the idle control (task 17); the 8051 sends no tick's values (task 13 gone) and does no
+// serial (the log is pair.cpp's). Task 12 keeps the guard's count in its own copy then.
+static constexpr uint32_t LOG_FORMAT = 11;
 
 // The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
 // the unit did with its own count and bits (format 8), as rom_lean's routines did.
@@ -60,6 +81,9 @@ enum : uint32_t
 
 // Works task out from its description; false if there is no such task.
 bool unit_task(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram);
+
+// Format 11: a part of task 15, 16 or 17 (above); IDLE_STATE's answer, else true.
+bool unit_task_part(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram);
 
 // From the map unit (map_unit.cpp): map id's value, its inputs as ram holds them.
 uint32_t unit_map_value(uint32_t id, const uint8_t *ram);

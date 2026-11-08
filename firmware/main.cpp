@@ -113,7 +113,8 @@ bool set_parameter(const char *name, const char *value)
     }
     else if (streq(name, "comms_mode"))
     {
-        return comms_set_mode(value); // block or window, with no session open; not kept in flash
+        return comms_set_mode(value); // block, window or (map unit) log, with no session open; not
+                                      //   kept in flash
     }
     else if (streq(name, "reset"))
     {

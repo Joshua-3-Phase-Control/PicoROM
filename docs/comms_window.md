@@ -16,6 +16,9 @@ each byte costs the program one read.
 4. CommsEnd ends the session, and so does USB going (unmounted). With the PC not reading, the bytes
    past a 1 KiB queue are dropped, and `comms_dropped` counts them: nothing waits on the PC.
 
+The map unit's builds take a third mode, `log` (docs/map_unit.md, format 11): a session sends the
+unit's own log the same way, its frames made by the board, not bytes the target reads.
+
 ## Notes
 
 - The address lines `addr_mask` leaves out read 0, so the page is matched within the ROM as served.

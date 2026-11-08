@@ -45,6 +45,11 @@ void pair_tick_work();
 // it); it does the jobs the bus level queued, in turn.
 void pair_control();
 
+// Format 11 (DME-Sim's docs/Paired_Lambda_Idle.md): the log, each frame of it made at its tick into a
+// ring (the 8051 does no serial). The bytes written since *from (a count of all written), at most
+// most of them, into bytes; *from moved past them (on past what the ring no longer holds).
+uint32_t pair_log_read(uint32_t *from, uint8_t *bytes, uint32_t most);
+
 // DME-Sim's checks of the ported routines: routine's inputs and outputs in pair_case (pair.cpp).
 uint32_t pair_test(uint32_t routine);
 

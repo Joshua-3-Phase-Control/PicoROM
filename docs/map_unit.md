@@ -90,6 +90,10 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 |      | Idle_Spark (fmt 9) | IdlePrev, AdvanceDyn at idle        |
 | 15   | the tick's work    | none sent: the board's switches,    |
 |      | (format 10)        | load, enrichments, filters          |
+| 16   | lambda (format 11) | none sent: the board's integrator,  |
+|      |                    | loop and sensor's bits              |
+| 17   | the idle control   | none sent: the board's target,      |
+|      | (format 11)        | integrator, ramp, high phase        |
 
 ### Inputs the snoop makes (format 4)
 
@@ -105,7 +109,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 10)
+### The paired core (formats 6 to 11)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -209,6 +213,34 @@ Format 10 (step 3.5, DME-Sim's docs/Paired_Tick.md) moves the tick's work onto t
 - **The tick's send** (task 13) carries lambda's integrator and the idle target alone.
 - The table adds the RAM addresses the take copies (Load, AccelEnrich, AfterStart), the switches'
   bits, AfmFilt's and Afm's. Format 9's take is not read any more.
+
+Format 11 (step 3.6, DME-Sim's docs/Paired_Lambda_Idle.md) moves the whole tick onto the board,
+with lambda, the idle valve's control and the log; the 8051 does no serial:
+- **The tick's job** at each ping (the 8051 pings after its Tick_Stop), in rom_lean's order: the
+  speed byte's bound and the throttle switches (task 15's first part), Tick_Stop's open loop (task
+  16), start mode and the guard's periods (task 12 on the job's copy; the window asks for it at the
+  8051's power-up alone), the rest of task 15, the tick counter (the board's own), lambda's timer
+  and lambda (task 16), the waiting pulse made again (task 10), every second tick the idle
+  control's state and a duty (task 17; a duty too when a stop's run asked for one), and every
+  Cal_StreamTicks ticks the log's frame. Tasks 15 to 17 run in parts there (`unit_task_part`).
+- **The pins.** The 8051 tells its oxygen sensor's comparators and its A/C request by calling one of
+  eight RETs in page 0, two bytes apart; the board keeps the three bits in its copy (PinBits).
+- **The take** carries what the 8051 uses: the count, the MAP pulse's dead time, the pulse's flags,
+  the idle switch's and start mode's SETB or CLR, and in registers the valve's duties made, the
+  pulses' counts and the valve's high phase. A copy is 25 bytes.
+- **The starting injection.** At slot 0's tooth the board points Main_Firing's SJMP at the injection
+  or past it by its start mode, and counts what it pointed at.
+- **The reference's flags** go: NotSynced, ToothFault, the phase's copy and RefMissing (the
+  reference's check, now the board's: a turn's first firing with no reference since the last) are
+  in the board's copy alone, for the log.
+- **The log.** Each frame (rom_lean's: A5h 5Ah, the count, the bytes Cal_StreamAddresses lists from
+  the job's copy, with those bits as the bus level has them, then the sum) goes into a ring of 256
+  bytes. With `comms_mode` set to `log` (no session open), a comms session sends the PC the bytes
+  put since it began as CommsData packets, paced as the comms window's (24 bytes or a millisecond);
+  what the ring no longer holds is lost, so nothing waits on the PC.
+- The table adds the marks' first address and the pins' byte, the log's bits, the SJMP and its two
+  targets, TickCount's and LamInt's addresses, Cal_StreamTicks and Cal_StreamAddresses, and the
+  high phase's bytes. The flags' opcodes and the phase's copy's are 0.
 
 ## How it works
 
@@ -315,6 +347,7 @@ USB busy (the 8051 reads 7.5 us after), the interrupt itself 0.82 us of it at mo
 ## Open
 
 - Run it on a P28 in the DME.
+- The log's packets (format 11) on a board: the comms session in mode `log` hasn't been run.
 - The tasks on a P28 in a DME (run on a POG's benches only).
 - A commit with the unit on (the shadow to flash) hasn't been tried on a board.
 - The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles (with the bus

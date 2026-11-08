@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "comms.h"
+#include "pair.h"
 #include "pico_link.h"
 #include "pio_programs.h"
 #include "system.h"
@@ -67,6 +68,14 @@ static bool window_mode = false;
 static volatile bool window_active = false;
 static uint32_t window_dropped = 0;
 static uint32_t window_sent_us = 0;
+
+// The log (comms_mode log; the map unit's format 11, DME-Sim's docs/Paired_Lambda_Idle.md): the paired
+// core's 8051 does no serial; the unit makes each frame of its log at its tick (pair.cpp's ring), and
+// a session in this mode sends the PC the bytes put since it began, as CommsData packets paced as the
+// window's. No program watches the bus: the bytes come from the unit, not the 8051.
+static bool log_mode = false;
+static bool log_active = false;
+static uint32_t log_from = 0;
 
 static void comms_window_irq()
 {
@@ -177,12 +186,22 @@ static void comms_window_begin(uint32_t addr)
 
 bool comms_set_mode(const char *mode)
 {
-    if (window_active || comms_reg != nullptr)
+    if (window_active || log_active || comms_reg != nullptr)
         return false; // with no session open only
     if (streq(mode, "block"))
-        window_mode = false;
+        window_mode = log_mode = false;
     else if (streq(mode, "window"))
+    {
         window_mode = true;
+        log_mode = false;
+    }
+#if defined(FEATURE_MAP_UNIT)
+    else if (streq(mode, "log"))
+    {
+        window_mode = false;
+        log_mode = true;
+    }
+#endif
     else
         return false;
     return true;
@@ -190,7 +209,7 @@ bool comms_set_mode(const char *mode)
 
 const char *comms_get_mode()
 {
-    return window_mode ? "window" : "block";
+    return log_mode ? "log" : window_mode ? "window" : "block";
 }
 
 uint32_t comms_window_dropped()
@@ -198,8 +217,36 @@ uint32_t comms_window_dropped()
     return window_dropped;
 }
 
+// The log's session: the unit's bytes since it began, a packet each WINDOW_PACKET bytes or each
+// millisecond with fewer, while the PC takes them (the ring keeps the latest 256 bytes meanwhile).
+static void comms_log_update()
+{
+#if defined(FEATURE_MAP_UNIT)
+    if (!tud_mounted())
+    {
+        log_active = false; // USB gone: the session ends
+        return;
+    }
+    uint32_t now = time_us_32(), from = log_from;
+    uint8_t bytes[WINDOW_PACKET];
+    uint32_t count = pair_log_read(&from, bytes, WINDOW_PACKET);
+    if (count == 0 || (count < WINDOW_PACKET && now - window_sent_us < WINDOW_SEND_US))
+        return;
+    if (!pl_can_send_unasked(count))
+        return; // the PC isn't taking packets: the ring keeps them, till it goes round
+    pl_send_payload(PacketType::CommsData, bytes, count);
+    log_from = from;
+    window_sent_us = now;
+#endif
+}
+
 void comms_window_update()
 {
+    if (log_active)
+    {
+        comms_log_update();
+        return;
+    }
     if (!window_active)
         return;
     if (!tud_mounted())
@@ -323,6 +370,18 @@ static void update_comms_out(uint8_t *outbytes, int *outcount, int max_outcount)
 
 void comms_begin_session(uint32_t addr, uint8_t *rom_base)
 {
+#if defined(FEATURE_MAP_UNIT)
+    if (log_mode)
+    {
+        uint8_t none[1];
+        log_from = 0;
+        while (pair_log_read(&log_from, none, 1) != 0) // from the bytes put by now on
+            ;
+        window_sent_us = time_us_32();
+        log_active = true;
+        return;
+    }
+#endif
     if (window_mode)
     {
         comms_window_begin(addr);
@@ -350,6 +409,7 @@ void comms_begin_session(uint32_t addr, uint8_t *rom_base)
 
 void comms_end_session()
 {
+    log_active = false;
     comms_window_stop();
     if (comms_reg == nullptr) return;
 
