@@ -25,6 +25,9 @@ enum : uint32_t
     TASK_PULSE,   // the pulse (format 7): Fuel_Maps or Fuel_Crank, Fuel_Time and Fuel_Mode, TH0's load
                   //   written into the 8051's code (pair_pulse)
     TASK_AGAIN,   // the same, the pulse made again before its reference
+    TASK_REST,    // the advance's rest (format 8): Ign_Offset, the overboost guard, the overrun cut, the
+                  //   slew (the pipeline's stage 4)
+    TASK_START,   // the tick's start mode (format 8): Main_Tick's, with Start_Variants; its end to pair.cpp
 };
 
 // Works task out from its description; false if there is no such task.

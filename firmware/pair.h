@@ -27,6 +27,10 @@ void pair_advance(uint32_t advance);
 // made again (again) after its reference came: none written.
 bool pair_pulse(uint32_t start, uint32_t overflows, bool again);
 
+// Task 12 (format 8): start mode over, as the tick found it: the next reference injects (rom_lean's
+// Main_Tick_Over cleared Inj720Odd).
+void pair_start_over();
+
 // DME-Sim's checks of the ported routines: routine's inputs and outputs in pair_case (pair.cpp).
 uint32_t pair_test(uint32_t routine);
 

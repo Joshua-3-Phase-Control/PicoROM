@@ -49,6 +49,14 @@ __force_inline uint32_t bit(const Task &t, uint32_t address)
     return t.ram[0x20 + (address >> 3 & 0x0F)] >> (address & 7) & 1;
 }
 
+// An 8051 bit set to on, or cleared, in the RAM bytes kept (a task's own decision, for pair.cpp too).
+__force_inline void set_bit(const Task &t, uint32_t address, bool on)
+{
+    uint8_t &byte = t.ram[0x20 + (address >> 3 & 0x0F)];
+    uint32_t mask = 1u << (address & 7);
+    byte = on ? byte | mask : byte & ~mask;
+}
+
 // The 8051's RAM byte whose address is the task's data byte i, as sent.
 __force_inline uint32_t byte_of(const Task &t, uint32_t i)
 {
@@ -234,14 +242,20 @@ static void UNIT_CODE(advance)(const Task &t)
 // when negative by the constant after it (Cal_AdvanceMin), each compared as unsigned bytes, then halved
 // with its sign (RRC). Data: Ign_SpeedOffset's id; Constants' address; Cal_AdvanceMax's place in
 // Constants; Handover's RAM address. Out: Handover.
-static void UNIT_CODE(offset)(const Task &t)
+static uint32_t UNIT_CODE(target_of)(const Task &t, uint32_t handover, uint32_t offset_id, uint32_t constants,
+                                     uint32_t max_place)
 {
-    uint32_t sum = sum_map(t, byte_of(t, 4), get(t, 0));                // MOV B,Handover; Sum_Map
+    uint32_t sum = sum_map(t, handover, offset_id);                     // MOV B,Handover; Sum_Map
     uint32_t negative = sum >> 7;                                       // MOV C,ACC.7
-    uint32_t limit = at(t.rom, word(t, 1) + ((get(t, 3) + negative) & 0xFF)); // MOV A,#..; (INC A;) MOVC
+    uint32_t limit = at(t.rom, constants + ((max_place + negative) & 0xFF)); // MOV A,#..; (INC A;) MOVC
     uint32_t kept = negative ? (sum >= limit ? sum : limit)             // the sum less the limit, no borrow
                              : (limit >= sum ? sum : limit);            // the limit less the sum, no borrow
-    put(t, 0, kept >> 1 | (kept & 0x80));                               // MOV C,ACC.7; RRC A
+    return kept >> 1 | (kept & 0x80);                                   // MOV C,ACC.7; RRC A
+}
+
+static void UNIT_CODE(offset)(const Task &t)
+{
+    put(t, 0, target_of(t, byte_of(t, 4), get(t, 0), word(t, 1), get(t, 3)));
 }
 
 // Fuel_Time's arithmetic: the injection time a turn (R7:R6) on the slow factor r (shift its exponent,
@@ -471,6 +485,281 @@ static void UNIT_CODE(load)(const Task &t)
     put(t, 1, state >> 8);                                              // LoadMid: R1
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Task 11 (format 8): the advance's rest, rom_lean's pipeline stage 4 from Ign_Offset to Ign_Slew.
+// Inputs, in turn: Handover (the maps' sum, task 4's), Rpm, Load, the bytes of BoostOver's bits (21h),
+// SlewHighLoad's (22h) and StartMode's (23h), Advance, SlewCount, BoostCount, InjCount, and the snoop's
+// In5 and Coolant. Data: Ign_SpeedOffset's id; Constants' address; the places there of Cal_AdvanceMax,
+// then Boost_MaxLoad's, Boost_MaxMap's and Overrun_CutSpeed's ids, then the places of Cal_BoostGuardMap,
+// Cal_BoostDelay, Cal_BoostDelayMap, Cal_BoostRelease, Cal_BoostHyst, Cal_BoostReleaseTime,
+// Cal_OverrunHyst, Cal_ResumeStepThrottle, Cal_ResumeStepRpm, Cal_SlewResume, Cal_SlewOverrun,
+// Cal_SlewHighLoad, Cal_SlewNormal, Cal_SlewLoad and Cal_SlewRpm; the bits StartMode, IdleSwitch,
+// NotSynced, FuelCut, BoostOver, BoostCut, ResumeRamp, ResumeByRpm, SlewHighLoad, SlewOverrun,
+// SlewResume. Out: Advance, SlewCount, BoostCount, InjCount, and the flags (AdvFlags, below), which the
+// 8051 copies into its bits; they are kept here too (pair.cpp's turn reads the cuts).
+
+namespace
+{
+
+// The advance's flags, bit by bit as the 8051 copies them (AdvFlags).
+enum : uint32_t
+{
+    ADV_BOOST_OVER = 1,
+    ADV_BOOST_CUT = 2,
+    ADV_FUEL_CUT = 4,
+    ADV_RESUME_RAMP = 8,
+    ADV_RESUME_BY_RPM = 0x10,
+    ADV_SLEW_HIGH_LOAD = 0x20,
+    ADV_SLEW_OVERRUN = 0x40,
+    ADV_SLEW_RESUME = 0x80,
+};
+
+// The advance's state as stage 4 takes and leaves it.
+struct AdvanceState
+{
+    uint32_t advance, slew, boost, count;
+    bool over, cut, fuel_cut, ramp, by_rpm, high, overrun, resume;
+};
+
+__force_inline uint32_t cal(const Task &t, uint32_t place)
+{
+    return at(t.rom, word(t, 1) + get(t, place));
+}
+
+} // namespace
+
+// Ign_Boost: the overboost guard (with Cal_BoostGuardMap the snoop's In5 against Boost_MaxMap, else the
+// load byte against Boost_MaxLoad, both by speed): over the limit for its delay of periods (BoostCount,
+// counted down by the 8051's tick), the fuel cut till at or below the release level for its time, or
+// the throttle closed. Starting: none.
+static void UNIT_CODE(boost_guard)(const Task &t, AdvanceState &s, bool starting, bool idle)
+{
+    if (starting)
+    {
+        s.cut = s.over = false;                                         // Ign_Boost_Release
+        return;
+    }
+    bool on_map = cal(t, 7) != 0;                                       // Cal_BoostGuardMap
+    uint32_t b = on_map ? input(t, 10) : input(t, 2);                   // MOV B,In5 / MOV B,Load
+    uint32_t limit = value(t, get(t, on_map ? 5 : 4));                  // Boost_MaxMap / Boost_MaxLoad: R3
+    if (!s.cut)                                                         // JB BoostCut,Ign_Boost_Cut
+    {
+        if (limit >= b)                                                 // CJNE A,B; JC Ign_Boost_Above
+            s.over = false;                                             // within it
+        else if (!s.over)
+        {
+            s.over = true;                                              // the delay for what is guarded
+            s.boost = cal(t, on_map ? 9 : 8);                           // Cal_BoostDelayMap / Cal_BoostDelay
+        }
+        else if (s.boost == 0)                                          // over it long enough
+        {
+            s.cut = true;
+            s.over = false;
+        }
+        return;
+    }
+    if (idle)                                                           // the throttle closed
+    {
+        s.cut = s.over = false;
+        return;
+    }
+    uint32_t level = on_map ? cal(t, 10) : (limit - cal(t, 11)) & 0xFF; // Cal_BoostRelease; or CPL; INC; ADD A,R3
+    if (level < b)                                                      // CJNE A,B; JNC Ign_Boost_Below
+        s.over = false;                                                 // above it: the release's time again
+    else if (!s.over)
+    {
+        s.over = true;
+        s.boost = cal(t, 12);                                           // Cal_BoostReleaseTime
+    }
+    else if (s.boost == 0)
+        s.cut = s.over = false;                                         // Ign_Boost_Release
+}
+
+// The resume after an overrun cut (Ign_Overrun_Step): the advance a step on, the pulses ramped
+// (InjCount from 0), the cut over; the target below the advance a step at once, else the resume's slew
+// (its firings less this one) with the target taken as it is. True if the slew took the target so
+// (Ign_Slewed: past Ign_Target).
+static bool UNIT_CODE(resume)(const Task &t, AdvanceState &s, uint32_t step, uint32_t target)
+{
+    s.advance = (s.advance + step) & 0xFF;                              // ADD A,Advance
+    s.count = 0;
+    s.ramp = true;
+    s.fuel_cut = false;
+    if ((target - s.advance) & 0x80)                                    // SUBB A,Advance; JNB ACC.7
+    {
+        s.slew = 0;
+        return false;
+    }
+    s.slew = (cal(t, 16) - 1) & 0xFF;                                   // Cal_SlewResume's firings; DEC A
+    s.resume = true;
+    return true;
+}
+
+// Ign_Overrun: the idle switch closed above the cut-off speed (Overrun_CutSpeed by coolant, and
+// Cal_OverrunHyst, its second after a resume by the speed): the advance to its target first
+// (SlewOverrun), then the cut; the speed back at the cut-off or the throttle open: the resume. True if
+// the slew takes the target as it is (Ign_Slewed).
+static bool UNIT_CODE(overrun_cut)(const Task &t, AdvanceState &s, uint32_t target, bool idle)
+{
+    if (!idle)                                                          // Ign_Overrun_Open
+    {
+        s.by_rpm = s.overrun = false;
+        return s.fuel_cut && resume(t, s, cal(t, 14), target);          // Cal_ResumeStepThrottle
+    }
+    uint32_t rpm = input(t, 1), cutoff = value(t, get(t, 6));           // Overrun_CutSpeed
+    if (cutoff >= rpm)                                                  // SUBB A,Rpm; JNC Ign_Overrun_Below
+    {
+        s.overrun = false;
+        if (!s.fuel_cut)
+            return false;
+        s.by_rpm = true;
+        return resume(t, s, cal(t, 15), target);                        // Cal_ResumeStepRpm
+    }
+    uint32_t hyst = at(t.rom, word(t, 1) + get(t, 13) + (s.by_rpm ? 1 : 0)); // Cal_OverrunHyst (+1)
+    if (hyst + ((cutoff - rpm) & 0xFF) > 0xFF)                          // ADD A,R3; JC Ign_Taken: within it
+        return false;
+    s.overrun = true;                                                   // the advance to its target first
+    if (target != s.advance)                                            // CJNE A,Advance,Ign_Taken
+        return false;
+    s.fuel_cut = true;                                                  // ... then the cut
+    s.overrun = false;
+    s.advance = target;
+    return true;
+}
+
+// Ign_Target: the slew's flag by load and speed (above Cal_SlewLoad, or at Cal_SlewRpm and below), a
+// step due when it changes but toward or after a cut; not in step the advance at the target at once;
+// after a cut the resume's slew over once the target is below the advance.
+static void UNIT_CODE(slew_target)(const Task &t, AdvanceState &s, uint32_t target, bool not_synced)
+{
+    bool c = cal(t, 20) < input(t, 2)                                   // Cal_SlewLoad; SUBB A,Load; JC
+             || cal(t, 21) >= input(t, 1);                              // Cal_SlewRpm; SUBB A,Rpm; CPL C
+    if (s.high)                                                         // JNB SlewHighLoad; CPL C
+        c = !c;
+    if (c)                                                              // JNC Ign_Target_Sync
+    {
+        s.high = !s.high;
+        if (!s.resume && !s.overrun)
+            s.slew = 0;
+    }
+    if (not_synced)                                                     // JNB NotSynced,Ign_Target_Resume
+    {
+        s.advance = target;
+        s.slew = 0;
+    }
+    if (s.resume && ((target - s.advance) & 0x80))                      // SUBB A,Advance; JNB ACC.7
+    {
+        s.resume = false;
+        s.slew = 0;
+    }
+}
+
+// Ign_Slew: a step due (SlewCount 0), the pair the flags pick (Cal_SlewResume, Cal_SlewOverrun,
+// Cal_SlewHighLoad, else Cal_SlewNormal: its firings to the next step, its half-teeth), the advance a
+// step toward the target, or the target if nearer.
+static void UNIT_CODE(slew_step)(const Task &t, AdvanceState &s, uint32_t target)
+{
+    if (s.slew != 0)                                                    // JNZ Ign_Done
+        return;
+    uint32_t place = word(t, 1) + get(t, s.resume ? 16 : s.overrun ? 17 : s.high ? 18 : 19);
+    s.slew = at(t.rom, place);                                          // its firings
+    uint32_t step = at(t.rom, place + 1), diff = (target - s.advance) & 0xFF;   // its half-teeth; SUBB A,R7
+    if (diff & 0x80)                                                    // below it
+        s.advance = ((0x100 - diff) & 0xFF) < step ? target : (s.advance - step) & 0xFF; // CPL; INC; SUBB A,R4
+    else
+        s.advance = diff < step ? target : (s.advance + step) & 0xFF;   // SUBB A,R4; ADD A,R4
+}
+
+static void UNIT_CODE(advance_rest)(const Task &t)
+{
+    AdvanceState s;                                                     // (field by field: no initializer in flash)
+    s.advance = input(t, 6);
+    s.slew = input(t, 7);
+    s.boost = input(t, 8);
+    s.count = input(t, 9);
+    s.over = bit(t, get(t, 26));
+    s.cut = bit(t, get(t, 27));
+    s.fuel_cut = bit(t, get(t, 25));
+    s.ramp = bit(t, get(t, 28));
+    s.by_rpm = bit(t, get(t, 29));
+    s.high = bit(t, get(t, 30));
+    s.overrun = bit(t, get(t, 31));
+    s.resume = bit(t, get(t, 32));
+    bool starting = bit(t, get(t, 22)), idle = bit(t, get(t, 23));
+    uint32_t target = target_of(t, input(t, 0), get(t, 0), word(t, 1), get(t, 3)); // Ign_Offset: R5, Handover
+    boost_guard(t, s, starting, idle);
+    bool slewed = !starting && overrun_cut(t, s, target, idle);         // JB StartMode,Ign_Taken
+    if (!slewed)
+        slew_target(t, s, target, bit(t, get(t, 24)));
+    slew_step(t, s, target);
+    uint32_t flags = (s.over ? ADV_BOOST_OVER : 0) | (s.cut ? ADV_BOOST_CUT : 0) | (s.fuel_cut ? ADV_FUEL_CUT : 0)
+                     | (s.ramp ? ADV_RESUME_RAMP : 0) | (s.by_rpm ? ADV_RESUME_BY_RPM : 0)
+                     | (s.high ? ADV_SLEW_HIGH_LOAD : 0) | (s.overrun ? ADV_SLEW_OVERRUN : 0)
+                     | (s.resume ? ADV_SLEW_RESUME : 0);
+    set_bit(t, get(t, 26), s.over);                                     // kept for pair.cpp's turn too
+    set_bit(t, get(t, 27), s.cut);
+    set_bit(t, get(t, 25), s.fuel_cut);
+    set_bit(t, get(t, 28), s.ramp);
+    set_bit(t, get(t, 29), s.by_rpm);
+    set_bit(t, get(t, 30), s.high);
+    set_bit(t, get(t, 31), s.overrun);
+    set_bit(t, get(t, 32), s.resume);
+    t.ram[at(t.rom, t.inputs) & 0x7F] = target;                         // Handover, as rom_lean's left it
+    put(t, 0, s.advance);
+    put(t, 1, s.slew);
+    put(t, 2, s.boost);
+    put(t, 3, s.count);
+    put(t, 4, flags);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Task 12 (format 8): the tick's start mode, rom_lean's Main_Tick from Cal_StartRpmEnter on, with
+// Start_Variants: at Cal_StartRpmEnter or under, start mode and the cold-start variants by coolant
+// (at or under Cal_ColdFuel, Cal_ColdIgn); in it, till over Start_ExitSpeed (by coolant) or the
+// valve's ramp done (IsvRamp 0): then over, and the next reference injects (pair.cpp). Inputs: Rpm,
+// IsvRamp, the byte of StartMode's bit (23h), the snoop's Coolant. Data: Constants' address; the places
+// there of Cal_StartRpmEnter, Cal_ColdFuel and Cal_ColdIgn; Start_ExitSpeed's id; StartMode's bit. Out:
+// StartFlags (below), which the 8051 applies; StartMode kept here too.
+
+namespace
+{
+
+enum : uint32_t
+{
+    START_MODE = 1,     // StartMode
+    START_COLD_FUEL = 2, // ColdStartFuel ...
+    START_COLD_IGN = 4, // ... and ColdStartIgn, made (START_VARIANTS)
+    START_VARIANTS = 8, // starting: the variants made
+    START_OVER = 0x10,  // start mode over: Inj720Odd cleared, the AFM's filter the AFM (the 8051's)
+};
+
+} // namespace
+
+static void UNIT_CODE(start_mode)(const Task &t)
+{
+    uint32_t c = word(t, 0), rpm = input(t, 0), coolant = input(t, 3), flags = 0;
+    bool starting = bit(t, get(t, 6));
+    if (at(t.rom, c + get(t, 2)) >= rpm)                                // Cal_StartRpmEnter; SUBB A,Rpm; JNC
+    {
+        starting = true;
+        flags |= START_VARIANTS;
+        if (at(t.rom, c + get(t, 3)) >= coolant)                        // Cal_ColdFuel; CJNE A,Coolant; CPL C
+            flags |= START_COLD_FUEL;
+        if (at(t.rom, c + get(t, 4)) >= coolant)                        // Cal_ColdIgn
+            flags |= START_COLD_IGN;
+    }
+    else if (starting && (input(t, 1) == 0 || value(t, get(t, 5)) < rpm)) // IsvRamp 0; Start_ExitSpeed; JNC
+    {
+        starting = false;
+        flags |= START_OVER;
+        pair_start_over();
+    }
+    if (starting)
+        flags |= START_MODE;
+    set_bit(t, get(t, 6), starting);
+    put(t, 0, flags);
+}
+
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
 {
     uint32_t outputs = description + 1 + at(rom, description); // their count, then their addresses
@@ -495,6 +784,10 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         ; // its input kept in ram, where pair.cpp's plans read it
     else if (task == TASK_PULSE || task == TASK_AGAIN)
         pulse(t, task == TASK_AGAIN);
+    else if (task == TASK_REST)
+        advance_rest(t);
+    else if (task == TASK_START)
+        start_mode(t);
     else
         return false;
     return true;

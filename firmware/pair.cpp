@@ -53,6 +53,7 @@
 static constexpr uint32_t MARK = 0x2000;
 static constexpr uint32_t FORMAT = 6;
 static constexpr uint32_t INJECTION = 7; // the format with TH0's loads (pair_pulse)
+static constexpr uint32_t PHASE = 8;     // the format with the injection's phase (the reference's switch)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -119,6 +120,9 @@ struct Pair
     volatile uint32_t pulses;       // 104: TH0's loads written (format 7)
     volatile uint32_t late_pulses;  // 108: pulses made again after their reference: none written
     uint32_t load;                  // 112: the last load written: TH0's start, its overflows << 8
+    uint32_t next_skips;            // 116: the 720-degree phase: the next reference injects not (format 8)
+    volatile uint32_t turn_cuts;    // 120: turns whose injection a cut left out
+    volatile uint32_t turns;        // 124: the turns' first firings decided
     // The image and its table (Co_Pair).
     volatile uint8_t *rom;
     bool on;
@@ -153,6 +157,13 @@ struct Pair
     uint32_t side;                  // the copies in use
     uint32_t built;                 // TH0's load as built (the copies' first): start, overflows << 8
     uint32_t pulse_reference;       // the references by the turn's pulse (a pulse made again after: late)
+    // The injection's phase (format 8): the reference's two handlers (0004h, its AJMP's operand, the
+    // switch), Main_Turn's SJMP and its three targets, the phase's copy's opcode at Main_Reference, and
+    // what the turn's cut reads: Cal_RevLimit, the speed byte's RAM address, the bits of StartMode,
+    // FuelCut and BoostCut.
+    bool phased;
+    uint32_t ref_inject, ref_skip, turn_at, turn_due, turn_speed, turn_cut, phase_op;
+    uint32_t rev_limit, rpm_at, start_bit, fuel_cut_bit, boost_cut_bit;
 };
 
 static Pair pair UNIT_DATA = {};
@@ -492,6 +503,75 @@ static void UNIT_CODE(loads_as_built)()
     pair.pulse_reference = pair.references;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The injection's 720-degree phase (format 8): which reference injects, as rom_lean's Inj720Odd said
+// it: every other one; none while starting (each firing's own, the 8051's); after a turn's cut, the
+// next one not; after start mode, the next one. The reference's AJMP goes to the injection's handler
+// or to the one that leaves it out (0004h, one byte); the 8051's Main_Turn makes the pulse, or none,
+// or counts a cut, as its SJMP's operand says (one byte).
+
+// An 8051 bit as the unit's tasks keep it (sent, or their own: StartMode's task 12, the cuts' 11).
+static __force_inline bool ram_bit(uint32_t address)
+{
+    return map_unit_ram(0x20 + (address >> 3 & 0x0F)) >> (address & 7) & 1;
+}
+
+// The reference's AJMP to the injection's handler, or past it.
+static __force_inline void write_reference()
+{
+    write(REFERENCE + 1, (pair.next_skips ? pair.ref_skip : pair.ref_inject) & 0xFF);
+}
+
+// At each reference (rom_lean's Main_Reference: CPL Inj720Odd; set while starting): the next one's,
+// and its copy in the 8051's bit (Main_Reference's SETB or CLR Inj720Odd, the stream's).
+static void UNIT_CODE(phase_at_reference)()
+{
+    pair.next_skips = ram_bit(pair.start_bit) ? 1 : pair.next_skips ^ 1;
+    write_reference();
+    write(pair.phase_op, pair.next_skips ? SETB_BIT : CLR_BIT);
+}
+
+// The turn's first firing, at slot 0's tooth (before the 8051's Main_Turn, rom_lean's Turn_Cut there):
+// starting, its pulse (each firing's); a turn 720 degrees leaves out, none; else a cut (over
+// Cal_RevLimit, the overrun's or the overboost guard's) leaves the next reference out, counted by the
+// 8051; else its pulse.
+static void UNIT_CODE(turn)()
+{
+    uint32_t target = pair.turn_due;
+    if (!ram_bit(pair.start_bit))
+    {
+        if (pair.next_skips)
+            target = pair.turn_speed;
+        else if (at(pair.rev_limit) < map_unit_ram(pair.rpm_at) || ram_bit(pair.fuel_cut_bit)
+                 || ram_bit(pair.boost_cut_bit))                // SUBB A,Rpm; ORL C,FuelCut; ORL C,BoostCut
+        {
+            pair.next_skips = 1;
+            pair.turn_cuts++;
+            write_reference();
+            target = pair.turn_cut;
+        }
+    }
+    write(pair.turn_at + 1, (target - pair.turn_at - 2) & 0xFF);   // the SJMP's offset
+    pair.turns++;
+}
+
+void UNIT_CODE(pair_start_over)()
+{
+    if (!pair.phased)
+        return;
+    pair.next_skips = 0;                                        // rom_lean's CLR Inj720Odd
+    write_reference();
+}
+
+// As the 8051 starts: the next reference left out (Power_Up's SETB Inj720Odd), Main_Turn's pulse made.
+static void UNIT_CODE(phase_as_built)()
+{
+    pair.next_skips = 1;
+    write_reference();
+    write(pair.phase_op, SETB_BIT);
+    write(pair.turn_at + 1, (pair.turn_due - pair.turn_at - 2) & 0xFF);
+}
+
 bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
 {
     if (!pair.inject)
@@ -590,7 +670,11 @@ static void UNIT_CODE(tooth)(uint32_t now)
             pair.firing = 0;
     }
     if (pair.tif == pair.event_tooth[0])
+    {
         slot_zero(now);
+        if (pair.firing == 0 && pair.phased)
+            turn();                                             // the turn's first firing
+    }
 }
 
 // The reference: the latch's tooth by the times (as rom_lean by the speed input), so fall 1's count;
@@ -770,6 +854,8 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
         unsync();
         if (pair.inject)
             loads_as_built();
+        if (pair.phased)
+            phase_as_built();
         return;
     }
     if (address != previous + 1)
@@ -777,7 +863,11 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
     if (previous == VECTOR)
         tooth(now);
     else if (previous == REFERENCE)
+    {
+        if (pair.phased)
+            phase_at_reference();
         reference(now);
+    }
     else if (previous == pair.spark)
         pair.spark_due = pair.synced != 0;
     else if (previous == pair.ping)
@@ -890,6 +980,30 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         bool near = ((pair.next_switch + 2) ^ pair.next_copy[0]) < 0x800 && ((pair.apply_switch + 2) ^ pair.apply_copy[0]) < 0x800;
         pair.inject = pages && near;
         reach = reach && pair.inject;
+    }
+    pair.phased = false;
+    if (at(MARK + 4) >= PHASE)                                  // the injection's phase
+    {
+        pair.ref_inject = word(u + 41);
+        pair.ref_skip = word(u + 43);
+        pair.turn_at = word(u + 45);
+        pair.turn_due = word(u + 47);
+        pair.turn_speed = word(u + 49);
+        pair.turn_cut = word(u + 51);
+        pair.phase_op = word(u + 53);
+        pair.rev_limit = word(u + 55);
+        pair.rpm_at = at(u + 57);
+        pair.start_bit = at(u + 58);
+        pair.fuel_cut_bit = at(u + 59);
+        pair.boost_cut_bit = at(u + 60);
+        pair.next_skips = 1;
+        pair.turn_cuts = pair.turns = 0;
+        // The reference's handlers in one page within 0003h's AJMP; the SJMP's targets within its reach.
+        bool page = pair.ref_inject >> 8 == pair.ref_skip >> 8 && pair.ref_inject < 0x800;
+        uint32_t from = pair.turn_at + 2 - 0x80;                // an SJMP reaches -128 to 127 from its end
+        bool sjmp = pair.turn_due - from < 0x100 && pair.turn_speed - from < 0x100 && pair.turn_cut - from < 0x100;
+        pair.phased = page && sjmp;
+        reach = reach && pair.phased;
     }
     pair.on = reach;
 }
