@@ -78,6 +78,9 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 | 6    | Fuel_Time          | InjTimeH:L; the dead time           |
 | 7    | Load_Tick_Run      | LoadHi, LoadMid: the load, filtered |
 | 8    | (format 6)         | none: pair.cpp takes the advance    |
+| 9    | Fuel_Maps to       | InjTimeH:L, DeadNow, InjCount, its  |
+|      | Fuel_Mode (fmt 7)  | flags; TH0's load in 8051 code      |
+| 10   | the same, again    | the same (none after its reference) |
 
 ### Inputs the snoop makes (format 4)
 
@@ -93,7 +96,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (format 6)
+### The paired core (formats 6 and 7)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -124,6 +127,15 @@ fetches a torn instruction:
 
 Each ping moves the heartbeat on, and a ping that stands still for 45 ms stops the engine (the
 8051's). `pair_test` runs the ported routines for DME-Sim's checks.
+
+Format 7 (step 3.2) adds the pulse: tasks 9 and 10 work out rom_lean's pipeline stages 5 to 7
+(Fuel_Maps or Fuel_Crank, Fuel_Time and Fuel_Mode) bit for bit, the turn's pulse and the pulse made
+again before its reference. The task's TH0 load (its start and its overflows) goes into the 8051's
+code: the table adds two places the 8051 takes a load from (at a pulse's end, and while TH0 is
+stopped), each an AJMP whose operand is a switch, and its two copies of `MOV TH0,#start; MOV
+InjHi,#overflows`. The board writes the copies not in use, then turns each switch (one byte), so the
+8051 loads a whole pair, the old or the new. A pulse made again after a reference is not written.
+The task takes up to about 11 us, so the 8051 reads its first output 34 us after its last input.
 
 ## How it works
 
