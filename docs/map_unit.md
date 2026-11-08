@@ -112,7 +112,7 @@ The mark's 13th and 14th bytes are the address of its table (Co_Pair):
   8051's reference;
 - page 0's marks: the ping (the heartbeat's operand after it), the count lost, the spark;
 - the coil's numbers (SPARK_B, ARM_OFS_S, ARM_MIN_S, MARGIN, FLOOR_TEETH, RECIP32) and the
-  latch's (TEETH_HIGH, MARK_G);
+  latch's (TEETH_HIGH, and whether fall 1 is the latch's tooth or the one after);
 - the RAM bytes it takes from the unit: the charge's time (task 3's outputs) and the advance
   (task 8's input).
 

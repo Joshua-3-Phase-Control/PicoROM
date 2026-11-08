@@ -8,8 +8,8 @@
 //   handler takes inline too (it jumps there). The reference's fetch (0003h, then 0004h) gives the
 //   latch's tooth by the teeth's times, as rom_lean takes it by the speed input's level: the fall
 //   before the latch, or the next one if it comes within TEETH_HIGH/256 of a tooth. Fall 1, the
-//   turn's first tooth, is that tooth, or the one after it where MARK_G is over TEETH_HIGH (the
-//   944's). Each reference checks the count: a tooth off either way is the tie (a fall and the latch
+//   turn's first tooth, is that tooth, or the one after it (the table's FALL1_AHEAD, from MARK_G:
+//   the 944's). Each reference checks the count: a tooth off either way is the tie (a fall and the latch
 //   at one angle come in either order); more, a fault, and the count starts again there.
 //   the firings: from one fetch of slot 0's tooth to the next, the microsecond timer gives the
 //   firing's length (P, in the 8051's cycles: halved), and from it the tooth period (T64) with its
@@ -115,7 +115,7 @@ struct Pair
     uint32_t event_tooth[MOST_EVENTS], event_handler[MOST_EVENTS];
     uint32_t charge_handler, arm_handler, arm_start, arm_overflows, synced_op, fault_op;
     uint32_t ping, lost, spark;
-    uint32_t spark_b, arm_ofs, arm_min, margin, floor_teeth, recip32, teeth_high, mark_g;
+    uint32_t spark_b, arm_ofs, arm_min, margin, floor_teeth, recip32, teeth_high, fall1_ahead;
     uint32_t charge_l, charge_h, adv_at;
     // The crank.
     uint32_t previous;              // the last page-0 read's A0-A7
@@ -533,7 +533,7 @@ static void UNIT_CODE(reference)(uint32_t now)
     uint32_t period = pair.t_last - pair.t_prev, since = now - pair.t_last, k = 0;
     while (k < 4 && since * 256 >= (256 - pair.teeth_high + 256 * k) * period)
         k++;
-    uint32_t ahead = k + ((pair.mark_g + 255 - pair.teeth_high) >> 8); // fall 1, this many teeth on
+    uint32_t ahead = k + pair.fall1_ahead;                      // fall 1, this many teeth on
     if (pair.synced)
     {
         uint32_t place = pair.pos + ahead;                      // its place in the count's turn
@@ -792,7 +792,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
     pair.floor_teeth = at(u + 21);
     pair.recip32 = word(u + 22);
     pair.teeth_high = at(u + 24);
-    pair.mark_g = at(u + 25);
+    pair.fall1_ahead = at(u + 25);
     pair.charge_l = at(u + 26);
     pair.charge_h = at(u + 27);
     pair.adv_at = at(u + 28);
