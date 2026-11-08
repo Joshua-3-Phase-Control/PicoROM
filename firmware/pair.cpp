@@ -454,17 +454,23 @@ static void UNIT_CODE(place_at)(uint32_t pos)
     pair.tif = pos + 1;
 }
 
+// No read moved off a spark: the coil starts again.
+static void UNIT_CODE(clear_moves)()
+{
+    for (uint32_t i = 0; i < MOVES; i++)                        // (field by field: no initializer in flash)
+    {
+        pair.moves[i].from = pair.moves[i].to = NONE;
+        pair.moves[i].event = NOTHING;
+    }
+}
+
 // Nothing planned, the coil's events off.
 static void UNIT_CODE(drop_coil)()
 {
     pair.coil_on = false;
     pair.spark_due = false;
     pair.arm_at = pair.charge_at = pair.spark_at = NONE;
-    for (uint32_t i = 0; i < MOVES; i++)                        // (field by field: no initializer in flash)
-    {
-        pair.moves[i].from = pair.moves[i].to = NONE;
-        pair.moves[i].event = NOTHING;
-    }
+    clear_moves();
     pair.missed_count = 0;
 }
 
@@ -585,13 +591,18 @@ static void UNIT_CODE(plan)(int32_t base)
 }
 
 // The coil's events from now: the spark of this firing if its charge is still to come, else the
-// next firing's (rom_lean's Coil_Start charged the first at its arm, short).
+// next firing's (rom_lean's Coil_Start charged the first at its arm, short). A read the first plan
+// moved stays where it was if that spark is not the one.
 static void UNIT_CODE(start)()
 {
     int32_t base = (int32_t)pair.count - (int32_t)pair.tif + 1;
+    clear_moves();
     plan(base);
     if (pair.charge_at == NONE || pair.arm_at <= (int32_t)pair.count)
+    {
+        clear_moves();
         plan(base + (int32_t)pair.teeth);
+    }
 }
 
 // A moved read's event on the tooth whose count is c (NOTHING: none), and whether a read moved from
