@@ -59,12 +59,14 @@
 
 #include "map_unit.h"
 #include "unit_ram.h"
+#include "unit_tasks.h"
 
 static constexpr uint32_t MARK = 0x2000;
 static constexpr uint32_t FORMAT = 6;
 static constexpr uint32_t INJECTION = 7; // the format with TH0's loads (pair_pulse)
 static constexpr uint32_t PHASE = 8;     // the format with the injection's phase (the reference's switch)
-static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2;
+static constexpr uint32_t PIPELINE = 9;  // the format with the pipeline on the unit (pair_control)
+static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
 static constexpr uint32_t MOST_MISSED = 4;
@@ -440,12 +442,16 @@ static __force_inline void write(uint32_t address, uint32_t value)
     pair.rom[address & 0xFFFF] = value;
 }
 
+static void UNIT_CODE(own_sync)();
+
 // The flags' opcodes at the 8051's reference: NotSynced's CLR in step, else SETB; ToothFault's SETB
-// after a fault.
+// after a fault. Format 9: NotSynced in the unit's copy too (the pipeline's task 11 reads it, sent by
+// no task now).
 static void UNIT_CODE(write_flags)()
 {
     write(pair.synced_op, pair.synced ? CLR_BIT : SETB_BIT);
     write(pair.fault_op, pair.fault ? SETB_BIT : CLR_BIT);
+    own_sync();
 }
 
 static __force_inline uint32_t handler_of(uint32_t event)
@@ -548,13 +554,24 @@ static void UNIT_CODE(phase_at_reference)()
 // starting, its pulse (each firing's); a turn 720 degrees leaves out, none; else a cut (over
 // Cal_RevLimit, the overrun's or the overboost guard's) leaves the next reference out, counted at the
 // 8051's mark there (Mark_Counted); else its pulse.
-static void UNIT_CODE(turn)()
+// Format 9: no SJMP; the decision goes with the pipeline's job (TURN_PULSE, TURN_NONE or TURN_CUT).
+enum : uint32_t
 {
-    uint32_t target = pair.turn_due;
+    TURN_PULSE, // its pulse
+    TURN_NONE,  // 720 degrees leave its reference out: none
+    TURN_CUT,   // a cut: the next reference left out, the injection counted
+};
+
+static uint32_t UNIT_CODE(turn)()
+{
+    uint32_t target = pair.turn_due, decision = TURN_PULSE;
     if (!ram_bit(pair.start_bit))
     {
         if (pair.next_skips)
+        {
             target = pair.turn_speed;
+            decision = TURN_NONE;
+        }
         else if (at(pair.rev_limit) < map_unit_ram(pair.rpm_at) || ram_bit(pair.fuel_cut_bit)
                  || ram_bit(pair.boost_cut_bit))                // SUBB A,Rpm; ORL C,FuelCut; ORL C,BoostCut
         {
@@ -562,10 +579,13 @@ static void UNIT_CODE(turn)()
             pair.turn_cuts++;
             write_reference();
             target = pair.turn_cut;
+            decision = TURN_CUT;
         }
     }
-    write(pair.turn_at + 1, (target - pair.turn_at - 2) & 0xFF);   // the SJMP's offset
+    if (pair.turn_at != 0)
+        write(pair.turn_at + 1, (target - pair.turn_at - 2) & 0xFF); // the SJMP's offset
     pair.turns++;
+    return decision;
 }
 
 void UNIT_CODE(pair_start_over)()
@@ -606,7 +626,8 @@ static void UNIT_CODE(phase_as_built)()
     pair.next_skips = 1;
     write_reference();
     write(pair.phase_op, SETB_BIT);
-    write(pair.turn_at + 1, (pair.turn_due - pair.turn_at - 2) & 0xFF);
+    if (pair.turn_at != 0)                                      // (format 9: no SJMP)
+        write(pair.turn_at + 1, (pair.turn_due - pair.turn_at - 2) & 0xFF);
 }
 
 bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
@@ -623,6 +644,402 @@ bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
     load_pulse((start & 0xFF) | (overflows & 0xFF) << 8);
     pair.pulses++;
     return true;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The pipeline (format 9; DME-Sim's docs/Paired_Pipeline.md): rom_lean's per-firing work, run by the
+// unit on an interrupt of its own below the bus's (SPARE_IRQ_0 at the lowest priority: the bus's
+// interrupts break into it). The bus level queues its jobs, which it does in turn:
+//   a firing (slot 0's tooth): the firing's length into FirePeriod (Main_Capture's; past 16 bits the
+//   speed byte, Capture_Long's), the turn's start (Turn_Start's slew count; starting, the injection the
+//   8051 makes counted; a turn's cut counted), then at the rate (each firing under Cal_PipeRpm, else the
+//   turn's first) the stages: the speed's count and the idle spark (task 14), the advance's sum (4) and
+//   rest (11), the plans' advance (Main_Advance's sum: task 8's byte), and at the turn's first firing,
+//   unless cut or left out, the pulse (9);
+//   a tick (the 8051's ping): the speed byte at most the teeth a firing / the ticks since slot 0's tooth
+//   (Main_Tick's, as the engine stops), and the heartbeat, written here so that it stands still if this
+//   level does;
+//   the tick's values sent (task 13): the pulse waiting for its reference made again (task 10), under
+//   Cal_RemakeRpm and not starting (Main_Byte_Again's);
+//   start mode's guard period (task 12): BoostCount one less, to 0;
+//   the engine stopped (Pair_Stopped; the 8051's Power_Up_Inputs ends with it too): InjCount 0,
+//   CrankDecay cleared, then the stages with no firing (FirePeriod FFFFh: the count skipped) and the
+//   pulse, as rom_lean's Tick_Stop and Power_Up_Inputs set its stages.
+// A job takes the unit's copy of the 8051's RAM at its start and gives back the bytes it changed at its
+// end, each in one go with the interrupts held off, so that a window's task never tears them; a job the
+// 8051's start or the engine's stop overtook gives nothing. Then its results go to the 8051's take: into the copy of Take_A
+// or Take_B the switch doesn't point to, the switch turned to it, then the count at Pair_Count moved
+// on, so that the 8051 takes a whole copy, the old or the new, whenever the writes land.
+
+static constexpr uint32_t PAIR_IRQ = 26;    // SPARE_IRQ_0
+static constexpr uint32_t JOBS = 8;         // the queue's length (a power of two)
+
+enum : uint32_t
+{
+    JOB_FIRING,
+    JOB_TICK,
+    JOB_SENT,
+    JOB_GUARD,
+    JOB_STOP,
+};
+
+// A job as the bus level queued it: its kind, the 8051's starts by then; a firing's length (cycles; 0,
+// none: a stamp alone), whether it is the turn's first and the turn's decision; a tick's gap.
+struct Job
+{
+    uint32_t kind, generation, length, first, decision;
+};
+
+struct Control
+{
+    // Read by DME-Sim (its tests take these offsets).
+    volatile uint32_t runs;      // 0: the stages run
+    volatile uint32_t takes;     // 4: results given to the 8051's take
+    volatile uint32_t lost;      // 8: jobs pushed into a full queue
+    volatile uint32_t dropped;   // 12: jobs the 8051's start overtook
+    volatile uint32_t jobs;      // 16: jobs done
+    // The queue: the bus level pushes, this level takes.
+    Job queue[JOBS];
+    volatile uint32_t in, out;
+    volatile uint32_t generation; // the 8051's starts and the engine's stops
+    volatile bool stop_due;       // the engine stopped: its run due (never queued, so never lost)
+    // The image's places and numbers.
+    bool pipelined;
+    uint32_t count_at, switch_at, copy[2], pipe_rpm, remake_rpm;
+    uint32_t fire_l, fire_h, advance_at, dyn_at, inj_l, inj_h, dead_at, flags_at, boost_at;
+    uint32_t speed_task, advance_task, rest_task, pulse_task, again_task, speed_k;
+    // The state.
+    uint32_t gap;                // pings since slot 0's tooth, to 255 (rom_lean's TickGap)
+    uint32_t side, count;        // the take's copy in use and its count (0 as the 8051 starts)
+    uint32_t turn_pulses, all_pulses;
+    bool pulse_made;             // a turn's pulse made since the 8051's start
+    uint32_t changed[0x20], changes; // the words of the RAM's copy a job changed
+};
+
+static Control control UNIT_DATA = {};
+alignas(4) static uint8_t work[0x80] UNIT_DATA = {};   // a job's copy of the 8051's RAM
+alignas(4) static uint8_t before[0x80] UNIT_DATA = {}; // ... as it took it
+
+static __force_inline void pend()
+{
+    *(volatile uint32_t *)0xE000E200 = 1u << PAIR_IRQ;                  // the NVIC's ISPR
+}
+
+static void UNIT_CODE(push)(uint32_t kind, uint32_t length, uint32_t first, uint32_t decision)
+{
+    if (control.in - control.out >= JOBS)
+    {
+        control.lost++;
+        return;
+    }
+    Job &job = control.queue[control.in & (JOBS - 1)];
+    job.kind = kind;
+    job.generation = control.generation;
+    job.length = length;
+    job.first = first;
+    job.decision = decision;
+    control.in = control.in + 1;
+    pend();
+}
+
+// The engine stopped: the jobs queued or under way are stale (they give nothing), and the stop's own
+// run comes next, whether the queue has room or not (a level held up long enough to fill it).
+static void UNIT_CODE(stop_pipeline)()
+{
+    control.generation = control.generation + 1;
+    control.stop_due = true;
+    pend();
+}
+
+static __force_inline bool work_bit(uint32_t address)
+{
+    return work[0x20 + (address >> 3 & 0x0F)] >> (address & 7) & 1;
+}
+
+static __force_inline uint8_t &work_byte(uint32_t address)
+{
+    return work[address & 0x7F];
+}
+
+// The unit's copy of the 8051's RAM into work in one go (the interrupts held off), the snoop's bytes
+// put over it, as a task's snooped inputs are; before keeps it as taken.
+static void UNIT_CODE(take_inputs)()
+{
+    uint32_t *from = map_unit_ram_words(), *to = (uint32_t *)work, *kept = (uint32_t *)before;
+    __asm volatile("cpsid i" ::: "memory");
+    for (uint32_t i = 0; i < 0x20; i++)
+        to[i] = from[i];
+    __asm volatile("cpsie i" ::: "memory");
+    map_unit_snooped_over(work);
+    for (uint32_t i = 0; i < 0x20; i++)
+        kept[i] = to[i];
+}
+
+// The bits the job changed back into the unit's copy in one go (the interrupts held off), unless the
+// 8051's start overtook it; true if given.
+static bool UNIT_CODE(give_back)(uint32_t generation)
+{
+    uint32_t *now = (uint32_t *)work, *was = (uint32_t *)before, *ram = map_unit_ram_words();
+    control.changes = 0;
+    for (uint32_t i = 0; i < 0x20; i++)
+        if (now[i] != was[i])
+            control.changed[control.changes++] = i;
+    bool given = false;
+    __asm volatile("cpsid i" ::: "memory");
+    if (generation == control.generation)
+    {
+        for (uint32_t k = 0; k < control.changes; k++)
+        {
+            uint32_t i = control.changed[k], bits = now[i] ^ was[i];
+            ram[i] = (ram[i] & ~bits) | (now[i] & bits);
+        }
+        given = true;
+    }
+    __asm volatile("cpsie i" ::: "memory");
+    if (!given)
+        control.dropped++;
+    return given;
+}
+
+// The results into the 8051's take: the copy the switch doesn't point to (dme.asm's Take_A: MOV
+// Taken, Rpm, Advance, FirePeriodL, FirePeriodH, InjTimeL, InjTimeH, DeadNow and PulseFlags,#n;
+// SETB or CLR FuelCut and BoostCut; SETB Inj720Odd after a cut, else MOV C,Inj720Odd; MOV R2, R3 and
+// R4,#n: AdvanceDyn, the turn's pulses' count and all pulses'), then the switch turned to it and the
+// count moved on (Pair_Count's operand), unless the 8051's start overtook them.
+static void UNIT_CODE(give_take)(uint32_t generation, bool cut)
+{
+    uint32_t side = control.side ^ 1, copy = control.copy[side], count = (control.count + 1) & 0xFF;
+    write(copy + 2, count);
+    write(copy + 5, map_unit_ram(pair.rpm_at));
+    write(copy + 8, map_unit_ram(control.advance_at));
+    write(copy + 11, map_unit_ram(control.fire_l));
+    write(copy + 14, map_unit_ram(control.fire_h));
+    write(copy + 17, map_unit_ram(control.inj_l));
+    write(copy + 20, map_unit_ram(control.inj_h));
+    write(copy + 23, map_unit_ram(control.dead_at));
+    write(copy + 26, map_unit_ram(control.flags_at));
+    write(copy + 27, map_unit_ram(0x20 + (pair.fuel_cut_bit >> 3 & 0x0F)) >> (pair.fuel_cut_bit & 7) & 1 ? SETB_BIT : CLR_BIT);
+    write(copy + 29, map_unit_ram(0x20 + (pair.boost_cut_bit >> 3 & 0x0F)) >> (pair.boost_cut_bit & 7) & 1 ? SETB_BIT : CLR_BIT);
+    write(copy + 31, cut ? SETB_BIT : MOV_C_BIT);
+    write(copy + 34, map_unit_ram(control.dyn_at));
+    write(copy + 36, control.turn_pulses & 0xFF);
+    write(copy + 38, control.all_pulses & 0xFF);
+    __asm volatile("cpsid i" ::: "memory");
+    if (generation == control.generation)
+    {
+        write(control.switch_at + 1, copy & 0xFF);
+        write(control.count_at + 1, count);
+        control.side = side;
+        control.count = count;
+        control.takes++;
+    }
+    __asm volatile("cpsie i" ::: "memory");
+}
+
+static __force_inline void count_injection()
+{
+    uint8_t &count = work_byte(pair.inj_at);
+    if (count < 0x80)                                                   // JB ACC.7; INC InjCount
+        count++;
+}
+
+// Main_Capture: the firing's length into FirePeriod; past 16 bits (Capture_Long: the engine under about
+// 229 rpm) FFFFh, and the speed byte the times the length goes into SPEED_K + half of it (Speed_Count
+// then keeps it).
+static void UNIT_CODE(firing_length)(uint32_t length)
+{
+    if (length <= 0xFFFF)
+    {
+        work_byte(control.fire_l) = length & 0xFF;
+        work_byte(control.fire_h) = length >> 8;
+        return;
+    }
+    if (length > 0xFFFFFF)
+        length = 0xFFFFFF;
+    uint32_t rest = (control.speed_k + (length >> 1)) & 0xFFFFFF, count = 0;  // R2:R1:R0
+    while (rest >= length)                                              // SUBB x 3; JC Capture_Long_Set
+    {
+        rest -= length;
+        count++;                                                        // INC R4
+    }
+    work_byte(pair.rpm_at) = count & 0xFF;
+    work_byte(control.fire_l) = work_byte(control.fire_h) = 0xFF;
+}
+
+// A task on the job's copy of the RAM.
+static __force_inline void run_task(uint32_t task, uint32_t description)
+{
+    unit_task(task, description, (const uint8_t *)pair.rom, work);
+}
+
+static void UNIT_CODE(make_pulse)(bool again)
+{
+    run_task(again ? TASK_AGAIN : TASK_PULSE, again ? control.again_task : control.pulse_task);
+    if (work_byte(control.flags_at) & PULSE_LATE)
+        return;                                                         // its reference came: none
+    control.all_pulses++;
+    if (!again)
+    {
+        control.turn_pulses++;
+        control.pulse_made = true;
+    }
+}
+
+// The stages (Main_Stage's 2 to 5): the speed's count and the idle spark, the advance's sum and rest,
+// the plans' advance (Main_Advance's sum), then the pulse if due.
+static void UNIT_CODE(run_stages)(bool pulse)
+{
+    run_task(TASK_SPEED, control.speed_task);
+    run_task(TASK_ADVANCE, control.advance_task);
+    run_task(TASK_REST, control.rest_task);
+    work_byte(pair.adv_at) = (work_byte(control.advance_at) + work_byte(control.dyn_at)) & 0xFF;
+    if (pulse)
+        make_pulse(false);
+    control.runs++;
+}
+
+static void UNIT_CODE(run_firing)(const Job &job)
+{
+    take_inputs();
+    bool starting = work_bit(pair.start_bit), stages = false, pulse = false, cut = false;
+    if (job.length != 0)
+    {
+        firing_length(job.length);                                      // Main_Capture
+        uint8_t &slew = work_byte(pair.slew_at);                        // Turn_Start: the slew's count
+        if (slew != 0)
+            slew--;
+    }
+    if (starting)
+        count_injection();                                              // Turn_Start_Inject's
+    if (job.length != 0 && job.first)                                   // Main_Turn: the turn's first firing
+    {
+        stages = true;
+        pulse = starting || job.decision == TURN_PULSE;
+        cut = !starting && job.decision == TURN_CUT;
+        if (cut)
+            count_injection();                                          // Main_Turn_Cut's
+    }
+    else if (job.length != 0)
+        stages = work_byte(pair.rpm_at) < control.pipe_rpm;             // the rate: CJNE A,#PIPE_RPM; CPL C
+    if (stages)
+        run_stages(pulse);
+    if (give_back(job.generation))
+        give_take(job.generation, cut);
+}
+
+static void UNIT_CODE(run_tick)(const Job &job)
+{
+    write(pair.ping + 1, ++pair.beat & 0xFF);                           // the heartbeat, from this level
+    uint32_t gap = job.length, bound = 0;
+    if (gap == 0 || job.generation != control.generation)
+        return;
+    for (uint32_t left = pair.teeth; left >= gap; left -= gap)          // DIV AB (none in the bank)
+        bound++;
+    if (bound >= map_unit_ram(pair.rpm_at))                             // CJNE A,Rpm; JNC
+        return;
+    map_unit_ram_write(pair.rpm_at, bound);                             // (this level's byte alone)
+    give_take(job.generation, false);
+}
+
+static void UNIT_CODE(run_sent)(const Job &job)
+{
+    take_inputs();
+    bool waits = control.pulse_made && pair.references == pair.pulse_reference;  // PulseWaits
+    if (work_bit(pair.start_bit) || work_byte(pair.rpm_at) >= control.remake_rpm || !waits)
+        return;                                                         // Main_Byte_Again
+    make_pulse(true);
+    if (give_back(job.generation))
+        give_take(job.generation, false);
+}
+
+static void UNIT_CODE(run_guard)(const Job &job)
+{
+    uint32_t count = map_unit_ram(control.boost_at);
+    if (count != 0 && job.generation == control.generation)             // MOV A,BoostCount; JZ; DEC
+        map_unit_ram_write(control.boost_at, count - 1);
+}
+
+static void UNIT_CODE(run_stop)(const Job &job)
+{
+    take_inputs();
+    work_byte(pair.inj_at) = 0;                                         // MOV InjCount,#00h
+    work[0x20 + (pair.decay_bit >> 3 & 0x0F)] &= ~(1u << (pair.decay_bit & 7)); // CLR CrankDecay
+    work_byte(control.fire_l) = work_byte(control.fire_h) = 0xFF;       // no firing: the count skipped
+    run_stages(true);
+    if (give_back(job.generation))
+        give_take(job.generation, false);
+}
+
+void UNIT_CODE(pair_control)()
+{
+    while (true)
+    {
+        if (control.stop_due)                                   // the stop's run first: the jobs queued
+        {                                                       //   before it are stale
+            control.stop_due = false;
+            Job job;
+            job.kind = JOB_STOP;
+            job.generation = control.generation;
+            job.length = job.first = job.decision = 0;
+            run_stop(job);
+        }
+        else if (control.out != control.in)
+        {
+            const Job &job = control.queue[control.out & (JOBS - 1)];
+            if (job.generation != control.generation)
+                control.dropped++;
+            else if (job.kind == JOB_FIRING)
+                run_firing(job);
+            else if (job.kind == JOB_TICK)
+                run_tick(job);
+            else if (job.kind == JOB_SENT)
+                run_sent(job);
+            else if (job.kind == JOB_GUARD)
+                run_guard(job);
+            control.out = control.out + 1;
+        }
+        else
+            return;
+        control.jobs++;
+    }
+}
+
+// NotSynced (its bit address the operand after the opcode at Pair_Synced) as the unit has the count, in
+// its copy of the 8051's RAM (the bus level's write: the pipeline's level never changes that bit).
+static void UNIT_CODE(own_sync)()
+{
+    if (!control.pipelined)
+        return;
+    uint32_t address = at(pair.synced_op + 1), byte = 0x20 + (address >> 3 & 0x0F), mask = 1u << (address & 7);
+    uint32_t value = map_unit_ram(byte);
+    map_unit_ram_write(byte, pair.synced ? value & ~mask : value | mask);
+}
+
+void UNIT_CODE(pair_guard_period)()
+{
+    if (control.pipelined)
+        push(JOB_GUARD, 0, 0, 0);
+}
+
+void UNIT_CODE(pair_tick_sent)()
+{
+    if (control.pipelined)
+        push(JOB_SENT, 0, 0, 0);
+}
+
+// The 8051's start: its RAM cleared, so the take's count from 0 and the switch to Take_A as built, the
+// pulses' counts from 0; the jobs queued or under way give nothing.
+static void UNIT_CODE(control_as_built)()
+{
+    control.generation = control.generation + 1;
+    control.stop_due = false;                                   // (Power_Up_Inputs' stop comes next)
+    control.gap = 0;
+    control.side = control.count = 0;
+    control.turn_pulses = control.all_pulses = 0;
+    control.pulse_made = false;
+    write(control.switch_at + 1, control.copy[0] & 0xFF);
+    write(control.count_at + 1, 0);
+    own_sync();                                                 // (the RAM's copy cleared before: not in step)
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -673,12 +1090,15 @@ static void UNIT_CODE(unsync)()
     write_flags();
 }
 
-// The firing's length at slot 0's tooth (the table's first event), and the tooth period from it.
-static void UNIT_CODE(slot_zero)(uint32_t now)
+// The firing's length at slot 0's tooth (the table's first event), and the tooth period from it; the
+// length returned (cycles; 0: none, a stamp alone).
+static uint32_t UNIT_CODE(slot_zero)(uint32_t now)
 {
+    uint32_t length = 0;
     if (pair.stamped && pair.count - pair.stamp_count == pair.teeth)
     {
         uint32_t cycles = (now - pair.stamp_time + 1) >> 1;
+        length = cycles;
         pair.p = cycles > 0xFFFF ? 0xFFFF : cycles;
         pair.t64 = capture_t64(pair.p, &pair.p_old, pair.fire_valid, pair.recip32);
         pair.fire_valid = true;
@@ -686,6 +1106,7 @@ static void UNIT_CODE(slot_zero)(uint32_t now)
     pair.stamp_count = pair.count;
     pair.stamp_time = now;
     pair.stamped = true;
+    return length;
 }
 
 static void UNIT_CODE(tooth)(uint32_t now)
@@ -708,9 +1129,14 @@ static void UNIT_CODE(tooth)(uint32_t now)
     }
     if (pair.tif == pair.event_tooth[0])
     {
-        slot_zero(now);
+        uint32_t length = slot_zero(now), decision = TURN_PULSE;
         if (pair.firing == 0 && pair.phased)
-            turn();                                             // the turn's first firing
+            decision = turn();                                  // the turn's first firing
+        if (control.pipelined)                                  // format 9: the pipeline, at once
+        {
+            control.gap = 0;
+            push(JOB_FIRING, length, pair.firing == 0, decision);
+        }
     }
 }
 
@@ -896,6 +1322,8 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
             phase_as_built();
             map_unit_ram_clear(0x00, 0x7F);                     // the counts from 0, as Power_Up's RAM
         }
+        if (control.pipelined)
+            control_as_built();
         return;
     }
     if (address != previous + 1)
@@ -911,19 +1339,32 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
     else if (previous == pair.spark)
         pair.spark_due = pair.synced != 0;
     else if (previous == pair.ping)
-        write(pair.ping + 1, ++pair.beat & 0xFF);
+    {
+        if (control.pipelined)                                  // format 9: the tick's job, the beat with it
+        {
+            uint32_t gap = control.gap;
+            if (control.gap < 0xFF)
+                control.gap++;
+            push(JOB_TICK, gap, 0, 0);
+        }
+        else
+            write(pair.ping + 1, ++pair.beat & 0xFF);
+    }
     else if (previous == pair.lost)
         unsync();
     else if (!pair.phased)
         return;
-    else if (previous == pair.fire_mark)
+    else if (pair.fire_mark != 0 && previous == pair.fire_mark) // (format 9: no such marks)
         at_firing();
-    else if (previous == pair.count_mark)
+    else if (pair.count_mark != 0 && previous == pair.count_mark)
         at_counted();
     else if (previous == pair.stop_mark)
     {
         unsync();
-        at_stopped();
+        if (control.pipelined)
+            stop_pipeline();                                    // the counts and the stages: the pipeline's
+        else
+            at_stopped();
     }
 }
 
@@ -1055,12 +1496,50 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         pair.decay_bit = at(u + 66);
         pair.next_skips = 1;
         pair.turn_cuts = pair.turns = 0;
-        // The reference's handlers in one page within 0003h's AJMP; the SJMP's targets within its reach.
+        // The reference's handlers in one page within 0003h's AJMP; the SJMP's targets within its reach
+        // (format 9: none, 0).
         bool page = pair.ref_inject >> 8 == pair.ref_skip >> 8 && pair.ref_inject < 0x800;
         uint32_t from = pair.turn_at + 2 - 0x80;                // an SJMP reaches -128 to 127 from its end
-        bool sjmp = pair.turn_due - from < 0x100 && pair.turn_speed - from < 0x100 && pair.turn_cut - from < 0x100;
+        bool sjmp = pair.turn_at == 0
+                    || (pair.turn_due - from < 0x100 && pair.turn_speed - from < 0x100 && pair.turn_cut - from < 0x100);
         pair.phased = page && sjmp;
         reach = reach && pair.phased;
+    }
+    control.pipelined = false;
+    control.in = control.out = control.generation = 0;
+    control.gap = control.side = control.count = control.turn_pulses = control.all_pulses = 0;
+    control.pulse_made = false;
+    if (at(MARK + 4) >= PIPELINE && pair.phased)                // the pipeline: the take's places, numbers
+    {
+        control.count_at = word(u + 67);
+        control.switch_at = word(u + 69);
+        control.copy[0] = word(u + 71);
+        control.copy[1] = word(u + 73);
+        control.pipe_rpm = at(u + 75);
+        control.remake_rpm = at(u + 76);
+        control.fire_l = at(u + 77) & 0x7F;
+        control.fire_h = at(u + 78) & 0x7F;
+        control.advance_at = at(u + 79) & 0x7F;
+        control.dyn_at = at(u + 80) & 0x7F;
+        control.inj_l = at(u + 81) & 0x7F;
+        control.inj_h = at(u + 82) & 0x7F;
+        control.dead_at = at(u + 83) & 0x7F;
+        control.flags_at = at(u + 84) & 0x7F;
+        control.boost_at = at(u + 85) & 0x7F;
+        control.speed_task = map_unit_task_at(TASK_SPEED);
+        control.advance_task = map_unit_task_at(TASK_ADVANCE);
+        control.rest_task = map_unit_task_at(TASK_REST);
+        control.pulse_task = map_unit_task_at(TASK_PULSE);
+        control.again_task = map_unit_task_at(TASK_AGAIN);
+        uint32_t data = control.speed_task + 1 + at(control.speed_task); // past its inputs, then its outputs
+        data += 1 + at(data);
+        control.speed_k = at(data) | at(data + 1) << 8 | at(data + 2) << 16;   // its data: SPEED_K, low first
+        // Both copies in one page, which the switch's AJMP reaches; every task the pipeline runs found.
+        bool copies = control.copy[0] >> 8 == control.copy[1] >> 8 && ((control.switch_at + 2) ^ control.copy[0]) < 0x800;
+        bool tasks = control.speed_task != 0 && control.advance_task != 0 && control.rest_task != 0
+                     && control.pulse_task != 0 && control.again_task != 0;
+        control.pipelined = copies && tasks;
+        reach = reach && control.pipelined;
     }
     pair.on = reach;
 }
@@ -1113,6 +1592,45 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         pair.p = in[3];
         out[0] = (uint32_t)charge_plan(in[0], (int32_t)(int8_t)in[5], in[4]) & 0xFF;
         out[1] = pair.dj;
+    }
+    else if (routine >= 7 && routine <= 10)                     // format 9: a pipeline's job at once on the
+    {                                                           //   unit's RAM: 7 a firing (its length, the
+        Job job;                                                //   turn's first, the phase before it), 8 the
+        job.generation = control.generation;                    //   stop, 9 a tick (its gap), 10 the tick's
+        job.length = in[0];                                     //   values sent (no table of the kinds: the
+        job.first = in[1];                                      //   compiler's would be in flash)
+        job.decision = TURN_PULSE;
+        if (routine == 7)
+        {
+            job.kind = JOB_FIRING;
+            if (in[1] != 0)
+            {
+                pair.next_skips = in[2];
+                job.decision = turn();
+            }
+            run_firing(job);
+        }
+        else if (routine == 8)
+        {
+            job.kind = JOB_STOP;
+            unsync();                                           // (the stop's mark: the count lost first)
+            run_stop(job);
+        }
+        else if (routine == 9)
+        {
+            job.kind = JOB_TICK;
+            run_tick(job);
+        }
+        else
+        {
+            job.kind = JOB_SENT;                                // in[0]: the turn's pulse waits (its
+            control.pulse_made = true;                          //   reference to come), else it came
+            pair.pulse_reference = pair.references - (in[0] != 0 ? 0 : 1);
+            run_sent(job);
+        }
+        out[0] = job.decision;
+        out[1] = control.runs;
+        out[2] = control.takes;
     }
     else
         return 0;

@@ -76,6 +76,12 @@ __force_inline uint32_t input(const Task &t, uint32_t k)
     return t.ram[at(t.rom, t.inputs + k) & 0x7F];
 }
 
+// Format 9: the bytes the pipeline keeps are the unit's own, never sent (the mark's fifth byte).
+__force_inline bool kept(const Task &t)
+{
+    return at(t.rom, 0x2004) >= PIPELINE_FORMAT;
+}
+
 // Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
 // count left. A value not 0 reaches the top bit within 23 shifts; 0 shifts its whole count away (up
 // to 255 turns on the 8051), so that ends here at once with the count 0, as there.
@@ -321,22 +327,11 @@ static void UNIT_CODE(injection_time)(const Task &t)
 // ResumeRamp, ResumeByRpm; the pulse's longest a turn (FIRINGS x 60: 15/16 of its two turns, x 32 /
 // the firing) and starting (30: of its firing); INJ_OFS; then the bytes the unit keeps (format 8),
 // InjCount's and SlewCount's addresses, and SlewResume's bit. Out: InjTimeL, InjTimeH (the injection
-// time), DeadNow, the flags (PulseFlags, below; the unit's own count and bits as they say); TH0's load
-// for the pulse goes into the 8051's code (pair_pulse).
+// time), DeadNow, the flags (PulseFlags, unit_tasks.h; the unit's own count and bits as they say);
+// TH0's load for the pulse goes into the 8051's code (pair_pulse).
 
 namespace
 {
-
-// The pulse's flags (PulseFlags): the 8051 applies the held pulse; the rest say what the unit did with
-// its own count and bits (format 8), as rom_lean's routines did.
-enum : uint32_t
-{
-    PULSE_DECAY = 1,    // Fuel_Crank's decay begun: CrankDecay set (InjCount 0)
-    PULSE_RAMP_END = 2, // the resume's ramp over: ResumeRamp cleared
-    PULSE_SLEW_END = 4, // its slew over (Fuel_Mode_Slew_At): SlewResume cleared, SlewCount 0, if set
-    PULSE_HELD = 8,     // over its turns, held (InjHold)
-    PULSE_LATE = 0x10,  // made again after its reference: its load not written
-};
 
 // TH0's load: its start and its overflows (InjHi).
 struct Pulse
@@ -482,18 +477,20 @@ static void UNIT_CODE(pulse)(const Task &t, bool again)
 // Load_Tick's running path (the 8051 keeps the starting one): 50 / the speed x the air flow / 256
 // (Mul16x16), held to 16 bits, x Cal_LoadScale / 256 (Mul16x8) and doubled unless its top bit is set:
 // the new load; filtered by LoadK (Lag_Filter24, its low byte 0) into LoadHi:LoadMid. Inputs, in turn:
-// Rpm, Afm, LoadK, LoadHi, LoadMid. Data: Constants' address; Cal_LoadScale's place there; Afm_Flow's
-// address. Out: LoadHi, LoadMid.
+// Rpm, Afm, LoadK, LoadHi, LoadMid (format 9: Rpm not sent, the unit's own: its address the data's
+// sixth). Data: Constants' address; Cal_LoadScale's place there; Afm_Flow's address. Out: LoadHi,
+// LoadMid.
 static void UNIT_CODE(load)(const Task &t)
 {
-    uint32_t wide = per_turn(input(t, 0)) * airflow(t, word(t, 3), input(t, 1)) >> 8;   // R7:R6:R5
+    uint32_t afm = kept(t) ? 0 : 1, rpm = kept(t) ? byte_of(t, 5) : input(t, 0); // the inputs from the AFM's
+    uint32_t wide = per_turn(rpm) * airflow(t, word(t, 3), input(t, afm)) >> 8;  // R7:R6:R5
     if (wide > 0xFFFF)                                                  // MOV A,R7; JZ Load_Tick_Fits
         wide = 0xFFFF;                                                  // MOV R6,#0FFh; MOV R5,#0FFh
     wide *= at(t.rom, word(t, 0) + get(t, 2));                          // x Cal_LoadScale: R7:R6:R5
     if (!(wide & 0x800000))                                             // JB ACC.7,Load_Tick_Twice
         wide <<= 1;                                                     // RLC A: R5's top bit, R6, R7
-    uint32_t fresh = wide >> 8 & 0xFFFF, k = input(t, 2);              // R4:R3; R5 = LoadK
-    uint32_t old = input(t, 3) << 8 | input(t, 4), state = old << 8;   // R2:R1:R0, R0 = 0
+    uint32_t fresh = wide >> 8 & 0xFFFF, k = input(t, afm + 1);        // R4:R3; R5 = LoadK
+    uint32_t old = input(t, afm + 2) << 8 | input(t, afm + 3), state = old << 8; // R2:R1:R0, R0 = 0
     if (fresh >= old)                                                   // SUBB, SUBB: no borrow
         state += (fresh - old) * k;                                     // Mul16x8; ADD, ADDC, ADDC
     else
@@ -741,7 +738,10 @@ static void UNIT_CODE(advance_rest)(const Task &t)
 // StartMode's bit (23h), TickCount, the snoop's Coolant. Data: Constants' address; the places there
 // of Cal_StartRpmEnter, Cal_ColdFuel and Cal_ColdIgn; Start_ExitSpeed's id; StartMode's bit;
 // Cal_BoostPeriod's place; BoostCount's address. Out: StartFlags (below), which the 8051 applies;
-// StartMode kept here too.
+// StartMode kept here too. Format 9: the speed byte and StartMode's byte not sent (the unit's own:
+// the inputs IsvRamp, TickCount and Coolant), the speed byte's address, ColdStartFuel's and
+// ColdStartIgn's bits after the data (the variants kept here too, which the pipeline's advance reads),
+// and the guard's period handed to the pipeline's level, which keeps BoostCount (pair_guard_period).
 
 namespace
 {
@@ -759,7 +759,10 @@ enum : uint32_t
 
 static void UNIT_CODE(start_mode)(const Task &t)
 {
-    uint32_t c = word(t, 0), rpm = input(t, 0), coolant = input(t, 4), flags = 0;
+    bool own_bytes = kept(t);
+    uint32_t c = word(t, 0), rpm = own_bytes ? byte_of(t, 9) : input(t, 0), flags = 0;
+    uint32_t ramp = input(t, own_bytes ? 0 : 1), ticks = input(t, own_bytes ? 1 : 3);
+    uint32_t coolant = input(t, own_bytes ? 2 : 4);
     bool starting = bit(t, get(t, 6));
     if (at(t.rom, c + get(t, 2)) >= rpm)                                // Cal_StartRpmEnter; SUBB A,Rpm; JNC
     {
@@ -769,8 +772,13 @@ static void UNIT_CODE(start_mode)(const Task &t)
             flags |= START_COLD_FUEL;
         if (at(t.rom, c + get(t, 4)) >= coolant)                        // Cal_ColdIgn
             flags |= START_COLD_IGN;
+        if (own_bytes)                                                  // Start_Variants, here too
+        {
+            set_bit(t, get(t, 10), flags & START_COLD_FUEL);
+            set_bit(t, get(t, 11), flags & START_COLD_IGN);
+        }
     }
-    else if (starting && (input(t, 1) == 0 || value(t, get(t, 5)) < rpm)) // IsvRamp 0; Start_ExitSpeed; JNC
+    else if (starting && (ramp == 0 || value(t, get(t, 5)) < rpm))     // IsvRamp 0; Start_ExitSpeed; JNC
     {
         starting = false;
         flags |= START_OVER;
@@ -779,16 +787,181 @@ static void UNIT_CODE(start_mode)(const Task &t)
     if (starting)
         flags |= START_MODE;
     set_bit(t, get(t, 6), starting);
-    uint32_t tick = (input(t, 3) + 1) & 0xFF;                           // MOV A,TickCount; INC A
+    uint32_t tick = (ticks + 1) & 0xFF;                                 // MOV A,TickCount; INC A
     if (tick == 180)                                                    // CJNE A,#180; CLR A
         tick = 0;
     uint32_t period = at(t.rom, c + get(t, 7)), left = 0;               // Cal_BoostPeriod; DIV AB: B
     if (period != 0)                                                    //   (by 0: B kept, 0)
         for (left = tick; left >= period;)                              // (no division in the bank)
             left -= period;
-    if (left == 0 && byte_of(t, 8) != 0)                                // JNZ; MOV A,BoostCount; JZ
+    if (left == 0 && own_bytes)
+        pair_guard_period();                                            // the pipeline's level keeps it
+    else if (left == 0 && byte_of(t, 8) != 0)                           // JNZ; MOV A,BoostCount; JZ
         own(t, 8, byte_of(t, 8) - 1);                                   // DEC BoostCount
     put(t, 0, flags);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Task 13 (format 9): the tick's values the 8051 makes, sent once a tick after lambda (rom_lean's
+// Main_Byte_Again's place) and at power-up: the load's byte, LoadHi, LoadMid, WarmWeight, AfterStart,
+// AccelEnrich, LamInt, IdleTarget, the throttle switches (Throttle_Switches_Table's value: Switches) and
+// AdvanceDyn, each into the unit's copy as it is sent. Here the switches into their bits (RRC A twice:
+// the full-load switch bit 0, the idle switch bit 1), the unit's StartMode and FuelCut in that byte
+// left as they are; then pair.cpp's pipeline makes the waiting pulse again. Data: IdleSwitch's bit,
+// FullLoadSwitch's. No outputs.
+static void UNIT_CODE(tick_values)(const Task &t)
+{
+    uint32_t switches = input(t, 8);
+    set_bit(t, get(t, 1), switches & 1);                                // MOV FullLoadSwitch,C
+    set_bit(t, get(t, 0), switches >> 1 & 1);                           // MOV IdleSwitch,C
+    pair_tick_sent();
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Task 14 (format 9): the pipeline's stage 2, Speed_Count and Idle_Spark, which pair.cpp's pipeline
+// runs on its copy of the RAM (the 8051 never asks for it). Data: SPEED_K's three bytes (low first),
+// SPEED_BAND; Constants' address and the places there of Cal_IdleSparkGain, Cal_IdleSparkTop,
+// Cal_IdleSparkMax and Cal_IdleSparkMin; the bits IdleSwitch, FullLoadSwitch, StartMode and FuelCut;
+// the addresses of Rpm, FirePeriodL, FirePeriodH, IdlePrev, IdleTarget, Advance and AdvanceDyn. No
+// inputs or outputs.
+
+static __force_inline uint32_t speed_k(const Task &t)
+{
+    return get(t, 0) | get(t, 1) << 8 | get(t, 2) << 16;
+}
+
+// Speed_Count: the speed byte (the teeth a tick) from the firing's length P: D = SPEED_K + P / 2 less
+// the byte x P, a count on (D less P) while D is P or more, a count back (D on by P) while it is under
+// 0, four steps at most, else the count by long division a bit at a time (8 bits); then the byte held
+// within SPEED_BAND - 1 of the count. P FFFFh (a firing past 16 bits, its count made apart): none.
+static void UNIT_CODE(speed_count)(const Task &t)
+{
+    uint32_t pl = byte_of(t, 15), ph = byte_of(t, 16), p = ph << 8 | pl;
+    if ((pl & ph) == 0xFF)                                              // ANL A,FirePeriodH; CPL A; JNZ
+        return;
+    uint32_t dividend = (speed_k(t) + (p >> 1)) & 0xFFFFFF;             // R7:R6:R5
+    uint32_t rpm = byte_of(t, 14), r3 = rpm, product = r3 * p;          // R3; R2:R1:R0
+    bool down = dividend < product;                                     // SUBB x 3: C
+    uint32_t d = (dividend - product) & 0xFFFFFF, count = 0;
+    bool found = false;
+    for (uint32_t steps = 4; steps != 0 && !found; steps--)             // MOV R4,#4; DJNZ R4
+    {
+        if (down)                                                       // Speed_Down
+        {
+            r3 = (r3 - 1) & 0xFF;                                       // DEC R3
+            d += p;                                                     // ADD, ADDC, ADDC
+            found = d > 0xFFFFFF;                                       // JC Speed_Found
+            d &= 0xFFFFFF;
+        }
+        else                                                            // Speed_Up
+        {
+            found = d < p;                                              // SUBB x 3; JC Speed_Found
+            d = (d - p) & 0xFFFFFF;
+            if (!found)
+                r3 = (r3 + 1) & 0xFF;                                   // INC R3
+        }
+    }
+    if (found)
+        count = r3;                                                     // Speed_Found: MOV R5,R3
+    else                                                                // Speed_Divide
+    {
+        uint32_t rest = dividend >> 8, r5 = dividend & 0xFF;            // R7:R6, R5
+        for (uint32_t bit = 0; bit < 8; bit++)                          // MOV R4,#8; DJNZ R4,Speed_Bit
+        {
+            rest = rest << 1 | r5 >> 7;                                 // ADD A,R5; RLC R6; RLC R7
+            r5 = r5 << 1 & 0xFF;
+            bool top = rest > 0xFFFF;                                   // SpeedTop
+            rest &= 0xFFFF;
+            if (top || rest >= p)                                       // JB SpeedTop; SUBB; JC Speed_Next
+            {
+                rest = (rest - p) & 0xFFFF;                             // Speed_Fits: R7:R6 less P
+                r5 |= 1;                                                // INC R5
+            }
+        }
+        count = r5;
+    }
+    uint32_t band = get(t, 3), a = (count + 1 - band) & 0xFF;           // ADD A,#LOW(1 - SPEED_BAND)
+    if (a >= rpm)                                                       // CJNE A,Rpm; JC Speed_High
+        rpm = a;                                                        // MOV Rpm,A
+    a = (a + 2 * band - 2) & 0xFF;                                      // ADD A,#(2 * SPEED_BAND - 2)
+    if (a < rpm)                                                        // CJNE A,Rpm; JNC Speed_Out
+        rpm = a;
+    own(t, 14, rpm);
+}
+
+// Idle_Error: the idle speed's fine error, (IdleTarget x P - SPEED_K) / 1024: the top two bytes of the
+// 24-bit difference (the low byte's borrow kept), two right with their sign, within -128 and 127,
+// else the range's end by the sign.
+static uint32_t UNIT_CODE(idle_error)(const Task &t, uint32_t p)
+{
+    uint32_t difference = (byte_of(t, 18) * p - speed_k(t)) & 0xFFFFFF;  // MUL AB x 2; SUBB x 3
+    int32_t v = (int32_t)(int16_t)(difference >> 8 & 0xFFFF) >> 2;     // MOV C,ACC.7; RRC A, twice
+    if (v < -128 || v > 127)                                            // RLC A; CLR A; ADDC A,R2; JZ
+        return v < 0 ? 0x80 : 0x7F;                                     // MOV A,#7Fh; ADDC A,#00h
+    return (uint32_t)v & 0xFF;                                          // MOV A,R1
+}
+
+// Idle_Spark: the length / 16, its low byte, against the last firing's (IdlePrev): its growth less
+// one, x 2, at most 7Fh (a rise none). Off idle nothing more. At idle (the idle switch closed): with
+// the full-load switch closed, starting or in an overrun cut, AdvanceDyn none; else the error and the
+// fall x Cal_IdleSparkGain / 16, at least one from half of one (the owner's floor), a lead below the
+// target within Cal_IdleSparkMax and the advance with it at most Cal_IdleSparkTop, a lag above it
+// within Cal_IdleSparkMin (stored negative), into AdvanceDyn.
+static void UNIT_CODE(idle_spark)(const Task &t)
+{
+    uint32_t pl = byte_of(t, 15), ph = byte_of(t, 16);
+    uint32_t sixteenth = (ph << 4 | pl >> 4) & 0xFF;                    // SWAP, ANL, ORL: R2
+    uint32_t fall = (sixteenth - byte_of(t, 17)) & 0xFF;                // XCH A,IdlePrev; SUBB A,R2
+    own(t, 17, sixteenth);
+    if (fall & 0x80)
+        fall = 0;                                                       // a rise: none
+    else if (fall != 0)
+    {
+        fall = (fall - 1) * 2 & 0xFF;                                   // DEC A; ADD A,ACC
+        if (fall & 0x80)
+            fall = 0x7F;
+    }
+    if (!bit(t, get(t, 10)))                                            // JNB IdleSwitch,Idle_Spark_Out
+        return;
+    if (bit(t, get(t, 11)) || bit(t, get(t, 12)) || bit(t, get(t, 13))) // the full-load switch, starting, cut
+    {
+        own(t, 20, 0);
+        return;
+    }
+    int32_t sum = (int32_t)(int8_t)idle_error(t, ph << 8 | pl) + (int32_t)fall;  // ADD A,R3; JNB OV
+    uint32_t a = sum > 127 ? 0x7F : (uint32_t)sum & 0xFF;
+    bool lag = a & 0x80;                                                // SignTmp
+    if (lag)
+        a = (0x100 - a) & 0xFF;                                         // CPL A; INC A
+    uint32_t c = word(t, 4), product = at(t.rom, c + get(t, 6)) * a;    // x Cal_IdleSparkGain: B:A
+    uint32_t low = product & 0xFF, high = product >> 8, size;
+    if (high >= 0x10)
+        size = 0xFF;                                                    // Idle_Spark_Full
+    else
+    {
+        size = (high << 4 | low >> 4) & 0xFF;                           // / 16
+        if (size == 0)
+            size = low >= 8 ? 1 : 0;                                    // ADD A,#0F8h; CLR A; RLC A
+    }
+    uint32_t limit;
+    if (!lag)
+    {
+        uint32_t room = (at(t.rom, c + get(t, 7)) - byte_of(t, 19)) & 0xFF;  // Cal_IdleSparkTop less Advance
+        if (room & 0x80)
+            room = 0;
+        uint32_t most = at(t.rom, c + get(t, 8));                       // Cal_IdleSparkMax
+        limit = most < room ? most : room;
+    }
+    else
+        limit = (0x100 - at(t.rom, c + get(t, 9))) & 0xFF;              // Cal_IdleSparkMin; CPL A; INC A
+    uint32_t v = limit < size ? limit : size;                           // CJNE A,00h; JC
+    own(t, 20, lag ? (0x100 - v) & 0xFF : v);
+}
+
+static void UNIT_CODE(speed)(const Task &t)
+{
+    speed_count(t);
+    idle_spark(t);
 }
 
 bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
@@ -819,6 +992,10 @@ bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *ro
         advance_rest(t);
     else if (task == TASK_START)
         start_mode(t);
+    else if (task == TASK_TICK)
+        tick_values(t);
+    else if (task == TASK_SPEED)
+        speed(t);
     else
         return false;
     return true;

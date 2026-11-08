@@ -31,6 +31,16 @@ bool pair_pulse(uint32_t start, uint32_t overflows, bool again);
 // Main_Tick_Over cleared Inj720Odd).
 void pair_start_over();
 
+// Format 9 (the pipeline on the unit, DME-Sim's docs/Paired_Pipeline.md): from the bus level's tasks,
+// a job for the pipeline's level: task 12's overboost guard's period (BoostCount one less, to 0) and
+// task 13's tick values sent (the waiting pulse made again).
+void pair_guard_period();
+void pair_tick_sent();
+
+// The pipeline's level: SPARE_IRQ_0's handler, at the lowest priority (the bus's interrupts break into
+// it); it does the jobs the bus level queued, in turn.
+void pair_control();
+
 // DME-Sim's checks of the ported routines: routine's inputs and outputs in pair_case (pair.cpp).
 uint32_t pair_test(uint32_t routine);
 

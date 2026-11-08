@@ -107,7 +107,7 @@ struct Unit
 
 static Unit unit UNIT_DATA = {};
 static uint32_t shadow[PAGE / 4] UNIT_DATA = {}; // the page as the PC wrote it
-static uint8_t ram[0x80] UNIT_DATA = {};         // the 8051's RAM bytes a task was sent, and it made
+alignas(4) static uint8_t ram[0x80] UNIT_DATA = {}; // the 8051's RAM bytes a task was sent, and it made
 static uint8_t made[0x80] UNIT_DATA = {};        // the RAM bytes the snoop makes (format 4), as of its last
 
 // ceil(2^16 / d): x / d = x * it >> 16, exact below 256. Made as the firmware is built, so the image of
@@ -474,6 +474,34 @@ void UNIT_CODE(map_unit_ram_clear)(uint32_t from, uint32_t to)
         ram[a] = 0;
 }
 
+uint32_t *UNIT_CODE(map_unit_ram_words)()
+{
+    return (uint32_t *)ram;
+}
+
+void UNIT_CODE(map_unit_snooped_over)(uint8_t *bytes)
+{
+    if (at(MARK + 4) < 4)
+        return;
+    uint32_t table = at(MARK + 9) << 8 | at(MARK + 10);
+    for (uint32_t i = 0, n = at(table); i < n; i++)
+    {
+        uint32_t address = at(table + 1 + 4 * i) & 0x7F;
+        bytes[address] = made[address];
+    }
+}
+
+uint32_t UNIT_CODE(map_unit_task_at)(uint32_t task)
+{
+    for (uint32_t id = 0, n = at(MARK + 6); id < n; id++)
+    {
+        uint32_t entry = entry_of(id);
+        if (at(entry + 2) == (TASK | task))
+            return at(entry) << 8 | at(entry + 1);
+    }
+    return 0;
+}
+
 void UNIT_CODE(map_unit_adc)(uint32_t channel)
 {
     if (!unit.on || at(MARK + 4) < 4)
@@ -509,7 +537,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 8)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 9)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }
@@ -595,6 +623,10 @@ void map_unit_init(uint8_t *rom, uint32_t addr_mask)
     irq_set_priority(PIO1_IRQ_0, 0);
     pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
     irq_set_enabled(PIO1_IRQ_0, true);
+    // Format 9's pipeline (pair.cpp): its level below all others, pended by the bus level.
+    irq_set_exclusive_handler(SPARE_IRQ_0, pair_control);
+    irq_set_priority(SPARE_IRQ_0, PICO_LOWEST_IRQ_PRIORITY);
+    irq_set_enabled(SPARE_IRQ_0, true);
     pio_sm_set_enabled(p, sm, true);
     map_unit_start(rom, addr_mask);
     if (unit.on)

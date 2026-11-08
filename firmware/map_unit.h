@@ -46,6 +46,14 @@ uint32_t map_unit_ram(uint32_t address);
 void map_unit_ram_write(uint32_t address, uint32_t value);
 void map_unit_ram_clear(uint32_t from, uint32_t to);
 
+// Format 9 (pair.cpp's pipeline): the unit's copy of the 8051's RAM as 32 words (its bytes 00h-7Fh),
+// which the pipeline's level takes and gives back with the interrupts held off; the bytes the snoop
+// makes put over a copy of it (as a task's snooped inputs are); a task's description by its number
+// (0: the image has none).
+uint32_t *map_unit_ram_words();
+void map_unit_snooped_over(uint8_t *bytes);
+uint32_t map_unit_task_at(uint32_t task);
+
 #else
 
 static inline void map_unit_hide() {}

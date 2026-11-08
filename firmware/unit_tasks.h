@@ -28,6 +28,26 @@ enum : uint32_t
     TASK_REST,    // the advance's rest (format 8): Ign_Offset, the overboost guard, the overrun cut, the
                   //   slew (the pipeline's stage 4)
     TASK_START,   // the tick's start mode (format 8): Main_Tick's, with Start_Variants; its end to pair.cpp
+    TASK_TICK,    // the tick's values the 8051 makes (format 9), sent once a tick: the switches into their
+                  //   bits, then pair.cpp's pulse made again
+    TASK_SPEED,   // the pipeline's stage 2 (format 9): Speed_Count and Idle_Spark, which pair.cpp's
+                  //   pipeline runs (the 8051 never asks for it)
+};
+
+// Format 9 (DME-Sim's docs/Paired_Pipeline.md): the pipeline is pair.cpp's, and the bytes it keeps the
+// unit's own: tasks 7 and 12 take the speed byte so, and task 12 hands the overboost guard's periods
+// to the pipeline's level.
+static constexpr uint32_t PIPELINE_FORMAT = 9;
+
+// The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
+// the unit did with its own count and bits (format 8), as rom_lean's routines did.
+enum : uint32_t
+{
+    PULSE_DECAY = 1,    // Fuel_Crank's decay begun: CrankDecay set (InjCount 0)
+    PULSE_RAMP_END = 2, // the resume's ramp over: ResumeRamp cleared
+    PULSE_SLEW_END = 4, // its slew over (Fuel_Mode_Slew_At): SlewResume cleared, SlewCount 0, if set
+    PULSE_HELD = 8,     // over its turns, held (InjHold)
+    PULSE_LATE = 0x10,  // made again after its reference: its load not written
 };
 
 // Works task out from its description; false if there is no such task.

@@ -85,6 +85,9 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 |      | Ign_Slew (fmt 8)   | 8051's; counts, flags its own)      |
 | 12   | Main_Tick's start  | StartFlags; BoostCount its own      |
 |      | mode (fmt 8)       |                                     |
+| 13   | (format 9)         | none: the tick's values, sent       |
+| 14   | Speed_Count and    | none sent: the board's Rpm,         |
+|      | Idle_Spark (fmt 9) | IdlePrev, AdvanceDyn at idle        |
 
 ### Inputs the snoop makes (format 4)
 
@@ -100,7 +103,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 8)
+### The paired core (formats 6 to 9)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -160,6 +163,32 @@ Format 8 (step 3.3) adds the advance's rest, start mode and the injection's phas
   what the cut reads (Cal_RevLimit, the speed byte, StartMode, FuelCut, BoostCut), then the marks
   and the places they change.
 
+Format 9 (step 3.4, DME-Sim's docs/Paired_Pipeline.md) moves rom_lean's per-firing pipeline onto
+the board, which runs it itself at slot 0's tooth:
+- **Its level.** An interrupt of its own below the bus's (SPARE_IRQ_0 at the lowest priority), which
+  the bus level pends: the bus level's interrupts break into it, so the teeth and the window wait
+  for nothing more. Its jobs run one at a time, in the order they came (a queue of 8).
+- **The firing.** The firing's length (past 16 bits the speed byte from it, Capture_Long's), the
+  turn's start (the slew's count; starting, the injection counted; at the turn's first firing the
+  turn decided as in format 8), then at the rate (each firing under Cal_PipeRpm, else the turn's
+  first) the speed's count and the idle spark (task 14), the advance's sum and rest (tasks 4 and
+  11), the plans' advance, and the turn's pulse (task 9), all bit for bit.
+- **The other jobs.** Each ping: the speed byte's bound as the engine stops, and the heartbeat,
+  which so moves only while this level runs. The tick's send (task 13: ten of the 8051's bytes, no
+  outputs): the waiting pulse made again (task 10). Start mode's guard periods. The engine stopped
+  (the stop's mark): the counts, then the stages with no firing and the pulse. A stop or the
+  8051's start makes the jobs queued or under way stale: they give nothing.
+- **The RAM's copy.** A job takes it at its start and gives back only the bits it changed at its
+  end, each in one go with the interrupts held off, so that a window's task never tears them.
+- **The take.** The results reach the 8051 as live operands, in two copies of a short routine (the
+  count, the speed byte, the advance, the firing's length, the injection time, the dead time, the
+  pulse's flags, the cuts' SETB or CLR, the phase's copy, AdvanceDyn and the pulses' counts): the
+  board writes the copy the switch (an AJMP's operand) doesn't point to, turns the switch, then
+  moves the count the 8051 compares at Pair_Count, so it takes a whole copy, the old or the new.
+- The table adds the take's places (the count, the switch, both copies), Cal_PipeRpm's and
+  Cal_RemakeRpm's numbers and the bytes the take carries. The firing's and the injection's marks and
+  Main_Turn's SJMP are gone (0 in the table).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
@@ -173,7 +202,8 @@ Format 8 (step 3.3) adds the advance's rest, start mode and the injection's phas
   are in flash). A pick or a send fills the page with the next answer, the last send looks the map
   up (or works the task out) and fills the page with its value, and the value's read (or a start)
   copies the page as written back. A fill takes about 105 cycles; the interrupt's own times are
-  under Measured.
+  under Measured. Format 9's pipeline level (`pair_control`, on SPARE_IRQ_0) runs from the bank
+  too, under the same rules; DME-Sim runs it with the bus level's interrupts breaking in.
 - The PC reads and writes the image as it wrote it: the page is kept for it (the shadow), and a
   commit writes that. While the unit is on, the PC's bytes for the page reach the 8051 once the page
   is as written again (after the next lookup, or the 8051's start).
