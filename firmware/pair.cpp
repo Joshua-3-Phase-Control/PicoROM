@@ -957,17 +957,30 @@ static void UNIT_CODE(take_inputs)(uint8_t *into, uint8_t *kept)
         copy_words((uint32_t *)kept, (const uint32_t *)into);
 }
 
+// The words of a job's copy it changed (`now` against `was`), by their index, into `changed`; their
+// number. A function of its own, two words a turn, so that it runs in the low registers.
+static uint32_t UNIT_CODE(changed_words)(uint8_t *changed, const uint32_t *now, const uint32_t *was)
+{
+    uint8_t *c = changed;
+    for (uint32_t i = 0; i < 0x20; i += 2)
+    {
+        uint32_t a = now[i], b = now[i + 1];
+        if (a != was[i])
+            *c++ = i;
+        if (b != was[i + 1])
+            *c++ = i + 1;
+    }
+    return c - changed;
+}
+
 // The bits a job changed (`job` against `kept`, as it took them) back into the unit's copy in one go
 // (the interrupts held off), unless the 8051's start or a stop overtook it; true if given.
 static bool UNIT_CODE(give_back)(uint32_t generation, const uint8_t *job, const uint8_t *kept)
 {
     const uint32_t *now = (const uint32_t *)job, *was = (const uint32_t *)kept;
-    uint32_t *ram = map_unit_ram_words();
     uint8_t changed[0x20];
-    uint32_t changes = 0;
-    for (uint32_t i = 0; i < 0x20; i++)
-        if (now[i] != was[i])
-            changed[changes++] = i;
+    uint32_t changes = changed_words(changed, now, was);
+    uint32_t *ram = map_unit_ram_words();
     bool given = false;
     __asm volatile("cpsid i" ::: "memory");
     if (generation == control.generation)
@@ -1227,8 +1240,9 @@ static void UNIT_CODE(make_frame)(uint32_t tick)
 // stop overtook it (false), all again from a new copy if an L1 job committed meanwhile; else its bits
 // given back, start mode's end for the phase (task 12 leaves it to the commit), its counts, its take, the
 // heartbeat (if L1 has taken every job queued before the tick began, so that a stuck L1 stops it too),
-// and the pulse made again queued for L1 (Main_Byte_Again's), which runs it as it is let go. *tick: the
-// tick counter given, for the frame.
+// and the pulse made again queued for L1 if it can be made (Main_Byte_Again's: a pulse waiting, not
+// starting, under Cal_RemakeRpm), which runs it as it is let go. *tick: the tick counter given, for
+// the frame.
 static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
 {
     uint32_t queued = control.in;
@@ -1289,9 +1303,13 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
         give_take(ping.generation, false);
         if ((int32_t)(control.out - queued) >= 0)
             write(pair.ping + 1, ++pair.beat & 0xFF);                   // the heartbeat
-        __asm volatile("cpsid i" ::: "memory");                         // (the bus level pushes too)
-        push(JOB_SENT, 0, 0, 0);
-        __asm volatile("cpsie i" ::: "memory");
+        bool waits = control.pulse_made && pair.references == pair.pulse_reference;  // PulseWaits
+        if (waits && !copy_bit(ram, pair.start_bit) && copy_byte(ram, pair.rpm_at) < control.remake_rpm)
+        {                                                               // the pulse made again (its job
+            __asm volatile("cpsid i" ::: "memory");                     //   asks again: a reference may
+            push(JOB_SENT, 0, 0, 0);                                    //   come first); the bus level
+            __asm volatile("cpsie i" ::: "memory");                     //   pushes too
+        }
         levels.ticks++;
         *counter = tick;
         let_events_go();

@@ -222,8 +222,8 @@ with lambda, the idle valve's control and the log; the 8051 does no serial:
   8051's power-up alone), the rest of task 15, the tick counter (the board's own), lambda's timer
   and lambda (task 16), the waiting pulse made again (task 10; since the levels, an L1 job after the
   tick's commit), every second tick the idle control's state and a duty (task 17; a duty too when a
-  stop's run asked for one), and every Cal_StreamTicks ticks the log's frame (since the levels, after
-  the pulse made again). Tasks 15 to 17 run in parts there (`unit_task_part`).
+  stop's run asked for one), and every Cal_StreamTicks ticks the log's frame (since the levels,
+  after the pulse made again). Tasks 15 to 17 run in parts there (`unit_task_part`).
 - **The pins.** The 8051 tells its oxygen sensor's comparators and its A/C request by calling one of
   eight RETs in page 0, two bytes apart; the board keeps the three bits in its copy (PinBits).
 - **The take** carries what the 8051 uses: the count, the MAP pulse's dead time, the pulse's flags,
@@ -261,8 +261,8 @@ of the firings' way:
   registers, the speed byte's bound and the frame's count by the unit's reciprocals.
 - **Counts for the PC** (parameters): `pair_events` gives L1's jobs, those lost to a full queue, the
   most waiting at once, the longest from a push to its end (us) and those over 65 us; `pair_tick`
-  gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and those
-  over 1 ms.
+  gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and
+  those over 1 ms.
 
 ## How it works
 
