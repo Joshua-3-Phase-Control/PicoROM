@@ -111,7 +111,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 14)
+### The paired core (formats 6 to 15)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -309,6 +309,18 @@ pulse's small rises:
 - **The switch.** The image's Cal_MapCarry, whose address the description holds, turns it on (1)
   or off (0: each read pays the deadband, as format 12's).
 - The table is format 13's.
+
+Format 15 (DME-Sim's docs/Paired_Tip_Outs.md, the owner's of 2026-11-09) cuts the pulse after a fall
+of the MAP:
+- **The fall.** At each MAP read, a fall below the slot's filter past the image's Cal_DecelDeadband,
+  each read alone (falls are not carried: steady reads sit a count or two under their filters), x
+  Decel_MapGain by coolant (a map of the unit's, id 58) / 32. The units are owed to the pulse (a
+  byte of the RAM's copy, at most 255); a fall gives no MAP pulse and ends a rise's carry.
+- **The cut.** The pulse task takes the units owed off the turn's pulse, 64 cycles each, down to
+  Cal_InjMinTime, and keeps the units it took for the pulse made again, which takes as many. None
+  while starting.
+- Task 18's description adds the map's id, the byte owed and Cal_DecelDeadband's address, the
+  pulse task's the two bytes. The table is format 13's.
 
 ## How it works
 

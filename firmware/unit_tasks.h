@@ -84,6 +84,11 @@ static constexpr uint32_t SLOW_FORMAT = 13;
 // slot's next read, as the image's Cal_MapCarry says.
 static constexpr uint32_t CARRY_FORMAT = 14;
 
+// Format 15 (DME-Sim's docs/Paired_Tip_Outs.md): a fall of the MAP past its own deadband owes a cut, by a
+// gain by coolant (task 18), which the pulse task takes off the turn's pulse; its data the cut's two
+// bytes.
+static constexpr uint32_t DECEL_FORMAT = 15;
+
 // The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
 // the unit did with its own count and bits (format 8), as rom_lean's routines did.
 enum : uint32_t

@@ -213,12 +213,15 @@ static void UNIT_CODE(fuel)(const Task &t)
 }
 
 // Main_Ign. Data: Ign_Coolant's id, Ign_Coolant_Cold's, Ign_AirTemp's, Accel_MapGain's, ColdStartIgn's
-// bit. Out: IgnSlow, MapGainNow.
+// bit; format 15, Decel_MapGain's id. Out: IgnSlow, MapGainNow; format 15, DecelGainNow (the pulse cut's
+// gain by coolant, which task 18 takes, as it takes MapGainNow).
 static void UNIT_CODE(ign)(const Task &t)
 {
     uint32_t sum = sum_map(t, 0, get(t, bit(t, get(t, 4))));            // the cold map after a cold start
     put(t, 0, sum_map(t, sum, get(t, 2)));
     put(t, 1, value(t, get(t, 3)));
+    if (at(t.rom, 0x2004) >= DECEL_FORMAT)
+        put(t, 2, value(t, get(t, 5)));
 }
 
 // Slow_Charge's time: (Dwell_Time x CHARGE_K + CHARGE_0) / 256, a byte at a time. Data: Dwell_Time's id,
@@ -382,8 +385,9 @@ static uint32_t UNIT_CODE(crank_fuel)(const Task &t, uint32_t *exponent, uint32_
 
 // Fuel_Mode: the injection time (*time: the time a turn x lambda, twice it unless starting and at most
 // F800h, the shortest at least) and the pulse's TH0 load: the time ramped after an overrun cut (16
-// injections; made again at the step it was made at), the dead time on, held over 15/16 of its turns
-// (then twice that), less INJ_OFS. The turn's pulse counted (InjCount, to 80h; not starting).
+// injections; made again at the step it was made at; format 15, less the cut a fall owes), the dead time
+// on, held over 15/16 of its turns (then twice that), less INJ_OFS. The turn's pulse counted (InjCount,
+// to 80h; not starting).
 static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, bool again, uint32_t *count,
                                   uint32_t *flags)
 {
@@ -418,6 +422,22 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
             uint32_t wide = r * factor;                                 // Mul16x8
             shift_left(&wide, 2);                                       // MOV A,#02h; Shift_Left
             r = wide >> 8 & 0xFFFF;
+        }
+    }
+    // Format 15 (DME-Sim's docs/Paired_Tip_Outs.md): the cut a fall of the MAP owes (task 18's units of 64
+    // cycles, DecelOwed) taken off the turn's pulse, down to the shortest time; the units it took kept
+    // (DecelCut) for the pulse made again, which takes as many. None starting.
+    if (at(t.rom, 0x2004) >= DECEL_FORMAT && !starting)
+    {
+        uint8_t &owed = t.ram[get(t, 27) & 0x7F], &taken = t.ram[get(t, 28) & 0x7F];
+        uint32_t room = r > least ? (r - least) >> 6 : 0, cut = again ? taken : owed;
+        if (cut > room)
+            cut = room;
+        r -= cut << 6;
+        if (!again)
+        {
+            owed = owed - cut;
+            taken = cut;
         }
     }
     if (!again && !starting && *count < 0x80)                           // JB ACC.7,Fuel_Mode_Dead; INC InjCount
@@ -1642,7 +1662,9 @@ static void UNIT_CODE(idle_duty)(const Task &t)
 // Cal_MapDeadband's address (high byte first); INJ_OFS; the bits IdleSwitch and StartMode; the bytes
 // MapPrev0 and MapPrev1 (the filters, the unit's own), MapGainNow (task 2's) and DeadNow (the pulse's
 // task's). Format 14: Cal_MapCarry's address, and the bytes MapCarry0 and MapCarry1 (the rise each
-// slot carries, the unit's own: 0 from the 8051's start, as the RAM's copy).
+// slot carries, the unit's own: 0 from the 8051's start, as the RAM's copy). Format 15: the bytes
+// DecelGainNow (task 2's) and DecelOwed (the pulse cut a fall owes, the unit's own), and
+// Cal_DecelDeadband's address.
 namespace
 {
 
@@ -1657,24 +1679,46 @@ enum : uint32_t
     MP_DEAD,
     MP_CARRY_ON, // format 14: a word
     MP_CARRY = MP_CARRY_ON + 2, // two: the first MAP read's carry, the second's
+    MP_DECEL_GAIN = MP_CARRY + 2, // format 15: the pulse cut's gain by coolant (task 2's)
+    MP_DECEL_OWED,               // the cut owed, in 64-cycle units
+    MP_DECEL_DEAD,               // a word: the falls' deadband
 };
+
+// Format 15 (DME-Sim's docs/Paired_Tip_Outs.md: the owner, 2026-11-09): a read's fall below its slot's
+// filter past Cal_DecelDeadband, each read alone (falls are not carried: steady reads sit a count or
+// two under their filters), x DecelGainNow (Decel_MapGain by coolant, task 2's) / 32, owed to the pulse
+// task's cut (DecelOwed, at most 255).
+__force_inline void owe(const Task &t, uint32_t fall)
+{
+    uint32_t deadband = at(t.rom, word(t, MP_DECEL_DEAD));
+    if (fall <= deadband)
+        return;
+    uint8_t &owed = t.ram[get(t, MP_DECEL_OWED) & 0x7F];
+    uint32_t sum = owed + (((fall - deadband) * byte_of(t, MP_DECEL_GAIN) + 0x10) >> 5);
+    owed = sum > 0xFF ? 0xFF : sum;
+}
 
 // Format 14 (DME-Sim's docs/Paired_Transients.md: the owner, 2026-11-09): with Cal_MapCarry on, a rise
 // under the deadband is carried to its slot's next read and added to its rise, so the deadband is paid
 // once on the sum; a read with no rise, the idle switch or start mode ends the carry. Off, each read
-// pays the deadband (format 12's).
+// pays the deadband (format 12's). Format 15: a fall owes the pulse cut (owe).
 __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint32_t *load)
 {
     uint8_t &filter = t.ram[get(t, MP_PREV + slot) & 0x7F];
     uint32_t rise = read >= filter ? read - filter : 0;                 // SUBB A,MapPrev0; JC: none falling
+    uint32_t fall = read < filter ? filter - read : 0;
     filter = (filter + read + 1) >> 1;                                  // SETB C; ADDC A,R3; RRC A: the
                                                                         //   filter half the way, rounded
     uint8_t none = 0;
-    bool carried = at(t.rom, 0x2004) >= CARRY_FORMAT && at(t.rom, word(t, MP_CARRY_ON)) != 0;
+    uint32_t format = at(t.rom, 0x2004);
+    bool carried = format >= CARRY_FORMAT && at(t.rom, word(t, MP_CARRY_ON)) != 0;
     uint8_t &carry = carried ? t.ram[get(t, MP_CARRY + slot) & 0x7F] : none;
-    if (bit(t, get(t, MP_IDLE)) || bit(t, get(t, MP_START)) || rise == 0)   // JB IdleSwitch; JB StartMode
+    bool off = bit(t, get(t, MP_IDLE)) || bit(t, get(t, MP_START));    // JB IdleSwitch; JB StartMode
+    if (off || rise == 0)
     {
         carry = 0;
+        if (!off && format >= DECEL_FORMAT)
+            owe(t, fall);
         return false;
     }
     uint32_t deadband = at(t.rom, word(t, MP_DEADBAND));                // MOVC A,@A+DPTR (Cal_MapDeadband)
