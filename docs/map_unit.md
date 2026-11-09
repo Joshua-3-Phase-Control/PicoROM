@@ -319,8 +319,11 @@ of the MAP:
 - **The cut.** The pulse task takes the units owed off the turn's pulse, 64 cycles each, down to
   Cal_InjMinTime, and keeps the units it took for the pulse made again, which takes as many. None
   while starting.
-- Task 18's description adds the map's id, the byte owed and Cal_DecelDeadband's address, the
-  pulse task's the two bytes. The table is format 13's.
+- Task 2 looks the gain up at each coolant result, as it does MapGainNow, into a byte of its own
+  (DecelGainNow): the MAP job runs on the RAM's copy as it stands, whose coolant byte the snoop's
+  bytes don't reach. Task 2's description adds the map's id and that output; task 18's that byte,
+  the byte owed and Cal_DecelDeadband's address; the pulse task's its two bytes. The table is
+  format 13's.
 
 ## How it works
 
