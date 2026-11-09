@@ -80,6 +80,10 @@ static constexpr uint32_t MAP_FORMAT = 12;
 // task through the window.
 static constexpr uint32_t SLOW_FORMAT = 13;
 
+// Format 14 (DME-Sim's docs/Paired_Transients.md): task 18 carries a rise under the deadband to its
+// slot's next read, as the image's Cal_MapCarry says.
+static constexpr uint32_t CARRY_FORMAT = 14;
+
 // The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
 // the unit did with its own count and bits (format 8), as rom_lean's routines did.
 enum : uint32_t

@@ -1641,7 +1641,8 @@ static void UNIT_CODE(idle_duty)(const Task &t)
 // (slots 3 and 9, each its own filter: the cylinders' before at the same crank angle). Its data:
 // Cal_MapDeadband's address (high byte first); INJ_OFS; the bits IdleSwitch and StartMode; the bytes
 // MapPrev0 and MapPrev1 (the filters, the unit's own), MapGainNow (task 2's) and DeadNow (the pulse's
-// task's).
+// task's). Format 14: Cal_MapCarry's address, and the bytes MapCarry0 and MapCarry1 (the rise each
+// slot carries, the unit's own: 0 from the 8051's start, as the RAM's copy).
 namespace
 {
 
@@ -1654,20 +1655,37 @@ enum : uint32_t
     MP_PREV,     // two: the first MAP read's filter, the second's
     MP_GAIN = MP_PREV + 2,
     MP_DEAD,
+    MP_CARRY_ON, // format 14: a word
+    MP_CARRY = MP_CARRY_ON + 2, // two: the first MAP read's carry, the second's
 };
 
+// Format 14 (DME-Sim's docs/Paired_Transients.md: the owner, 2026-11-09): with Cal_MapCarry on, a rise
+// under the deadband is carried to its slot's next read and added to its rise, so the deadband is paid
+// once on the sum; a read with no rise, the idle switch or start mode ends the carry. Off, each read
+// pays the deadband (format 12's).
 __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint32_t *load)
 {
     uint8_t &filter = t.ram[get(t, MP_PREV + slot) & 0x7F];
     uint32_t rise = read >= filter ? read - filter : 0;                 // SUBB A,MapPrev0; JC: none falling
     filter = (filter + read + 1) >> 1;                                  // SETB C; ADDC A,R3; RRC A: the
                                                                         //   filter half the way, rounded
-    if (bit(t, get(t, MP_IDLE)) || bit(t, get(t, MP_START)))            // JB IdleSwitch; JB StartMode
+    uint8_t none = 0;
+    bool carried = at(t.rom, 0x2004) >= CARRY_FORMAT && at(t.rom, word(t, MP_CARRY_ON)) != 0;
+    uint8_t &carry = carried ? t.ram[get(t, MP_CARRY + slot) & 0x7F] : none;
+    if (bit(t, get(t, MP_IDLE)) || bit(t, get(t, MP_START)) || rise == 0)   // JB IdleSwitch; JB StartMode
+    {
+        carry = 0;
         return false;
+    }
     uint32_t deadband = at(t.rom, word(t, MP_DEADBAND));                // MOVC A,@A+DPTR (Cal_MapDeadband)
-    if (rise <= deadband)                                               // SUBB A,R2; JC; JZ
+    uint32_t total = rise + carry;
+    if (total <= deadband)                                              // SUBB A,R2; JC; JZ
+    {
+        carry = total;
         return false;
-    uint32_t units = ((rise - deadband) * byte_of(t, MP_GAIN) + 0x10) >> 5;  // MUL AB; ADD A,#10h ...; / 32
+    }
+    carry = 0;
+    uint32_t units = ((total - deadband) * byte_of(t, MP_GAIN) + 0x10) >> 5;  // MUL AB; ADD A,#10h ...; / 32
     if (units > 0xFF)                                                   // CJNE A,#10h; JNC: at most 255
         units = 0xFF;
     if (units == 0)                                                     // JZ Main_Map_Out

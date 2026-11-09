@@ -111,7 +111,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 13)
+### The paired core (formats 6 to 14)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -299,6 +299,16 @@ Format 13 (step 3.8, DME-Sim's docs/Paired_Slow_Work.md) moves the slow work ont
   and tasks 0, 3 and 1, then the stop's stages and task 2 (rom_lean's order).
 - The table adds slot 5's operand's place, the slow result's slot, Cal_AdcNext's place, IsvRamp's
   and the air's, coolant's and fuel quality's bytes; `pair_slow` gives the slow results worked on.
+
+Format 14 (DME-Sim's docs/Paired_Transients.md, the owner's choice of 2026-11-09) carries the MAP
+pulse's small rises:
+- **The carry.** Task 18 keeps, for each MAP read's slot, a rise at or under the deadband, in a
+  byte of the unit's copy of the RAM that its description names (cleared with the rest at the
+  8051's start), and adds it to that slot's next rise: the deadband is paid once on the sum. A
+  read with no rise, the idle switch or start mode ends it.
+- **The switch.** The image's Cal_MapCarry, whose address the description holds, turns it on (1)
+  or off (0: each read pays the deadband, as format 12's).
+- The table is format 13's.
 
 ## How it works
 
