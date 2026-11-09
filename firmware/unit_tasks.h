@@ -75,6 +75,11 @@ static constexpr uint32_t LOG_FORMAT = 11;
 // the snoop sees (task 18); the 8051 applies it from a take of its own.
 static constexpr uint32_t MAP_FORMAT = 12;
 
+// Format 13 (DME-Sim's docs/Paired_Slow_Work.md): the slow work (tasks 0 to 3) is pair.cpp's, at each
+// slow result the snoop sees, and at the 8051's start with start mode (task 12): the 8051 asks for no
+// task through the window.
+static constexpr uint32_t SLOW_FORMAT = 13;
+
 // The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
 // the unit did with its own count and bits (format 8), as rom_lean's routines did.
 enum : uint32_t

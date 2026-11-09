@@ -68,6 +68,13 @@
 // copies of MOV MapTaken,#count; MOV R4,R5,R6,R7,#n (a pulse of its own: TH0's start and overflows;
 // the pulse on lengthened by R7:R6), written as the take's are. The 8051 applies it as Accel_Pulse did.
 // The take loses the dead time, the idle switch and start mode (the MAP pulse's, the unit's own now).
+//
+// Format 13 (DME-Sim's docs/Paired_Slow_Work.md): the slow work is the unit's, and the 8051 asks it
+// nothing through the window any more. The unit keeps the slow channels' turn: slot 5's MOV P2,#channel
+// is live, and at each slow result the snoop sees (slot 8's read: the conversion slot 5 started) L1
+// writes the next channel in turn there and does the work on the result's channel (tasks 0 to 3:
+// rom_lean's Main_Slow's and its second tasks), each firing. At the 8051's start its first stop's run
+// makes start mode and the slow work first, as Power_Up_Inputs did through the window.
 
 #include "pair.h"
 
@@ -88,6 +95,7 @@ static constexpr uint32_t PIPELINE = 9;  // the format with the pipeline on the 
 static constexpr uint32_t TICKS = 10;    // the format with the tick's work too (its take's layout)
 static constexpr uint32_t WHOLE = 11;    // the format with the whole tick at the ping, and the log
 static constexpr uint32_t MAPS = 12;     // the format with the MAP pulse on the unit (its own take)
+static constexpr uint32_t SLOW = 13;     // the format with the slow work on the unit (slot 5's channel)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -762,13 +770,14 @@ enum : uint32_t
     JOB_STOP,
     JOB_TICKWORK,
     JOB_MAP,
+    JOB_SLOW,
 };
 
 // A job as the bus level queued it: its kind, the 8051's starts by then; a firing's length (cycles; 0,
 // none: a stamp alone), whether it is the turn's first and the turn's decision, and (format 11) start
 // mode at its tooth, as the starting injection's branch took it; a tick's gap; a MAP read's (format 12)
-// filter in length (0 the first MAP read's, 1 the second's) and its byte in first; when it was pushed
-// (us).
+// filter in length (0 the first MAP read's, 1 the second's) and its byte in first; a slow result's
+// (format 13) channel in length and its byte in first; when it was pushed (us).
 struct Job
 {
     uint32_t kind, generation, length, first, decision, starting, at;
@@ -796,6 +805,10 @@ struct Control
     bool mapped;                                                // format 12: the MAP take's count, switch
     uint32_t map_count_at, map_switch_at, map_copy[2];          //   and copies, the MAP reads' slots, the
     uint32_t map_slot[2], map_prev[2], map_task;                //   filters' places, task 18
+    bool slowed;                                                // format 13: slot 5's channel's operand,
+    uint32_t slow_operand_at, slow_slot, adc_next_at, isv_ramp_at; //   the slow result's slot, Cal_AdcNext,
+    uint32_t air_at, coolant_at, quality_at;                    //   IsvRamp, the slow channels' bytes, and
+    uint32_t warmup_task, fuel_task, ign_task, charge_task;     //   tasks 0 to 3
     // The state.
     uint32_t gap;                // pings since slot 0's tooth, to 255 (rom_lean's TickGap)
     uint32_t side, count;        // the take's copy in use and its count (0 as the 8051 starts)
@@ -808,6 +821,7 @@ struct Control
     bool fresh;                  // no stop's run since the 8051's start (the AFM's filter at it)
     uint32_t map_side, map_count; // format 12: the MAP take's copy in use and its count (0 as the 8051
                                   //   starts)
+    bool powered;                 // format 13: the first stop's run's start mode and slow work made
     volatile uint32_t shared;    // L1's jobs done but the MAP jobs, which write nothing the tick reads:
                                  //   the tick's commit runs it again if this moved
 };
@@ -831,6 +845,7 @@ struct Levels
     volatile uint32_t tick_dropped; // 44: ticks the 8051's start or a stop overtook
     volatile uint32_t map_jobs;     // 48: format 12: MAP jobs done (in event_jobs too)
     volatile uint32_t map_pulses;   // 52: MAP pulses given to the 8051's MAP take
+    volatile uint32_t slow_jobs;    // 56: format 13: slow results worked on (in event_jobs too)
 };
 
 // L2's queue (format 11): the pings, which the bus level pushes and L2 takes: the ticks since slot 0's
@@ -1425,6 +1440,24 @@ static void UNIT_CODE(run_guard)(const Job &job)
 
 static void UNIT_CODE(run_stop)(const Job &job)
 {
+    if (control.fresh && control.slowed && !control.powered)            // format 13: the first stop's run after
+    {                                                                   //   the 8051's start, its first run:
+        take_inputs(work, before);                                      //   start mode (task 12), then the slow
+        run_task(TASK_START, control.start_task);                       //   work's warm-up, charge and fuel
+        run_task(TASK_WARMUP, control.warmup_task);                     //   factor (Power_Up_Inputs' order);
+        run_task(TASK_CHARGE, control.charge_task);                     //   the stop's stages its second run
+        run_task(TASK_FUEL, control.fuel_task);                         //   (each of L1's runs under its
+        if (!give_back(job.generation, work, before))                   //   30 us)
+            return;
+        __asm volatile("cpsid i" ::: "memory");
+        if (job.generation == control.generation)
+        {
+            control.powered = true;
+            control.stop_due = true;                                    // (pair_control pends it again)
+        }
+        __asm volatile("cpsie i" ::: "memory");
+        return;
+    }
     take_inputs(work, before);
     bool fresh = control.fresh, duty = false;
     if (control.fresh && control.afm_filt_at != 0)                      // format 10, after the 8051's start:
@@ -1445,12 +1478,41 @@ static void UNIT_CODE(run_stop)(const Job &job)
         else
             control.duty_due = true;
     }
+    if (fresh && control.slowed)                                        // format 13: then the advance's slow sum
+        run_task(TASK_IGN, control.ign_task);                           //   (rom_lean's Main_Ign after its stages)
     if (give_back(job.generation, work, before))
     {
         if (duty)
             control.duties++;
         give_take(job.generation, false);
     }
+}
+
+// Format 13 (DME-Sim's docs/Paired_Slow_Work.md): a slow result (slot 8's read: the conversion slot 5
+// started, of the channel the unit wrote there), each firing. The next channel in turn (Cal_AdcNext by
+// channel) goes into slot 5's operand, and the work on the result's channel is done on L1's copy:
+// rom_lean's Main_Slow's and its second tasks, the warm-up enrichment (task 0) and the advance's slow
+// sum with the MAP pulse's gain (2) on the coolant, the slow fuel factor (1) on the air temperature or
+// the fuel quality, the charge's time (3) each time. The tasks take the snoop's bytes (the temperatures
+// linearised, the fuel quality, the battery), as they took them through the window.
+static void UNIT_CODE(run_slow)(const Job &job)
+{
+    uint32_t channel = job.length & 7, byte = control.afm_at + channel; // its ADC byte (10h + channel)
+    levels.slow_jobs = levels.slow_jobs + 1;
+    __asm volatile("cpsid i" ::: "memory");
+    if (job.generation == control.generation)                           // the next in turn (Main_Slow_Next:
+        write(control.slow_operand_at, at(control.adc_next_at + channel)); //   one write, slot 5 takes the old
+    __asm volatile("cpsie i" ::: "memory");                             //   or the new)
+    take_inputs(work, before);
+    if (byte == control.coolant_at)
+    {
+        run_task(TASK_WARMUP, control.warmup_task);                     // Slow_WarmUp
+        run_task(TASK_IGN, control.ign_task);                           // Main_Ign
+    }
+    else if (byte == control.air_at || byte == control.quality_at)
+        run_task(TASK_FUEL, control.fuel_task);                         // Main_Fuel: Slow_Fuel
+    run_task(TASK_CHARGE, control.charge_task);                         // Slow_Charge
+    give_back(job.generation, work, before);
 }
 
 // The tick's work (format 10: task 15), its results counted for the 8051's lambda.
@@ -1546,6 +1608,8 @@ void UNIT_CODE(pair_control)()
             run_tickwork(job);
         else if (job.kind == JOB_MAP)
             run_map(job);
+        else if (job.kind == JOB_SLOW)
+            run_slow(job);
         uint32_t at = job.at;
         bool shared = job.kind != JOB_MAP;
         control.out = control.out + 1;
@@ -1587,20 +1651,34 @@ void UNIT_CODE(pair_tick_work)()
 }
 
 // Format 12: from the snoop's interrupt, a slot's read: a MAP read's job queued for L1 with its filter
-// (0, the first MAP read's; 1, the second's) and its byte. The interrupts held off for the push: the
-// bus level's map unit breaks into the snoop's interrupt, and pushes too.
-void UNIT_CODE(pair_slot_read)(uint32_t slot, uint32_t data)
+// (0, the first MAP read's; 1, the second's) and its byte; format 13, a slow result's (slot 8's) with
+// its channel (the conversion the read collects). The interrupts held off for the push: the bus level's
+// map unit breaks into the snoop's interrupt, and pushes too.
+void UNIT_CODE(pair_slot_read)(uint32_t slot, uint32_t data, uint32_t channel)
 {
-    if (!pair.on || !control.mapped)
+    if (!pair.on)
         return;
-    for (uint32_t k = 0; k < 2; k++)
-        if (slot == control.map_slot[k])
-        {
-            __asm volatile("cpsid i" ::: "memory");
-            push(JOB_MAP, k, data & 0xFF, 0);
-            __asm volatile("cpsie i" ::: "memory");
-            return;
-        }
+    uint32_t kind, length;                                              // (the job's length: the channel, or
+    if (control.slowed && slot == control.slow_slot)                    //   the MAP read's filter)
+    {
+        kind = JOB_SLOW;
+        length = channel & 7;
+    }
+    else if (control.mapped && slot == control.map_slot[0])
+    {
+        kind = JOB_MAP;
+        length = 0;
+    }
+    else if (control.mapped && slot == control.map_slot[1])
+    {
+        kind = JOB_MAP;
+        length = 1;
+    }
+    else
+        return;
+    __asm volatile("cpsid i" ::: "memory");
+    push(kind, length, data & 0xFF, 0);
+    __asm volatile("cpsie i" ::: "memory");
 }
 
 // The 8051's start: its RAM cleared, so the take's count from 0 and the switch to Take_A as built, the
@@ -1634,6 +1712,12 @@ static void UNIT_CODE(control_as_built)()
         write(control.map_count_at + 1, 0);
         map_unit_ram_write(control.map_prev[0], 0xFF);
         map_unit_ram_write(control.map_prev[1], 0xFF);
+    }
+    if (control.slowed)                                         // format 13: slot 5's first slow channel (the
+    {                                                           //   air: Cal_AdcNext's first, Power_Up's), the
+        write(control.slow_operand_at, at(control.adc_next_at));  //   valve's ramp not begun (IsvRamp FFh, which
+        map_unit_ram_write(control.isv_ramp_at, 0xFF);          //   Power_Up_Inputs sent with task 12), start
+        control.powered = false;                                //   mode and the slow work at the first stop
     }
     own_sync();                                                 // (the RAM's copy cleared before: not in step)
 }
@@ -2215,6 +2299,25 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         control.mapped = copies && control.map_task != 0;
         reach = reach && control.mapped;
     }
+    control.slowed = false;
+    control.powered = false;
+    if (at(MARK + 4) >= SLOW && control.mapped)                 // format 13: slot 5's channel's operand, the
+    {                                                           //   slow result's slot, Cal_AdcNext, IsvRamp,
+        control.slow_operand_at = word(u + 126);                //   the air's, coolant's and fuel quality's
+        control.slow_slot = at(u + 128);                        //   bytes, tasks 0 to 3
+        control.adc_next_at = word(u + 129);
+        control.isv_ramp_at = at(u + 131) & 0x7F;
+        control.air_at = at(u + 132) & 0x7F;
+        control.coolant_at = at(u + 133) & 0x7F;
+        control.quality_at = at(u + 134) & 0x7F;
+        control.warmup_task = map_unit_task_at(TASK_WARMUP);
+        control.fuel_task = map_unit_task_at(TASK_FUEL);
+        control.ign_task = map_unit_task_at(TASK_IGN);
+        control.charge_task = map_unit_task_at(TASK_CHARGE);
+        control.slowed = control.slow_operand_at != 0 && control.warmup_task != 0 && control.fuel_task != 0
+                         && control.ign_task != 0 && control.charge_task != 0 && control.afm_at != 0;
+        reach = reach && control.slowed;
+    }
     pair.on = reach;
 }
 
@@ -2237,6 +2340,11 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
     if (streq(name, "pair_map"))
     {
         snprintf(value, value_size, "%u %u", (unsigned)levels.map_jobs, (unsigned)levels.map_pulses);
+        return true;
+    }
+    if (streq(name, "pair_slow"))
+    {
+        snprintf(value, value_size, "%u", (unsigned)levels.slow_jobs);
         return true;
     }
     return false;
@@ -2394,6 +2502,41 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[0] = control.map_count;
         out[1] = levels.map_jobs;
         out[2] = levels.map_pulses;
+    }
+    else if (routine == 21 || routine == 22)                    // format 13: 21 a slow result's job at once (its
+    {                                                           //   channel, its byte); 22 the first stop's run
+        Job job;                                                //   after the 8051's start at once, both its runs
+        job.generation = control.generation;
+        job.length = in[0] & 7;
+        job.first = in[1] & 0xFF;
+        job.decision = job.starting = 0;
+        job.at = now_us();
+        if (routine == 21)
+        {
+            job.kind = JOB_SLOW;
+            run_slow(job);
+        }
+        else
+        {
+            job.kind = JOB_STOP;
+            unsync();
+            control.fresh = true;
+            control.powered = false;
+            run_stop(job);
+            if (control.stop_due)
+            {
+                control.stop_due = false;
+                run_stop(job);
+            }
+        }
+        out[0] = levels.slow_jobs;
+        out[1] = control.takes;
+        out[2] = control.duties;
+    }
+    else if (routine == 23)                                     // format 13: a slow result's job (its channel,
+    {                                                           //   its byte) queued for L1 and pended, as the
+        push(JOB_SLOW, in[0] & 7, in[1] & 0xFF, 0);             //   snoop's interrupt does
+        out[0] = levels.slow_jobs;
     }
     else
         return 0;

@@ -111,7 +111,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 12)
+### The paired core (formats 6 to 13)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -283,6 +283,22 @@ Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse ont
   copy.
 - The table adds Map_Count, Map_Take, Map_A and Map_B, the MAP reads' slots and the filters'
   places; `pair_map` gives the MAP jobs and the pulses given.
+
+Format 13 (step 3.8, DME-Sim's docs/Paired_Slow_Work.md) moves the slow work onto the board, and the
+8051 asks it for no task through the window:
+- **The slow channels' turn.** Slot 5's `MOV P2,#channel` has a live operand: the board writes the
+  channel slot 5 converts next, so every conversion there is a real one.
+- **The slow job.** At slot 8's read (the table's slow slot), which collects slot 5's conversion,
+  the snoop's interrupt queues a slow job for L1 with the channel it took from slot 5's read. The
+  job writes the next channel in turn (Cal_AdcNext's byte for the channel) into slot 5's operand,
+  then does the work on the result's channel on its copy, rom_lean's Main_Slow and its second tasks
+  bit for bit: tasks 0 and 2 on the coolant, 1 on the air temperature or the fuel quality, 3 every
+  time. A tick it broke into runs again (the tick reads the slow factors).
+- **Power-up.** At the 8051's start the board sets slot 5's operand to the first channel and
+  IsvRamp to FFh in its copy. The first stop's run after it runs twice at L1: start mode (task 12)
+  and tasks 0, 3 and 1, then the stop's stages and task 2 (rom_lean's order).
+- The table adds slot 5's operand's place, the slow result's slot, Cal_AdcNext's place, IsvRamp's
+  and the air's, coolant's and fuel quality's bytes; `pair_slow` gives the slow results worked on.
 
 ## How it works
 
