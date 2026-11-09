@@ -54,6 +54,10 @@ uint32_t *map_unit_ram_words();
 void map_unit_snooped_over(uint8_t *bytes);
 uint32_t map_unit_task_at(uint32_t task);
 
+// x / d for x and d below 256 (d not 0), as the 8051's DIV AB: by the unit's reciprocals (the bank has
+// no divider).
+uint32_t map_unit_divide(uint32_t x, uint32_t d);
+
 #else
 
 static inline void map_unit_hide() {}

@@ -220,9 +220,10 @@ with lambda, the idle valve's control and the log; the 8051 does no serial:
   speed byte's bound and the throttle switches (task 15's first part), Tick_Stop's open loop (task
   16), start mode and the guard's periods (task 12 on the job's copy; the window asks for it at the
   8051's power-up alone), the rest of task 15, the tick counter (the board's own), lambda's timer
-  and lambda (task 16), the waiting pulse made again (task 10), every second tick the idle
-  control's state and a duty (task 17; a duty too when a stop's run asked for one), and every
-  Cal_StreamTicks ticks the log's frame. Tasks 15 to 17 run in parts there (`unit_task_part`).
+  and lambda (task 16), the waiting pulse made again (task 10; since the levels, an L1 job after the
+  tick's commit), every second tick the idle control's state and a duty (task 17; a duty too when a
+  stop's run asked for one), and every Cal_StreamTicks ticks the log's frame (since the levels, after
+  the pulse made again). Tasks 15 to 17 run in parts there (`unit_task_part`).
 - **The pins.** The 8051 tells its oxygen sensor's comparators and its A/C request by calling one of
   eight RETs in page 0, two bytes apart; the board keeps the three bits in its copy (PinBits).
 - **The take** carries what the 8051 uses: the count, the MAP pulse's dead time, the pulse's flags,
@@ -234,13 +235,34 @@ with lambda, the idle valve's control and the log; the 8051 does no serial:
   reference's check, now the board's: a turn's first firing with no reference since the last) are
   in the board's copy alone, for the log.
 - **The log.** Each frame (rom_lean's: A5h 5Ah, the count, the bytes Cal_StreamAddresses lists from
-  the job's copy, with those bits as the bus level has them, then the sum) goes into a ring of 256
+  the unit's copy, with those bits as the bus level has them, then the sum) goes into a ring of 256
   bytes. With `comms_mode` set to `log` (no session open), a comms session sends the PC the bytes
   put since it began as CommsData packets, paced as the comms window's (24 bytes or a millisecond);
   what the ring no longer holds is lost, so nothing waits on the PC.
 - The table adds the marks' first address and the pins' byte, the log's bits, the SJMP and its two
   targets, TickCount's and LamInt's addresses, Cal_StreamTicks and Cal_StreamAddresses, and the
   high phase's bytes. The flags' opcodes and the phase's copy's are 0.
+
+The levels (DME-Sim's docs/Paired_Levels.md; the image is format 11's, unchanged) put the tick out
+of the firings' way:
+- **L1, the engine's events** (`pair_control`, SPARE_IRQ_0 at 80h, nothing else there): a firing,
+  the stop, start mode's guard period and the pulse made again, one job a run (the next pended
+  again, a tail-chain).
+- **L2, the tick** (`pair_tick`, SPARE_IRQ_1 at C0h): each ping queues its tick (4 deep), which runs
+  on a copy of its own. Its commit holds L1 off by its enable bit (ICER, then ISER), and if an L1
+  job committed while it ran, it runs again on that job's results; so every outcome is that of
+  whole jobs in some order. At the commit: its changed bits, start mode's end for the phase (task
+  12 leaves it to the commit), its counts, its take, the heartbeat (only if L1 has taken every job
+  queued before the tick began) and the pulse made again, queued for L1, which runs it as L2 lets it
+  go. Then the log's frame, from the unit's copy as it is then.
+- **The interrupts that run from flash** (USB's, the comms window's on PIO0 and the SDK's alarm
+  pool's) go from the SDK's 80h to C0h, beside L2: none can hold up L1.
+- **Quicker bookkeeping:** a job's copies four words a step (LDM, STM), its changed bits found in
+  registers, the speed byte's bound and the frame's count by the unit's reciprocals.
+- **Counts for the PC** (parameters): `pair_events` gives L1's jobs, those lost to a full queue, the
+  most waiting at once, the longest from a push to its end (us) and those over 65 us; `pair_tick`
+  gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and those
+  over 1 ms.
 
 ## How it works
 
@@ -255,8 +277,9 @@ with lambda, the idle valve's control and the log; the 8051 does no serial:
   are in flash). A pick or a send fills the page with the next answer, the last send looks the map
   up (or works the task out) and fills the page with its value, and the value's read (or a start)
   copies the page as written back. A fill takes about 105 cycles; the interrupt's own times are
-  under Measured. Format 9's pipeline level (`pair_control`, on SPARE_IRQ_0) runs from the bank
-  too, under the same rules; DME-Sim runs it with the bus level's interrupts breaking in.
+  under Measured. The levels (`pair_control` on SPARE_IRQ_0, `pair_tick` on SPARE_IRQ_1) run from
+  the bank too, under the same rules; DME-Sim runs them with the bus level's interrupts breaking in,
+  and L1 into L2.
 - The PC reads and writes the image as it wrote it: the page is kept for it (the shadow), and a
   commit writes that. While the unit is on, the PC's bytes for the page reach the 8051 once the page
   is as written again (after the next lookup, or the 8051's start).

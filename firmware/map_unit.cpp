@@ -491,6 +491,11 @@ void UNIT_CODE(map_unit_snooped_over)(uint8_t *bytes)
     }
 }
 
+uint32_t UNIT_CODE(map_unit_divide)(uint32_t x, uint32_t d)
+{
+    return (x & 0xFF) * reciprocals.of[d & 0xFF] >> 16;
+}
+
 uint32_t UNIT_CODE(map_unit_task_at)(uint32_t task)
 {
     for (uint32_t id = 0, n = at(MARK + 6); id < n; id++)
@@ -623,10 +628,19 @@ void map_unit_init(uint8_t *rom, uint32_t addr_mask)
     irq_set_priority(PIO1_IRQ_0, 0);
     pio_set_irq0_source_enabled(p, (pio_interrupt_source_t)(pis_sm0_rx_fifo_not_empty + sm), true);
     irq_set_enabled(PIO1_IRQ_0, true);
-    // Format 9's pipeline (pair.cpp): its level below all others, pended by the bus level.
+    // The levels (pair.cpp; DME-Sim's docs/Paired_Levels.md), pended by the bus level: L1, the engine's
+    // events (format 9's pipeline), at 80h with nothing else; L2, the tick (format 11), at C0h, with the
+    // interrupts whose code runs from flash (USB's, the comms window's on PIO0, the SDK's alarm pool's
+    // for sleep_ms: PICO_TIME_DEFAULT_ALARM_POOL_HARDWARE_ALARM_NUM, 3), which then never hold up L1.
     irq_set_exclusive_handler(SPARE_IRQ_0, pair_control);
-    irq_set_priority(SPARE_IRQ_0, PICO_LOWEST_IRQ_PRIORITY);
+    irq_set_priority(SPARE_IRQ_0, PICO_DEFAULT_IRQ_PRIORITY);
     irq_set_enabled(SPARE_IRQ_0, true);
+    irq_set_exclusive_handler(SPARE_IRQ_1, pair_tick);
+    irq_set_priority(SPARE_IRQ_1, PICO_LOWEST_IRQ_PRIORITY);
+    irq_set_enabled(SPARE_IRQ_1, true);
+    irq_set_priority(USBCTRL_IRQ, PICO_LOWEST_IRQ_PRIORITY);
+    irq_set_priority(PIO0_IRQ_0, PICO_LOWEST_IRQ_PRIORITY);
+    irq_set_priority(TIMER_IRQ_3, PICO_LOWEST_IRQ_PRIORITY);
     pio_sm_set_enabled(p, sm, true);
     map_unit_start(rom, addr_mask);
     if (unit.on)
@@ -1136,6 +1150,8 @@ bool map_unit_set_parameter(const char *name, const char *value)
 
 bool map_unit_get_parameter(const char *name, char *value, size_t value_size)
 {
+    if (pair_get_parameter(name, value, value_size))
+        return true;                                    // the levels' counts (pair_events, pair_tick)
     if (streq(name, "map_unit"))
     {
         if (!unit.on)

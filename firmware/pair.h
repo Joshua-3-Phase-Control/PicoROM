@@ -1,6 +1,7 @@
 #if !defined(PAIR_H)
 #define PAIR_H 1
 
+#include <stddef.h>
 #include <stdint.h>
 
 // The paired core's P28 side (FEATURE_MAP_UNIT, format 6, pair.cpp; DME-Sim's docs/Paired_Core.md):
@@ -31,6 +32,11 @@ bool pair_pulse(uint32_t start, uint32_t overflows, bool again);
 // Main_Tick_Over cleared Inj720Odd).
 void pair_start_over();
 
+// Format 11: whether a task runs on the tick's copy of the RAM (L2's job, DME-Sim's
+// docs/Paired_Levels.md), whose commit gives start mode's end to the phase (pair_start_over), not
+// the task itself.
+bool pair_on_tick_copy(const uint8_t *ram);
+
 // Format 9 (the pipeline on the unit, DME-Sim's docs/Paired_Pipeline.md): from the bus level's tasks,
 // a job for the pipeline's level: task 12's overboost guard's period (BoostCount one less, to 0) and
 // task 13's tick values sent (the waiting pulse made again).
@@ -41,9 +47,16 @@ void pair_tick_sent();
 // tick's work (task 15) for the pipeline's level, once a ping has come since the 8051's start.
 void pair_tick_work();
 
-// The pipeline's level: SPARE_IRQ_0's handler, at the lowest priority (the bus's interrupts break into
-// it); it does the jobs the bus level queued, in turn.
+// The levels (DME-Sim's docs/Paired_Levels.md). L1, the engine's events (format 9's pipeline):
+// SPARE_IRQ_0's handler, at 80h (the bus's interrupts break into it); it does the jobs the bus level
+// queued, one a run. L2, the tick (format 11): SPARE_IRQ_1's, at C0h (L1 breaks into it too); the
+// whole tick at each ping, then the log's frame.
 void pair_control();
+void pair_tick();
+
+// The levels' counts for the PC: pair_events (L1: jobs, lost, most queued, longest us, over the bound)
+// and pair_tick (L2: ticks, run again, late, lost, longest us, over the bound). False: another name.
+bool pair_get_parameter(const char *name, char *value, size_t value_size);
 
 // Format 11 (DME-Sim's docs/Paired_Lambda_Idle.md): the log, each frame of it made at its tick into a
 // ring (the 8051 does no serial). The bytes written since *from (a count of all written), at most

@@ -744,7 +744,8 @@ static void UNIT_CODE(advance_rest)(const Task &t)
 // and the guard's period handed to the pipeline's level, which keeps BoostCount (pair_guard_period).
 // Format 10: the snoop's Afm a fourth input and AfmFilt's address after the data: at start mode's end
 // the AFM's filter the AFM here (the unit's own); then the tick's work (task 15) queued for the
-// pipeline's level (pair_tick_work).
+// pipeline's level (pair_tick_work). Format 11: in the tick's job (L2, on its own copy) the job's
+// commit gives start mode's end to the phase (pair_start_over); through the window, the task at once.
 
 namespace
 {
@@ -786,7 +787,8 @@ static void UNIT_CODE(start_mode)(const Task &t)
     {
         starting = false;
         flags |= START_OVER;
-        pair_start_over();
+        if (!pair_on_tick_copy(t.ram))                                  // (the tick's job, L2: at its commit,
+            pair_start_over();                                          //   with its StartMode given back)
         if (at(t.rom, 0x2004) >= TICK_FORMAT)
             own(t, 12, input(t, 3));                                    // MOV AfmFilt,Afm (the unit's own)
     }
