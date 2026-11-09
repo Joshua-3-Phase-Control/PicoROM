@@ -67,10 +67,10 @@ void UNIT_CODE(crank_tooth)(uint32_t now)
         crank.tooth = 0;
 }
 
-void UNIT_CODE(crank_read)(uint32_t after, uint32_t now)
+uint32_t UNIT_CODE(crank_read)(uint32_t after, uint32_t now)
 {
     if (crank.table == 0)
-        return;
+        return CRANK_NO_SLOT;
     for (uint32_t i = 0, n = at(crank.table + 1); i < n; i++)
     {
         uint32_t entry = crank.table + 2 + 4 * i;
@@ -102,8 +102,9 @@ void UNIT_CODE(crank_read)(uint32_t after, uint32_t now)
             crank.started = true;
             crank.firings++;
         }
-        return;
+        return slot;
     }
+    return CRANK_NO_SLOT;
 }
 
 #endif // FEATURE_MAP_UNIT

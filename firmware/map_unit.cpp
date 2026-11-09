@@ -542,7 +542,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 11)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 12)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }
@@ -1151,7 +1151,7 @@ bool map_unit_set_parameter(const char *name, const char *value)
 bool map_unit_get_parameter(const char *name, char *value, size_t value_size)
 {
     if (pair_get_parameter(name, value, value_size))
-        return true;                                    // the levels' counts (pair_events, pair_tick)
+        return true;                                    // the levels' counts (pair_events, pair_tick, pair_map)
     if (streq(name, "map_unit"))
     {
         if (!unit.on)

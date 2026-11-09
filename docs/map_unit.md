@@ -94,6 +94,8 @@ against rom_lean's routine at every input, running this firmware's own unit bank
 |      |                    | loop and sensor's bits              |
 | 17   | the idle control   | none sent: the board's target,      |
 |      | (format 11)        | integrator, ramp, high phase        |
+| 18   | Main_Map and       | none sent: the board's filters; the |
+|      | Accel_Pulse (f 12) | pulse into the 8051's MAP take      |
 
 ### Inputs the snoop makes (format 4)
 
@@ -109,7 +111,7 @@ channel's result comes (map_unit_adc, from the snoop's interrupt), so a task's a
 map lookup. The board's bytes are its latest: the 8051's AFM and MAP bytes were the tick's, its
 temperatures the slow work's.
 
-### The paired core (formats 6 to 11)
+### The paired core (formats 6 to 12)
 
 Format 6 (DME-Sim's `experiments/rom_pair`, its docs/Paired_Core.md; `pair.cpp`) makes the board
 keep the crank for an 8051 that keeps no tooth chain. Every tooth's interrupt fetches INT1's vector
@@ -263,6 +265,24 @@ of the firings' way:
   most waiting at once, the longest from a push to its end (us) and those over 65 us; `pair_tick`
   gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and
   those over 1 ms.
+
+Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse onto the board:
+- **The MAP job.** The snoop's interrupt tells the board each slot's read (format 5's table); at the
+  two the table names as the MAP's (slots 3 and 9) it queues a MAP job for L1 with the read's byte,
+  the interrupts held off for the push (the map unit's interrupt pushes too). The job runs task 18
+  (rom_lean's Main_Map for that read and Accel_Pulse's arithmetic, bit for bit) on the unit's copy
+  as it stands: the read's rise over its filter (the board's own, FFh at the 8051's start), none
+  at idle or starting, less the deadband, x the gain by coolant / 32; then 64 cycles a unit, and
+  with the dead time TH0's load for a pulse of its own. It takes no copy and gives none back, and
+  the tick doesn't run again after it (it writes nothing the tick reads).
+- **The MAP take.** A pulse due goes into the copy of Map_A or Map_B not in use (MOV
+  MapTaken,#count; MOV R4, R5, R6, R7,#n: a pulse of its own's TH0 start and overflows, the pulse on
+  lengthened by R7:R6), then Map_Take's AJMP is turned to it and Map_Count's operand moved on, as
+  the take's. The 8051 applies it as Accel_Pulse did.
+- **The take** loses the dead time, the idle switch and start mode (the MAP pulse's): 18 bytes a
+  copy.
+- The table adds Map_Count, Map_Take, Map_A and Map_B, the MAP reads' slots and the filters'
+  places; `pair_map` gives the MAP jobs and the pulses given.
 
 ## How it works
 

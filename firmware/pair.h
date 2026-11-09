@@ -54,8 +54,14 @@ void pair_tick_work();
 void pair_control();
 void pair_tick();
 
-// The levels' counts for the PC: pair_events (L1: jobs, lost, most queued, longest us, over the bound)
-// and pair_tick (L2: ticks, run again, late, lost, longest us, over the bound). False: another name.
+// Format 12 (DME-Sim's docs/Paired_Map_Pulse.md): from the snoop's interrupt, a slot's read (format 5's
+// slot) and its byte: a MAP read's job for L1, which makes the MAP pulse (task 18) and gives it to the
+// 8051's MAP take.
+void pair_slot_read(uint32_t slot, uint32_t data);
+
+// The levels' counts for the PC: pair_events (L1: jobs, lost, most queued, longest us, over the bound),
+// pair_tick (L2: ticks, run again, late, lost, longest us, over the bound) and pair_map (format 12: the
+// MAP jobs, the pulses given). False: another name.
 bool pair_get_parameter(const char *name, char *value, size_t value_size);
 
 // Format 11 (DME-Sim's docs/Paired_Lambda_Idle.md): the log, each frame of it made at its tick into a

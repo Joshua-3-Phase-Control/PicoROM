@@ -38,6 +38,9 @@ enum : uint32_t
     TASK_LAMBDA,   // lambda (format 11): Tick_Stop's open loop, Main_Tick's sensor timer, Main_Lambda,
                    //   which pair.cpp's tick runs in parts (unit_task_part)
     TASK_IDLE,     // the idle valve's control (format 11): Main_Idle, then Idle_Duty with Idle_Ramp
+    TASK_MAP,      // the MAP pulse (format 12): Main_Map for one read and Accel_Pulse's arithmetic, which
+                   //   pair.cpp's MAP job runs at each MAP read the snoop sees (unit_map_pulse; the 8051
+                   //   never asks for it)
 };
 
 // Format 11's parts of tasks 15, 16 and 17, which pair.cpp's tick runs in rom_lean's order.
@@ -68,6 +71,10 @@ static constexpr uint32_t TICK_FORMAT = 10;
 // serial (the log is pair.cpp's). Task 12 keeps the guard's count in its own copy then.
 static constexpr uint32_t LOG_FORMAT = 11;
 
+// Format 12 (DME-Sim's docs/Paired_Map_Pulse.md): the MAP pulse is pair.cpp's, made at each MAP read
+// the snoop sees (task 18); the 8051 applies it from a take of its own.
+static constexpr uint32_t MAP_FORMAT = 12;
+
 // The pulse's flags (PulseFlags, tasks 9 and 10): the 8051 applies the held pulse; the rest say what
 // the unit did with its own count and bits (format 8), as rom_lean's routines did.
 enum : uint32_t
@@ -84,6 +91,12 @@ bool unit_task(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t 
 
 // Format 11: a part of task 15, 16 or 17 (above); IDLE_STATE's answer, else true.
 bool unit_task_part(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram);
+
+// Format 12: task 18 for one MAP read (slot 0 the first MAP read's, 1 the second's; read its byte) on
+// ram: its slot's filter stepped; true if a pulse is due, its loads then in *load: TH0's start for a
+// pulse of its own (bits 0-7) and its overflows (8-15), the pulse on lengthened by (16-31).
+bool unit_map_pulse(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
+                    uint32_t *load);
 
 // From the map unit (map_unit.cpp): map id's value, its inputs as ram holds them.
 uint32_t unit_map_value(uint32_t id, const uint8_t *ram);

@@ -60,6 +60,14 @@
 // (NotSynced, ToothFault and the phase's copy are the unit's, in its copy, for the log), and the starting
 // injection's SJMP at Main_Firing is live: the unit points it at the injection or past it at slot 0's
 // tooth, by its start mode.
+//
+// Format 12 (DME-Sim's docs/Paired_Map_Pulse.md): the MAP pulse is the unit's. At each MAP read the
+// snoop sees (two slots' reads a firing), L1 runs task 18 (rom_lean's Main_Map for that read and
+// Accel_Pulse's arithmetic) on the unit's copy of the RAM, whose filters it keeps, and gives a pulse
+// due to the 8051's MAP take: its count (Map_Count's operand), its switch (Map_Take's AJMP's) and two
+// copies of MOV MapTaken,#count; MOV R4,R5,R6,R7,#n (a pulse of its own: TH0's start and overflows;
+// the pulse on lengthened by R7:R6), written as the take's are. The 8051 applies it as Accel_Pulse did.
+// The take loses the dead time, the idle switch and start mode (the MAP pulse's, the unit's own now).
 
 #include "pair.h"
 
@@ -79,6 +87,7 @@ static constexpr uint32_t PHASE = 8;     // the format with the injection's phas
 static constexpr uint32_t PIPELINE = 9;  // the format with the pipeline on the unit (pair_control)
 static constexpr uint32_t TICKS = 10;    // the format with the tick's work too (its take's layout)
 static constexpr uint32_t WHOLE = 11;    // the format with the whole tick at the ping, and the log
+static constexpr uint32_t MAPS = 12;     // the format with the MAP pulse on the unit (its own take)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -731,7 +740,8 @@ bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
 // (USB's interrupt and the others that run from flash beside it), below L1's events (80h) and the bus
 // level. It works on a copy of its own and commits with L1 held off (its enable bit); if an L1 job
 // committed while it ran, it runs again on that job's results, so that every outcome is that of whole
-// jobs in some order. Until it commits, nothing it did reaches anything but its copy: at the commit its
+// jobs in some order (format 12: but after a MAP job, which writes nothing it reads: the two in either
+// order end alike). Until it commits, nothing it did reaches anything but its copy: at the commit its
 // bits given back, its take, the heartbeat (if L1 has taken every job queued before the tick began), its
 // counts, start mode's end for the phase, and the pulse made again queued for L1, which runs it as it is
 // let go; then the log's frame from the unit's copy.
@@ -751,11 +761,14 @@ enum : uint32_t
     JOB_GUARD,
     JOB_STOP,
     JOB_TICKWORK,
+    JOB_MAP,
 };
 
 // A job as the bus level queued it: its kind, the 8051's starts by then; a firing's length (cycles; 0,
 // none: a stamp alone), whether it is the turn's first and the turn's decision, and (format 11) start
-// mode at its tooth, as the starting injection's branch took it; a tick's gap; when it was pushed (us).
+// mode at its tooth, as the starting injection's branch took it; a tick's gap; a MAP read's (format 12)
+// filter in length (0 the first MAP read's, 1 the second's) and its byte in first; when it was pushed
+// (us).
 struct Job
 {
     uint32_t kind, generation, length, first, decision, starting, at;
@@ -780,6 +793,9 @@ struct Control
     uint32_t tick_task, load_at, accel_at, after_at, idle_bit, full_bit, afm_filt_at, afm_at; // format 10
     uint32_t start_task, lambda_task, idle_task, tick_at, lam_at, high_l, high_h; // format 11
     uint32_t stream_ticks, stream_list;                         //   the log's: Cal_StreamTicks, its list
+    bool mapped;                                                // format 12: the MAP take's count, switch
+    uint32_t map_count_at, map_switch_at, map_copy[2];          //   and copies, the MAP reads' slots, the
+    uint32_t map_slot[2], map_prev[2], map_task;                //   filters' places, task 18
     // The state.
     uint32_t gap;                // pings since slot 0's tooth, to 255 (rom_lean's TickGap)
     uint32_t side, count;        // the take's copy in use and its count (0 as the 8051 starts)
@@ -790,10 +806,14 @@ struct Control
     bool pulse_made;             // a turn's pulse made since the 8051's start
     bool pinged;                 // a ping since the 8051's start (its first tick's work after it)
     bool fresh;                  // no stop's run since the 8051's start (the AFM's filter at it)
+    uint32_t map_side, map_count; // format 12: the MAP take's copy in use and its count (0 as the 8051
+                                  //   starts)
+    volatile uint32_t shared;    // L1's jobs done but the MAP jobs, which write nothing the tick reads:
+                                 //   the tick's commit runs it again if this moved
 };
 
 // The levels' counts (docs/Paired_Levels.md), read by DME-Sim (P28MapUnit: these offsets) and by the PC
-// (the parameters pair_events and pair_tick).
+// (the parameters pair_events, pair_tick and pair_map).
 struct Levels
 {
     volatile uint32_t event_jobs;   // 0: L1's jobs done (stale ones too, and the stop's runs)
@@ -802,12 +822,15 @@ struct Levels
     volatile uint32_t event_us;     // 12: a job's longest time from its push to its end (us)
     volatile uint32_t event_over;   // 16: jobs that ended over EVENT_BOUND us after their push
     volatile uint32_t ticks;        // 20: L2's ticks committed
-    volatile uint32_t again;        // 24: ticks run again (an L1 job committed while they ran)
+    volatile uint32_t again;        // 24: ticks run again (an L1 job, not a MAP job, committed while
+                                    //   they ran)
     volatile uint32_t tick_late;    // 28: pings that found a tick not yet done
     volatile uint32_t tick_lost;    // 32: pings into its full queue
     volatile uint32_t tick_us;      // 36: a tick's longest time from its ping to its end (us)
     volatile uint32_t tick_over;    // 40: ticks that ended over TICK_BOUND us after their ping
     volatile uint32_t tick_dropped; // 44: ticks the 8051's start or a stop overtook
+    volatile uint32_t map_jobs;     // 48: format 12: MAP jobs done (in event_jobs too)
+    volatile uint32_t map_pulses;   // 52: MAP pulses given to the 8051's MAP take
 };
 
 // L2's queue (format 11): the pings, which the bus level pushes and L2 takes: the ticks since slot 0's
@@ -1004,9 +1027,10 @@ static __force_inline uint32_t bit_op(uint32_t address)
     return map_unit_ram(0x20 + (address >> 3 & 0x0F)) >> (address & 7) & 1 ? SETB_BIT : CLR_BIT;
 }
 
-// The results into the 8051's take: the copy the switch doesn't point to (dme.asm's Take_A; format 11:
-// MOV Taken, DeadNow and PulseFlags,#n; SETB or CLR IdleSwitch and StartMode; MOV R2, R3, R4, R6 and
-// R7,#n: the valve's duties made, the turn's pulses, all pulses, the high phase; format 10:
+// The results into the 8051's take: the copy the switch doesn't point to (dme.asm's Take_A; format 12:
+// MOV Taken and PulseFlags,#n; MOV R2, R3, R4, R6 and R7,#n: the valve's duties made, the turn's pulses,
+// all pulses, the high phase; format 11: MOV Taken, DeadNow and PulseFlags,#n; SETB or CLR IdleSwitch
+// and StartMode; MOV R2, R3, R4, R6 and R7,#n; format 10:
 // MOV Taken, Rpm, Advance, FirePeriodL, FirePeriodH, InjTimeL, InjTimeH, DeadNow, PulseFlags, Load,
 // AccelEnrich, AfterStart and AdvanceDyn,#n; SETB or CLR FuelCut and BoostCut; SETB Inj720Odd after a
 // cut, else MOV C,Inj720Odd; SETB or CLR IdleSwitch and FullLoadSwitch; MOV R2, R3 and R4,#n: the
@@ -1016,7 +1040,16 @@ static void UNIT_CODE(give_take)(uint32_t generation, bool cut)
 {
     uint32_t side = control.side ^ 1, copy = control.copy[side], count = (control.count + 1) & 0xFF;
     write(copy + 2, count);
-    if (pair.whole)                                             // format 11: what the 8051 itself uses: the
+    if (control.mapped)                                         // format 12: the pulse's flags and counts, the
+    {                                                           //   valve's duties and high phase
+        write(copy + 5, map_unit_ram(control.flags_at));
+        write(copy + 7, control.duties & 0xFF);
+        write(copy + 9, control.turn_pulses & 0xFF);
+        write(copy + 11, control.all_pulses & 0xFF);
+        write(copy + 13, map_unit_ram(control.high_l));
+        write(copy + 15, map_unit_ram(control.high_h));
+    }
+    else if (pair.whole)                                        // format 11: what the 8051 itself uses: the
     {                                                           //   MAP pulse's dead time, idle switch and
         write(copy + 5, map_unit_ram(control.dead_at));         //   start mode, the pulse's flags and counts,
         write(copy + 8, map_unit_ram(control.flags_at));        //   the valve's duties and high phase
@@ -1237,7 +1270,8 @@ static void UNIT_CODE(make_frame)(uint32_t tick)
 // periods (task 12, its inputs the unit's own), the rest of the tick's work (task 15), the tick counter
 // one on, lambda's timer and lambda (16), every second tick the idle control's state (task 17) and a duty
 // if it or the stop asked for one. Then its commit with L1 held off: nothing if the 8051's start or a
-// stop overtook it (false), all again from a new copy if an L1 job committed meanwhile; else its bits
+// stop overtook it (false), all again from a new copy if an L1 job (not a MAP job's) committed
+// meanwhile; else its bits
 // given back, start mode's end for the phase (task 12 leaves it to the commit), its counts, its take, the
 // heartbeat (if L1 has taken every job queued before the tick began, so that a stuck L1 stops it too),
 // and the pulse made again queued for L1 if it can be made (Main_Byte_Again's: a pulse waiting, not
@@ -1248,7 +1282,7 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
     uint32_t queued = control.in;
     for (;;)
     {
-        uint32_t jobs = levels.event_jobs;
+        uint32_t jobs = control.shared;
         uint8_t *ram = tick_work;
         take_inputs(ram, tick_before);
         bool starting = copy_bit(ram, pair.start_bit), asked = control.duty_due, due = false, duty = false;
@@ -1281,7 +1315,7 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
             levels.tick_dropped++;
             return false;
         }
-        if (levels.event_jobs != jobs)
+        if (control.shared != jobs)                                     // (a MAP job's no matter)
         {
             let_events_go();
             levels.again++;
@@ -1433,8 +1467,42 @@ static void UNIT_CODE(run_tickwork)(const Job &job)
     }
 }
 
-// A job's time from its push (or the stop's from its asking) to its end, counted (us).
-static __force_inline void event_done(uint32_t at)
+// Format 12: a MAP read's job (DME-Sim's docs/Paired_Map_Pulse.md). Task 18 on the unit's copy of the
+// RAM as it stands (the idle switch, start mode, the gain and the dead time as last committed; the
+// read's filter the unit's own), so no copy of its own is taken or given back, and the tick, which reads
+// nothing it writes, need not run again after it. A pulse due goes into the MAP take's copy not in use
+// (MOV MapTaken,#count at +2; MOV R4, R5, R6, R7,#n at +4, +6, +8, +10), then the switch is turned to
+// it and the count moved on, unless the 8051's start or a stop overtook the job. The filter isn't
+// guarded so: after the 8051's start the engine is in start mode, which gives no pulse while the
+// filters settle from FFh.
+static void UNIT_CODE(run_map)(const Job &job)
+{
+    uint32_t load;
+    levels.map_jobs = levels.map_jobs + 1;
+    if (!unit_map_pulse(control.map_task, (const uint8_t *)pair.rom, (uint8_t *)map_unit_ram_words(), job.length,
+                        job.first, &load))
+        return;
+    uint32_t side = control.map_side ^ 1, copy = control.map_copy[side], count = (control.map_count + 1) & 0xFF;
+    write(copy + 2, count);
+    write(copy + 4, load & 0xFF);
+    write(copy + 6, load >> 8 & 0xFF);
+    write(copy + 8, load >> 16 & 0xFF);
+    write(copy + 10, load >> 24 & 0xFF);
+    __asm volatile("cpsid i" ::: "memory");
+    if (job.generation == control.generation)
+    {
+        write(control.map_switch_at + 1, copy & 0xFF);
+        write(control.map_count_at + 1, count);
+        control.map_side = side;
+        control.map_count = count;
+        levels.map_pulses = levels.map_pulses + 1;
+    }
+    __asm volatile("cpsie i" ::: "memory");
+}
+
+// A job's time from its push (or the stop's from its asking) to its end, counted (us); shared, a job
+// whose results the tick may read (all but the MAP jobs).
+static __force_inline void event_done(uint32_t at, bool shared)
 {
     uint32_t span = now_us() - at;
     if (span > levels.event_us)
@@ -1442,6 +1510,8 @@ static __force_inline void event_done(uint32_t at)
     if (span > EVENT_BOUND)
         levels.event_over++;
     levels.event_jobs = levels.event_jobs + 1;
+    if (shared)
+        control.shared = control.shared + 1;
 }
 
 // L1's interrupt: one job a run, the stop's first (the jobs queued before it are stale); the next one
@@ -1457,7 +1527,7 @@ void UNIT_CODE(pair_control)()
         job.length = job.first = job.decision = job.starting = 0;
         job.at = control.stop_at;
         run_stop(job);
-        event_done(job.at);
+        event_done(job.at, true);
     }
     else if (control.out != control.in)
     {
@@ -1474,9 +1544,12 @@ void UNIT_CODE(pair_control)()
             run_guard(job);
         else if (job.kind == JOB_TICKWORK)
             run_tickwork(job);
+        else if (job.kind == JOB_MAP)
+            run_map(job);
         uint32_t at = job.at;
+        bool shared = job.kind != JOB_MAP;
         control.out = control.out + 1;
-        event_done(at);
+        event_done(at, shared);
     }
     else
         return;
@@ -1513,6 +1586,23 @@ void UNIT_CODE(pair_tick_work)()
         push(JOB_TICKWORK, 0, 0, 0);
 }
 
+// Format 12: from the snoop's interrupt, a slot's read: a MAP read's job queued for L1 with its filter
+// (0, the first MAP read's; 1, the second's) and its byte. The interrupts held off for the push: the
+// bus level's map unit breaks into the snoop's interrupt, and pushes too.
+void UNIT_CODE(pair_slot_read)(uint32_t slot, uint32_t data)
+{
+    if (!pair.on || !control.mapped)
+        return;
+    for (uint32_t k = 0; k < 2; k++)
+        if (slot == control.map_slot[k])
+        {
+            __asm volatile("cpsid i" ::: "memory");
+            push(JOB_MAP, k, data & 0xFF, 0);
+            __asm volatile("cpsie i" ::: "memory");
+            return;
+        }
+}
+
 // The 8051's start: its RAM cleared, so the take's count from 0 and the switch to Take_A as built, the
 // pulses' and the tick's work's counts from 0; the jobs queued or under way give nothing.
 static void UNIT_CODE(control_as_built)()
@@ -1536,6 +1626,14 @@ static void UNIT_CODE(control_as_built)()
         map_unit_ram_write(pair.pins_at, 0x07);                 //   MOV LamInt,#80h, the reference's check
         map_unit_ram_write(control.lam_at, 0x80);               //   from here
         pair.ref_mark = pair.references;
+    }
+    if (control.mapped)                                         // format 12: the MAP take's switch to Map_A
+    {                                                           //   and its count from 0, as built; the
+        control.map_side = control.map_count = 0;               //   filters FFh (Power_Up's: no rise from
+        write(control.map_switch_at + 1, control.map_copy[0] & 0xFF);   //   the first reads)
+        write(control.map_count_at + 1, 0);
+        map_unit_ram_write(control.map_prev[0], 0xFF);
+        map_unit_ram_write(control.map_prev[1], 0xFF);
     }
     own_sync();                                                 // (the RAM's copy cleared before: not in step)
 }
@@ -2098,6 +2196,25 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         control.pipelined = copies && tasks;
         reach = reach && control.pipelined;
     }
+    control.mapped = false;
+    control.map_side = control.map_count = 0;
+    if (at(MARK + 4) >= MAPS && control.pipelined && pair.whole) // format 12: the MAP take's count, switch
+    {                                                           //   and copies, the MAP reads' slots, the
+        control.map_count_at = word(u + 114);                   //   filters' places, task 18
+        control.map_switch_at = word(u + 116);
+        control.map_copy[0] = word(u + 118);
+        control.map_copy[1] = word(u + 120);
+        control.map_slot[0] = at(u + 122);
+        control.map_slot[1] = at(u + 123);
+        control.map_prev[0] = at(u + 124) & 0x7F;
+        control.map_prev[1] = at(u + 125) & 0x7F;
+        control.map_task = map_unit_task_at(TASK_MAP);
+        // Both copies in one page, which the switch's AJMP reaches.
+        bool copies = control.map_copy[0] >> 8 == control.map_copy[1] >> 8
+                      && ((control.map_switch_at + 2) ^ control.map_copy[0]) < 0x800;
+        control.mapped = copies && control.map_task != 0;
+        reach = reach && control.mapped;
+    }
     pair.on = reach;
 }
 
@@ -2115,6 +2232,11 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
         snprintf(value, value_size, "%u %u %u %u %u %u", (unsigned)levels.ticks, (unsigned)levels.again,
                  (unsigned)levels.tick_late, (unsigned)levels.tick_lost, (unsigned)levels.tick_us,
                  (unsigned)levels.tick_over);
+        return true;
+    }
+    if (streq(name, "pair_map"))
+    {
+        snprintf(value, value_size, "%u %u", (unsigned)levels.map_jobs, (unsigned)levels.map_pulses);
         return true;
     }
     return false;
@@ -2253,6 +2375,25 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[3] = control.ticks;
         out[4] = control.duties;
         out[5] = pair_log.written;
+    }
+    else if (routine == 19 || routine == 20)                    // format 12: a MAP read's job, its filter (0,
+    {                                                           //   1) and its byte: 19 at once, 20 queued for
+        if (routine == 19)                                      //   L1 and pended (as the snoop's interrupt)
+        {
+            Job job;
+            job.kind = JOB_MAP;
+            job.generation = control.generation;
+            job.length = in[0] & 1;
+            job.first = in[1] & 0xFF;
+            job.decision = job.starting = 0;
+            job.at = now_us();
+            run_map(job);
+        }
+        else
+            push(JOB_MAP, in[0] & 1, in[1] & 0xFF, 0);
+        out[0] = control.map_count;
+        out[1] = levels.map_jobs;
+        out[2] = levels.map_pulses;
     }
     else
         return 0;

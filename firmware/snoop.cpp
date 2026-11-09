@@ -106,7 +106,9 @@ static __force_inline void gap(uint32_t strobe, uint32_t before)
             map_unit_adc(channel);
         }
         snoop.reads++;
-        crank_read((before >> BASE_ADDR_PIN) & CODE_MASK, timer_hw->timerawl);
+        uint32_t slot = crank_read((before >> BASE_ADDR_PIN) & CODE_MASK, timer_hw->timerawl);
+        if (slot != CRANK_NO_SLOT)
+            pair_slot_read(slot, data);                                 // format 12: a MAP read's job
     }
     else
         snoop.writes++;

@@ -1636,6 +1636,59 @@ static void UNIT_CODE(idle_duty)(const Task &t)
     own(t, ID_HIGH_H, high >> 8 & 0xFF);
 }
 
+// Task 18 (format 12; DME-Sim's docs/Paired_Map_Pulse.md): the MAP pulse, rom_lean's Main_Map for one
+// read and Accel_Pulse's arithmetic, which pair.cpp's MAP job runs as the snoop sees each MAP read
+// (slots 3 and 9, each its own filter: the cylinders' before at the same crank angle). Its data:
+// Cal_MapDeadband's address (high byte first); INJ_OFS; the bits IdleSwitch and StartMode; the bytes
+// MapPrev0 and MapPrev1 (the filters, the unit's own), MapGainNow (task 2's) and DeadNow (the pulse's
+// task's).
+namespace
+{
+
+enum : uint32_t
+{
+    MP_DEADBAND, // a word
+    MP_OFS = 2,
+    MP_IDLE,
+    MP_START,
+    MP_PREV,     // two: the first MAP read's filter, the second's
+    MP_GAIN = MP_PREV + 2,
+    MP_DEAD,
+};
+
+__force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint32_t *load)
+{
+    uint8_t &filter = t.ram[get(t, MP_PREV + slot) & 0x7F];
+    uint32_t rise = read >= filter ? read - filter : 0;                 // SUBB A,MapPrev0; JC: none falling
+    filter = (filter + read + 1) >> 1;                                  // SETB C; ADDC A,R3; RRC A: the
+                                                                        //   filter half the way, rounded
+    if (bit(t, get(t, MP_IDLE)) || bit(t, get(t, MP_START)))            // JB IdleSwitch; JB StartMode
+        return false;
+    uint32_t deadband = at(t.rom, word(t, MP_DEADBAND));                // MOVC A,@A+DPTR (Cal_MapDeadband)
+    if (rise <= deadband)                                               // SUBB A,R2; JC; JZ
+        return false;
+    uint32_t units = ((rise - deadband) * byte_of(t, MP_GAIN) + 0x10) >> 5;  // MUL AB; ADD A,#10h ...; / 32
+    if (units > 0xFF)                                                   // CJNE A,#10h; JNC: at most 255
+        units = 0xFF;
+    if (units == 0)                                                     // JZ Main_Map_Out
+        return false;
+    uint32_t longer = units * 64;                                       // Accel_Pulse: R7:R6 = A x 64
+    uint32_t whole = byte_of(t, MP_DEAD) * 5 + longer;                  // R3:R2: the dead time x 5 and it
+    uint32_t ofs = get(t, MP_OFS), low = whole & 0xFF;
+    uint32_t start = (ofs - low) & 0xFF;                                // MOV A,#INJ_OFS; CLR C; SUBB A,R2
+    uint32_t overflows = ((whole >> 8) + (low > ofs ? 1 : 0)) & 0xFF;   // ADD A,#(255 - INJ_OFS); ADDC
+    *load = start | overflows << 8 | longer << 16;
+    return true;
+}
+
+} // namespace
+
+bool UNIT_CODE(unit_map_pulse)(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
+                               uint32_t *load)
+{
+    return map_pulse(task_of(rom, ram, description), slot & 1, read & 0xFF, load);
+}
+
 bool UNIT_CODE(unit_task_part)(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram)
 {
     Task t = task_of(rom, ram, description);
