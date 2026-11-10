@@ -7454,11 +7454,27 @@
 		)
 		(property "MPN" "C165948"
 			(at 0 0 90)
-			(layer "F.SilkS")
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
 			(uuid "94497c85-99d5-4a9e-9ced-c3a50aa74c00")
 			(effects
 				(font
 					(size 1.27 1.27)
+					(thickness 0.15)
+				)
+			)
+		)
+		(property "FT Origin" "Center"
+			(at 0 0 90)
+			(unlocked yes)
+			(layer "F.Fab")
+			(hide yes)
+			(uuid "c9ed3427-ec27-4d3c-b850-38e434d0d68d")
+			(effects
+				(font
+					(size 1.27 1.27)
+					(thickness 0.15)
 				)
 			)
 		)

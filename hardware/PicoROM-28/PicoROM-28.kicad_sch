@@ -20177,6 +20177,17 @@
 				)
 			)
 		)
+		(property "FT Origin" "Center"
+			(at 25.4 48.26 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "A1"
 			(uuid "9fe2d582-940d-4ef2-b741-cd93b3ac2533")
 		)
