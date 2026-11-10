@@ -60,9 +60,9 @@ static bool usb_reenumerate_pending = false;
 
 static Config config;
 
-static const char *parameter_names[] = {"name",          "rom_name",   "addr_mask", "rom_size",     "initial_reset",
-                                        "default_reset", "reset",      "status",    "startup_time", "build_config",
-                                        "build_version", "build_time", "comms_mode",   "comms_dropped",
+static const char *parameter_names[] = {"name",          "rom_name",   "addr_mask",  "rom_size",     "initial_reset",
+                                        "default_reset", "reset",      "status",     "startup_time", "build_config",
+                                        "build_version", "build_time", "comms_mode", "comms_modes",  "comms_dropped",
 #if defined(FEATURE_MAP_UNIT)
                                         "map_unit",      "map_counts", "map_lookup", "map_bench",   "map_task",
                                         "map_bus",
@@ -192,6 +192,11 @@ bool get_parameter(const char *name, char *value, size_t value_size)
     else if (streq(name, "comms_mode"))
     {
         strcpyz(value, value_size, comms_get_mode());
+        return true;
+    }
+    else if (streq(name, "comms_modes"))
+    {
+        strcpyz(value, value_size, comms_get_modes()); // read only: the modes comms_mode takes
         return true;
     }
     else if (streq(name, "comms_dropped"))

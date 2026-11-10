@@ -19,6 +19,10 @@ each byte costs the program one read.
 The map unit's builds take a third mode, `log` (docs/map_unit.md, format 11): a session sends the
 unit's own log the same way, its frames made by the board, not bytes the target reads.
 
+`comms_modes` (read only) lists the modes a build has, so the PC can choose without trying them:
+`block window` here, `block window log` with the map unit. A 2.0 board answers ParameterError:
+`block` only.
+
 ## Notes
 
 - The address lines `addr_mask` leaves out read 0, so the page is matched within the ROM as served.
