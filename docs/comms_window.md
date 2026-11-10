@@ -16,6 +16,10 @@ each byte costs the program one read.
 4. CommsEnd ends the session, and so does USB going (unmounted). With the PC not reading, the bytes
    past a 1 KiB queue are dropped, and `comms_dropped` counts them: nothing waits on the PC.
 
+`comms_modes` (read only) lists the modes a build has, so the PC can choose without trying them:
+`block window` here, `block window log` with the map unit. A 2.0 board answers ParameterError:
+`block` only.
+
 ## Notes
 
 - The address lines `addr_mask` leaves out read 0, so the page is matched within the ROM as served.

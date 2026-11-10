@@ -188,6 +188,17 @@ const char *comms_get_mode()
     return window_mode ? "window" : "block";
 }
 
+// The modes this build has, for the PC to choose from without trying them (comms_modes): the map
+// unit's builds have the paired core's log too.
+const char *comms_get_modes()
+{
+#if defined(FEATURE_MAP_UNIT)
+    return "block window log";
+#else
+    return "block window";
+#endif
+}
+
 uint32_t comms_window_dropped()
 {
     return window_dropped;
