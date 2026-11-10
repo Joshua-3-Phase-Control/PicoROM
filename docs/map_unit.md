@@ -325,6 +325,18 @@ of the MAP:
   the byte owed and Cal_DecelDeadband's address; the pulse task's its two bytes. The table is
   format 13's.
 
+Format 16 (DME-Sim's docs/Paired_Knock.md, the owner's of 2026-11-10) logs the KLR's knock line:
+- **The line.** The KLR's knock output (its pin 15, 12 V on a knock) on the DME's connector 10 reads
+  low at P3.4. The 8051 reads it at slot 10, before its strobe resets the KLR and ends the pulse;
+  high, it fetches a mark in page 0 (an AJMP back), which the snoop sees.
+- **The count.** The KLR judged the firing before that slot 10's. The unit counts the knock at that
+  firing's place in the 720 degrees it counts itself (2 x firings places, A on: the turn's half,
+  then its firing; the half the other at each turn's end), a byte of its copy of the RAM each,
+  wrapping at 256 and cleared at the 8051's start; none while not in step. With no cam sensor the
+  places are the unit's own: after the count is lost one may come back a turn on (A as C).
+- Log only: nothing acts on the counts; the image's stream list carries them.
+- The table adds the mark (A0-A7; 0, none, for a car without a KLR) and the first count's address.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds

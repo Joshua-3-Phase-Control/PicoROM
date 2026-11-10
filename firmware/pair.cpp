@@ -75,6 +75,12 @@
 // writes the next channel in turn there and does the work on the result's channel (tasks 0 to 3:
 // rom_lean's Main_Slow's and its second tasks), each firing. At the 8051's start its first stop's run
 // makes start mode and the slow work first, as Power_Up_Inputs did through the window.
+//
+// Format 16 (DME-Sim's docs/Paired_Knock.md): the KLR's knock line, which the 8051 reads at slot 10
+// before its strobe ends the KLR's pulse. High (a knock), it fetches the table's mark in page 0, and
+// the unit counts the knock at the place of the firing before slot 10's in the 720 degrees it counts
+// itself (A to D: the turn's half, then its firing), a byte of its copy of the RAM each, wrapping at
+// 256, for its log. Log only: nothing acts on the counts. A car without a KLR has no mark (0).
 
 #include "pair.h"
 
@@ -96,6 +102,7 @@ static constexpr uint32_t TICKS = 10;    // the format with the tick's work too 
 static constexpr uint32_t WHOLE = 11;    // the format with the whole tick at the ping, and the log
 static constexpr uint32_t MAPS = 12;     // the format with the MAP pulse on the unit (its own take)
 static constexpr uint32_t SLOW = 13;     // the format with the slow work on the unit (slot 5's channel)
+static constexpr uint32_t KNOCK = 16;    // the format with the KLR's knock line (its mark, its counts)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -216,6 +223,10 @@ struct Pair
     bool whole;
     uint32_t bits_mark, pins_at, synced_bit, fault_bit, phase_bit, missing_bit, hold_bit;
     uint32_t inject_at, inject_to, skip_to, ref_mark;
+    // Format 16: the knock line's mark (page 0's A0-A7; 0: none) and the first of its counts in the
+    // unit's copy (A's, the others after it); the turn's half in the 720 degrees the counts' places
+    // take (the unit's own, 0 or 1: the other at each turn's end, kept through a loss of the count).
+    uint32_t knock_mark, knock_at, half;
 };
 
 static Pair pair UNIT_DATA = {};
@@ -679,6 +690,19 @@ static void UNIT_CODE(at_counted)()
     uint32_t count = map_unit_ram(pair.inj_at);
     if (count < 0x80)                                           // MOV A,InjCount; JB ACC.7; INC InjCount
         map_unit_ram_write(pair.inj_at, count + 1);
+}
+
+// Format 16: a knock, the 8051 at the knock mark from slot 10 (the KLR's line high there). The KLR
+// judged the firing before this slot 10's: one more at that firing's place (2 x firings places, A
+// first: the turn's half, then its firing), wrapping at 256. Not in step: no place, none counted.
+static void UNIT_CODE(at_knock)()
+{
+    if (!pair.synced)
+        return;
+    uint32_t place = pair.half * pair.firings + pair.firing;    // this firing's
+    place = (place == 0 ? 2 * pair.firings : place) - 1;        // the one before it
+    uint32_t at = pair.knock_at + place;
+    map_unit_ram_write(at, (map_unit_ram(at) + 1) & 0xFF);
 }
 
 static void UNIT_CODE(at_stopped)()
@@ -1805,7 +1829,10 @@ static void UNIT_CODE(tooth)(uint32_t now)
     {
         pair.tif = 1;
         if (++pair.firing == pair.firings)
+        {
             pair.firing = 0;
+            pair.half ^= 1;                                     // format 16: the 720 degrees' other half
+        }
     }
     if (pair.tif == pair.event_tooth[0])
     {
@@ -2050,6 +2077,8 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
         unsync();
     else if (pair.whole && previous - pair.bits_mark < 16 && ((previous - pair.bits_mark) & 1) == 0)
         map_unit_ram_write(pair.pins_at, (previous - pair.bits_mark) >> 1);  // format 11: the 8051's pins
+    else if (pair.knock_mark != 0 && previous == pair.knock_mark)
+        at_knock();                                             // format 16: a knock at slot 10
     else if (!pair.phased)
         return;
     else if (pair.fire_mark != 0 && previous == pair.fire_mark) // (format 9: no such marks)
@@ -2317,6 +2346,15 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         control.slowed = control.slow_operand_at != 0 && control.warmup_task != 0 && control.fuel_task != 0
                          && control.ign_task != 0 && control.charge_task != 0 && control.afm_at != 0;
         reach = reach && control.slowed;
+    }
+    pair.knock_mark = 0;
+    pair.half = 0;
+    if (at(MARK + 4) >= KNOCK && control.slowed)                // format 16: the knock line's mark (0: no KLR)
+    {                                                           //   and its first count, all in the copy
+        pair.knock_at = at(u + 136) & 0x7F;
+        bool fits = pair.knock_at + 2 * pair.firings <= 0x80;
+        pair.knock_mark = fits ? at(u + 135) : 0;
+        reach = reach && fits;
     }
     pair.on = reach;
 }
