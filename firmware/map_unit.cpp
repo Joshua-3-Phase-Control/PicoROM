@@ -178,7 +178,7 @@ static __force_inline uint32_t cell(uint32_t base, uint32_t offset, uint32_t fra
     return fraction == 0 ? value : lerp(value, at(base + ((offset + 1) & 0xFF)), fraction);
 }
 
-static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+static __force_inline uint32_t factor_lookup(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
 {
     uint32_t row = place(map, first), row_fraction = row >> 8;
     row &= 0xFF;
@@ -195,6 +195,85 @@ static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t
     return lerp(here, cell(cells, (columns + 0x0A) & 0xFF, column_fraction), row_fraction);
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The lookup, format 17 on (DME-Sim's docs/Paired_Maps.md): the maps on free axes, as DME-Sim's
+// PointMaps.Lookup makes it. An axis is its input's RAM address, its count of points, then the points,
+// rising. A one-axis map's values follow its axis; a two-axis map's second axis follows the first,
+// then the values a row at a time. The arithmetic is the factory ML3.1's (Map_Axis, Map_Row and
+// Interpolate): the highest point at or below the input, then from + (to - from) x distance / width,
+// its size rounded half up.
+
+static constexpr uint32_t POINTS = 17; // the format whose maps are on free axes
+
+// The input's place on the axis at axis, searched from the top as the factory's Map_Axis does: the
+// index of the highest point at or below it (the first, below them all) in the low byte, its distance
+// above that point in the next, and the width to the point after in the third: 0 at either end, which
+// takes the end's value.
+static __force_inline uint32_t points_place(uint32_t axis, uint32_t input)
+{
+    uint32_t count = at(axis + 1), k = count;
+    while (k > 1 && input < at(axis + 1 + k))
+        k--;
+    if (k == 0)
+        return 0; // no points: as at the first
+    uint32_t point = at(axis + 1 + k);
+    if (k == count || input < point)
+        return k - 1;
+    return (k - 1) | (input - point) << 8 | (at(axis + 2 + k) - point) << 16;
+}
+
+// from + (to - from) x distance / width at the place, its size rounded half up, for either sign. The
+// size is below 2^16, so the reciprocal's quotient is at most one too high.
+static __force_inline uint32_t interpolate(uint32_t from, uint32_t to, uint32_t place)
+{
+    uint32_t width = place >> 16;
+    if (width == 0)
+        return from;
+    uint32_t size = (to >= from ? to - from : from - to) * (place >> 8 & 0xFF);
+    uint32_t q = size * reciprocals.of[width] >> 16;
+    if (q * width > size)
+        q--;
+    if (2 * (size - q * width) >= width)
+        q++;
+    return (to >= from ? from + q : from - q) & 0xFF;
+}
+
+// The row whose cells start at cells, at the column's place.
+static __force_inline uint32_t points_row(uint32_t cells, uint32_t place)
+{
+    uint32_t cell_at = (cells + (place & 0xFF)) & 0xFFFF;
+    return interpolate(at(cell_at), at(cell_at + 1), place);
+}
+
+// Formats 2 to 16: the factor form's lookup, apart, so that format 17's keeps its registers.
+static uint32_t UNIT_CODE(factor_map_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+{
+    return factor_lookup(map, axes, first, second);
+}
+
+// The value of the map at map at its inputs, by the image's format.
+static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+{
+    if (at(MARK + 4) < POINTS)
+        return factor_map_lookup(map, axes, first, second);
+    uint32_t row = points_place(map, first), after = (map + 2 + at(map + 1)) & 0xFFFF;
+    if (axes < 2)
+        return points_row(after, row);
+    uint32_t columns = at(after + 1), column = points_place(after, second);
+    uint32_t cells = (after + 2 + columns + (row & 0xFF) * columns) & 0xFFFF;
+    uint32_t here = points_row(cells, column);
+    if ((row >> 16) == 0)
+        return here;
+    return interpolate(here, points_row((cells + columns) & 0xFFFF, column), row);
+}
+
+// A map's second axis's first byte (its input's RAM address): after the first's 9 bytes, or (format
+// 17) after the first's count and points.
+static __force_inline uint32_t second_axis(uint32_t map)
+{
+    return (at(MARK + 4) >= POINTS ? map + 2 + at(map + 1) : map + 9) & 0xFFFF;
+}
+
 // A map's entry in the index, by id.
 static __force_inline uint32_t entry_of(uint32_t id)
 {
@@ -204,7 +283,7 @@ static __force_inline uint32_t entry_of(uint32_t id)
 uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes)
 {
     uint32_t entry = entry_of(id), map = at(entry) << 8 | at(entry + 1), axes = at(entry + 2);
-    return map_unit_lookup(map, axes, bytes[at(map) & 0x7F], axes > 1 ? bytes[at(map + 9) & 0x7F] : 0);
+    return map_unit_lookup(map, axes, bytes[at(map) & 0x7F], axes > 1 ? bytes[at(second_axis(map)) & 0x7F] : 0);
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -274,7 +353,9 @@ static __force_inline uint32_t input_address(uint32_t k)
 {
     if (k > unit.axes)
         return 0;
-    return unit.task == MAP ? at(unit.map + 9 * (k - 1)) : unit.sent_inputs[k - 1];
+    if (unit.task == MAP)
+        return at(k == 1 ? unit.map : second_axis(unit.map));
+    return unit.sent_inputs[k - 1];
 }
 
 // The RAM address of the picked task's output j (from 0), or 0 past its last: the description lists
@@ -542,7 +623,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > 16)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > POINTS)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }
@@ -976,7 +1057,7 @@ static void bus_run()
         {
             seed = xorshift(seed);
             uint32_t first = seed & 0xFF, second = seed >> 8 & 0xFF;
-            uint32_t next = axes > 1 ? at(map + 9) : 0; // the answer to the first input
+            uint32_t next = axes > 1 ? at(second_axis(map)) : 0; // the answer to the first input
             if ((n & 63) == 63)
             {
                 t = bus_step(t, PAUSE, window + id, at(map), ANSWER, GAP);

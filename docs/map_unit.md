@@ -337,6 +337,19 @@ Format 16 (DME-Sim's docs/Paired_Knock.md, the owner's of 2026-11-10) logs the K
 - Log only: nothing acts on the counts; the image's stream list carries them.
 - The table adds the mark (A0-A7; 0, none, for a car without a KLR) and the first count's address.
 
+Format 17 (DME-Sim's docs/Paired_Maps.md, the owner's of 2026-11-11) puts the maps on free axes:
+- **An axis** is its input's RAM address, its count of points, then the points, rising (none below
+  the one before). A one-axis map's values follow its axis; a two-axis map's second axis follows
+  the first, then the values a row at a time. The index, the ids and the tasks are as before.
+- **The lookup** is the factory ML3.1's arithmetic (Map_Axis, Map_Row, Interpolate): the highest
+  point at or below the input, searched from the top (the first below them all, the last above
+  it), then from + (to - from) x distance / width, its size rounded half up, divided by the
+  reciprocals (the quotient at most one too high); on two axes each row by the column, then
+  between the rows. DME-Sim's `PointMaps.Lookup` is its twin. Formats 2 to 16 keep the factor
+  form's lookup, in a function of its own.
+- In DME-Sim, rom_pair's maps at every input: 138 cycles a lookup on one axis on average, 331 at
+  most; 295 on two (the 951's; the 944's 246), 610 at most, a step of the search about 10 cycles.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
