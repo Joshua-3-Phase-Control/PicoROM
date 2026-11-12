@@ -352,13 +352,13 @@ Format 17 (DME-Sim's docs/Paired_Maps.md, the owner's of 2026-11-11) puts the ma
 
 Format 18 (DME-Sim's docs/Paired_Precision.md, step A, the owner's of 2026-11-11) puts the speed in
 16 bits:
-- **The P28's own values** (`map_unit_owns`): 80h the speed in rpm, 81h the load (step C), 82h the
-  idle target in rpm. An axis whose input is 80h or on reads one, its points words, high byte
-  first, rising; a map's index entry with 40h beside its axes has 16-bit values. The lookup is
-  format 17's arithmetic; on an own axis its search is by halves (the points rise), and a division
-  past the reciprocals goes by subtraction (a quotient under 8) or to the SIO's divider
-  (`map_unit_divide32`: its state saved and put back when dirty, as the SDK's interrupt code does).
-  The 8-bit maps keep format 17's lookup.
+- **The P28's own values** (`map_unit_owns`): 80h the speed in rpm, 81h the air of a firing
+  (format 20), 82h the idle target in rpm. An axis whose input is 80h or on reads one, its points
+  words, high byte first, rising; a map's index entry with 40h beside its axes has 16-bit values.
+  The lookup is format 17's arithmetic; on an own axis its search is by halves (the points rise),
+  and a division past the reciprocals goes by subtraction (a quotient under 8) or to the SIO's
+  divider (`map_unit_divide32`: its state saved and put back when dirty, as the SDK's interrupt
+  code does). The 8-bit maps keep format 17's lookup.
 - **The speed in rpm**: 40 x SPEED_K over each firing's length, rounded, at most FFFFh, in the
   firing's L1 job; at the tick at most 40 rpm a tooth a tick; at the engine's stop the byte's x 40.
   The tick works on a copy of the own values taken with its copy of the RAM, given back at its
@@ -395,6 +395,20 @@ Format 19 (DME-Sim's docs/Paired_Precision.md, step B, the owner's of 2026-11-11
   job in the car to 7,000 rpm 29.1 us (format 18's 28.7); in DME-Sim, rom_pair's maps of build 7,
   their words looked up as words (build 6's figures above read them as bytes): 197 cycles a lookup
   on one axis on average, 375 at most; 425 on two (the 951's; the 944's 397), 801 at most.
+
+Format 20 (DME-Sim's docs/Paired_Precision.md, step C, the owner's of 2026-11-12) puts the load in g
+a cylinder:
+- **The air of a firing** (81h, 0.1 mg): the flow x the firing's length / 3,000, rounded, at most
+  FFFFh, filtered by LoadK as the load is, in the load task beside LoadHi:LoadMid (`filter_air`,
+  pair_test 29); the filter's fraction is in bits 16 to 23 of its own word, which a lookup reads to
+  16 bits. Starting, Cal_StartAir (a word; its place in the tick's work's data after WarmWeight's).
+- **The tasks:** the slew's, the dynamic spark's and lambda's load thresholds and the overboost
+  guard off the MAP (the 944's) read the air against words; the acceleration's dynamic spark the
+  air before the tick's load task, as the byte it read. The load byte is made as before.
+- **The log:** list addresses 82h and 83h are the air's bytes (the own values' as at format 18).
+- **Its time:** L1's longest job in the car to 7,000 rpm 29.2 us (format 19's 29.1); in DME-Sim,
+  rom_pair's maps of build 8: 204 cycles a lookup on one axis on average, 382 at most; 518 on two
+  (the 951's; the 944's 513), 856 at most.
 
 ## How it works
 

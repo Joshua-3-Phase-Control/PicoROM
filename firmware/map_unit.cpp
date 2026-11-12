@@ -264,6 +264,7 @@ static constexpr uint32_t WIDE_VALUES = 0x40; // beside an index entry's axes: t
 static constexpr uint32_t OWN = 0x80;         // an axis's input from here on: the P28's own, 16 bits
 static constexpr uint32_t SIGNED = 19;        // the format with signed 16-bit values (step B: the spark)
 static constexpr uint32_t SIGNED_VALUES = 0x20; // beside 40h: the words signed (two's complement)
+static constexpr uint32_t AIR = 20;           // the format with the load in g a cylinder (step C)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -530,11 +531,11 @@ uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes, const uint
         return map_unit_lookup(map, axes, bytes[input & 0x7F], (axes & 3) > 1 ? bytes[at(second_axis(map)) & 0x7F] : 0);
     if (at(MARK + 4) < SIGNED || !(axes & WIDE_VALUES))
         axes &= ~SIGNED_VALUES;
-    uint32_t first = input & OWN ? own[(input - OWN) & (MAP_UNIT_OWNS - 1)] : bytes[input & 0x7F]; // format 18:
+    uint32_t first = input & OWN ? own[(input - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[input & 0x7F]; // format 18
     if ((axes & 3) < 2)                                                                 //   inputs and the
         return wide_or_points(map, axes, first, 0, (axes & WIDE_VALUES) || (input & OWN)); // lookup, once
     uint32_t next = at(wide_after(map));
-    uint32_t second = next & OWN ? own[(next - OWN) & (MAP_UNIT_OWNS - 1)] : bytes[next & 0x7F];
+    uint32_t second = next & OWN ? own[(next - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[next & 0x7F];
     return wide_or_points(map, axes, first, second, (axes & WIDE_VALUES) || ((input | next) & OWN));
 }
 
@@ -875,7 +876,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > SIGNED)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > AIR)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

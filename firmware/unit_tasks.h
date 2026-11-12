@@ -121,6 +121,10 @@ uint32_t unit_map_value(uint32_t id, const uint8_t *ram, const uint32_t *own);
 // Format 18: Idle_Error with the target in rpm (pair_test's, for DME-Sim's twin).
 uint32_t unit_fine_error_rpm(uint32_t target, uint32_t p, uint32_t k);
 
+// Format 20: the load task's air of a firing and its filter (pair_test's, for DME-Sim's twin): the own
+// value 81h's word after a firing of P cycles at the flow (g/min), filtered by k.
+uint32_t unit_filter_air(uint32_t flow, uint32_t p, uint32_t k, uint32_t own);
+
 #endif
 
 #endif

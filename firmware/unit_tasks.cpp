@@ -146,6 +146,28 @@ __force_inline uint32_t half_teeth(int32_t v)
     return (uint32_t)(h > 127 ? 127 : h < -128 ? -128 : h) & 0xFF;
 }
 
+// Format 20 (step C): the load in g a cylinder: the air of a firing in 0.1 mg, the P28's own (81h; its
+// filter's fraction above its 16 bits), which the maps' load axes, the load thresholds (words) and
+// Boost_MaxLoad's values (words) take in place of the load byte.
+constexpr uint32_t AIR_FORMAT = 20;
+
+__force_inline bool fine_air(const Task &t)
+{
+    return at(t.rom, 0x2004) >= AIR_FORMAT;
+}
+
+// The air of a firing, 0.1 mg: the own value 81h's 16 bits.
+__force_inline uint32_t air(const Task &t)
+{
+    return t.own[MAP_UNIT_LOAD - MAP_UNIT_SPEED] & 0xFFFF;
+}
+
+// An unsigned word at address, high byte first.
+__force_inline uint32_t word_at(const Task &t, uint32_t address)
+{
+    return at(t.rom, address) << 8 | at(t.rom, address + 1);
+}
+
 // Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
 // count left. A value not 0 reaches the top bit within 23 shifts; 0 shifts its whole count away (up
 // to 255 turns on the 8051), so that ends here at once with the count 0, as there.
@@ -581,6 +603,25 @@ static void UNIT_CODE(pulse)(const Task &t, bool again)
     put(t, 3, flags);                                                   // PulseFlags
 }
 
+// Format 20: the air of a firing (the flow x P / 3,000: g/min over P machine cycles of 2 us, in 0.1 mg,
+// rounded, at most FFFFh; held where P isn't known) into the own value 81h, filtered as the load is by
+// LoadK, its fraction kept above its 16 bits (rom_lean's filter drops its low byte; this keeps it).
+static void UNIT_CODE(filter_air)(const Task &t, uint32_t flow, uint32_t p, uint32_t k)
+{
+    if (p == 0xFFFF || p == 0)
+        return;
+    uint32_t product = flow * p, fresh = map_unit_divide32(product, 3000);
+    if (2 * (product - fresh * 3000) >= 3000)
+        fresh++;
+    if (fresh > 0xFFFF)
+        fresh = 0xFFFF;
+    uint32_t &own = t.own[MAP_UNIT_LOAD - MAP_UNIT_SPEED];
+    int32_t state = (int32_t)((own & 0xFFFF) << 8 | (own >> 16 & 0xFF));
+    int32_t diff = (int32_t)(fresh << 8) - state;
+    state += diff >= 0 ? (int32_t)((uint32_t)diff * k >> 8) : -(int32_t)((uint32_t)-diff * k >> 8);
+    own = (uint32_t)state >> 8 | ((uint32_t)state & 0xFF) << 16;
+}
+
 // Load_Tick's running path (the 8051 keeps the starting one): 50 / the speed x the air flow / 256
 // (Mul16x16), held to 16 bits, x Cal_LoadScale / 256 (Mul16x8) and doubled unless its top bit is set:
 // the new load; filtered by LoadK (Lag_Filter24, its low byte 0) into LoadHi:LoadMid. Inputs, in turn:
@@ -616,6 +657,8 @@ static void UNIT_CODE(load)(const Task &t)
         state -= (old - fresh) * k;                                     // negated; Mul16x8; SUBB x 3
     put(t, 0, state >> 16);                                             // LoadHi: R2
     put(t, 1, state >> 8);                                              // LoadMid: R1
+    if (fine_air(t))                                                    // format 20: the air of a firing,
+        filter_air(t, flow, p, k);                                      //   filtered alike
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -676,7 +719,8 @@ static void UNIT_CODE(boost_guard)(const Task &t, AdvanceState &s, bool starting
         return;
     }
     bool on_map = cal(t, 7) != 0;                                       // Cal_BoostGuardMap
-    uint32_t b = on_map ? input(t, 3) : input(t, 1);                    // MOV B,In5 / MOV B,Load
+    bool airy = !on_map && fine_air(t);                                 // format 20: on the air, words
+    uint32_t b = on_map ? input(t, 3) : airy ? air(t) : input(t, 1);    // MOV B,In5 / MOV B,Load
     uint32_t limit = value(t, get(t, on_map ? 5 : 4));                  // Boost_MaxMap / Boost_MaxLoad: R3
     if (!s.cut)                                                         // JB BoostCut,Ign_Boost_Cut
     {
@@ -699,7 +743,9 @@ static void UNIT_CODE(boost_guard)(const Task &t, AdvanceState &s, bool starting
         s.cut = s.over = false;
         return;
     }
-    uint32_t level = on_map ? cal(t, 10) : (limit - cal(t, 11)) & 0xFF; // Cal_BoostRelease; or CPL; INC; ADD A,R3
+    uint32_t hyst = airy ? word_at(t, word(t, 1) + get(t, 11)) : 0;    // format 20: Cal_BoostHyst a word
+    uint32_t level = on_map ? cal(t, 10) : airy ? (limit > hyst ? limit - hyst : 0)
+                                                : (limit - cal(t, 11)) & 0xFF; // Cal_BoostRelease; or CPL; INC; ADD A,R3
     if (level < b)                                                      // CJNE A,B; JNC Ign_Boost_Below
         s.over = false;                                                 // above it: the release's time again
     else if (!s.over)
@@ -772,7 +818,7 @@ static bool UNIT_CODE(overrun_cut)(const Task &t, AdvanceState &s, uint32_t targ
 // after a cut the resume's slew over once the target is below the advance.
 static void UNIT_CODE(slew_target)(const Task &t, AdvanceState &s, uint32_t target, bool not_synced)
 {
-    bool c = cal(t, 20) < input(t, 1)                                   // Cal_SlewLoad; SUBB A,Load; JC
+    bool c = (fine_air(t) ? word_at(t, word(t, 1) + get(t, 20)) < air(t) : cal(t, 20) < input(t, 1)) // Cal_SlewLoad
              || speed_at(t, word(t, 1) + get(t, 21)) >= speed_of(t, input(t, 0)); // Cal_SlewRpm; SUBB A,Rpm
     if (s.high)                                                         // JNB SlewHighLoad; CPL C
         c = !c;
@@ -872,7 +918,8 @@ static void UNIT_CODE(slew64)(const Task &t, AdvanceState &s, int32_t target, bo
 {
     if (!slewed)
     {
-        bool c = cal(t, 20) < input(t, 1) || speed_at(t, word(t, 1) + get(t, 21)) >= speed_of(t, input(t, 0));
+        bool c = (fine_air(t) ? word_at(t, word(t, 1) + get(t, 20)) < air(t) : cal(t, 20) < input(t, 1)) // format 20
+                 || speed_at(t, word(t, 1) + get(t, 21)) >= speed_of(t, input(t, 0));
         if (s.high)
             c = !c;
         if (c)
@@ -1355,6 +1402,7 @@ enum : uint32_t
     TW_LOAD_MID,
     TW_WARM_UP,
     TW_WARM_WEIGHT,
+    TW_START_AIR,       // format 20: Cal_StartAir's place in Constants
 };
 
 // A task as its description places it: the input count and the inputs, the output count and the
@@ -1404,11 +1452,13 @@ __force_inline void afm_rise(const Task &t, uint32_t *rise, uint32_t *step)
 
 // Spark_Dyn_Adj: under Cal_SparkDynLoad and Cal_SparkDynRpm, the speed over its filter Cal_SparkAccel,
 // under it Cal_SparkDecel, at it none; over the load or the speed none.
-// Format 19: Cal_SparkAccel and Cal_SparkDecel words in 1/64 tooth (signed).
-static int32_t UNIT_CODE(spark_dyn_adj)(const Task &t)
+// Format 19: Cal_SparkAccel and Cal_SparkDecel words in 1/64 tooth (signed). Format 20: Cal_SparkDynLoad a
+// word against load_air (Accel_Raise's the air before the load task, as rom_lean's byte is there).
+static int32_t UNIT_CODE(spark_dyn_adj)(const Task &t, uint32_t load_air)
 {
     uint32_t c = word(t, TW_CONSTANTS), rpm = byte_of(t, TW_RPM), filt = byte_of(t, TW_RPM_FILT);
-    if (at(t.rom, c + get(t, TW_DYN_LOAD)) < byte_of(t, TW_LOAD))       // CJNE A,Load; JC Spark_Dyn_Zero
+    if (fine_air(t) ? word_at(t, c + get(t, TW_DYN_LOAD)) < load_air    // format 20: the air
+                    : at(t.rom, c + get(t, TW_DYN_LOAD)) < byte_of(t, TW_LOAD)) // CJNE A,Load; JC Spark_Dyn_Zero
         return 0;
     if (at(t.rom, c + get(t, TW_DYN_RPM)) < rpm)                        // CJNE A,Rpm; JC Spark_Dyn_Zero
         return 0;
@@ -1463,7 +1513,7 @@ static bool UNIT_CODE(accel_tick)(const Task &t)
     {
         if (!bit(t, get(t, TW_START)) && rise >= get(t, TW_RISE_MIN))   // JB StartMode; CJNE A,#RISE_MIN; JC
             return true;                                                // SETB AccelRaise
-        set_dyn(t, spark_dyn_adj(t));                                   // Accel_Tick_Dyn
+        set_dyn(t, spark_dyn_adj(t, air(t)));                           // Accel_Tick_Dyn
     }
     own(t, TW_AFM_FILT, byte_of(t, TW_AFM_FILT) + step);                // MOV A,AfmFilt; ADD A,R2
     return false;
@@ -1473,19 +1523,19 @@ static bool UNIT_CODE(accel_tick)(const Task &t)
 // (63 at most); the enrichment's first part by the rise (Accel_PulseRise: AccelPart); the filter's
 // step. Both maps take the rise from R3 (03h), as Map_Lookup leaves it. True: the next test
 // (EnrichDue).
-static bool UNIT_CODE(accel_raise)(const Task &t)
+static bool UNIT_CODE(accel_raise)(const Task &t, uint32_t load_air)
 {
     uint32_t rise, step;
     afm_rise(t, &rise, &step);
     t.ram[3] = rise;                                                    // R3
     uint32_t tip = value(t, get(t, TW_TIP_IN));
     if (fine_spark(t))                                                  // format 19: a word in 1/64 tooth,
-        set_dyn(t, spark_dyn_adj(t) - (int32_t)(tip >= 0x800 ? 0x7E0 : tip)); // 63 half-teeth at most
+        set_dyn(t, spark_dyn_adj(t, load_air) - (int32_t)(tip >= 0x800 ? 0x7E0 : tip)); // 63 half-teeth at most
     else
     {
         if (tip >= 0x40)                                                // CJNE A,#40h; JC; MOV A,#3Fh
             tip = 0x3F;
-        own(t, TW_DYN, spark_dyn_adj(t) + ((0x100 - tip) & 0xFF));      // CPL A; INC A; ADD A,R1
+        own(t, TW_DYN, spark_dyn_adj(t, load_air) + ((0x100 - tip) & 0xFF)); // CPL A; INC A; ADD A,R1
     }
     uint32_t part = value(t, get(t, TW_PULSE_RISE));
     own(t, TW_ACCEL_PART, part);
@@ -1519,6 +1569,8 @@ static void UNIT_CODE(load_tick)(const Task &t)
     }
     uint32_t start = at(t.rom, word(t, TW_CONSTANTS) + get(t, TW_START_LOAD));
     own(t, TW_LOAD, start);
+    if (fine_air(t))                                                    // format 20: Cal_StartAir, the air
+        t.own[MAP_UNIT_LOAD - MAP_UNIT_SPEED] = word_at(t, word(t, TW_CONSTANTS) + get(t, TW_START_AIR));
     uint32_t v = (start * get(t, TW_FIRINGS) & 0xFF) * 0x19;            // MUL AB; MOV B,#19h; MUL AB
     own(t, TW_LOAD_HI, v >> 8);
     own(t, TW_LOAD_MID, v);
@@ -1585,8 +1637,9 @@ static void UNIT_CODE(tick_work)(const Task &t)
     spark_dyn(t, tick);
     bool raise = accel_tick(t);
     own(t, TW_LOAD_K, value(t, get(t, TW_LOAD_FILTER)));                // Main_Tick_Filter
-    load_tick(t);                                                       // Main_Load
-    if (raise && accel_raise(t))                                        // Accel_Raise, then Accel_Enrich
+    uint32_t before = air(t);                                           // (format 20: Accel_Raise's load the
+    load_tick(t);                                                       //   air before Main_Load, as its byte)
+    if (raise && accel_raise(t, before))                                // Accel_Raise, then Accel_Enrich
         accel_enrich(t);
     load_byte(t);                                                       // Main_Byte
     load_weight(t);
@@ -1660,7 +1713,8 @@ static bool UNIT_CODE(lambda_load_open)(const Task &t)
 {
     if (bit(t, get(t, LM_FULL)))                                        // MOV C,FullLoadSwitch; JC
         return true;
-    if (constant(t, LM_LOAD_MAX) < byte_of(t, LM_LOAD))                 // CJNE A,Load: C; JC
+    if (fine_air(t) ? word_at(t, word(t, 0) + get(t, LM_LOAD_MAX)) < air(t)  // format 20: the air
+                    : constant(t, LM_LOAD_MAX) < byte_of(t, LM_LOAD))   // CJNE A,Load: C; JC
         return true;
     return constant(t, LM_MAP_MAX) < byte_of(t, LM_IN5);                // CJNE A,In5: C
 }
@@ -2062,6 +2116,14 @@ __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint3
 }
 
 } // namespace
+
+uint32_t UNIT_CODE(unit_filter_air)(uint32_t flow, uint32_t p, uint32_t k, uint32_t own)
+{
+    uint32_t owns[MAP_UNIT_OWNS];                                       // (no initializer: no memset in flash)
+    owns[MAP_UNIT_LOAD - MAP_UNIT_SPEED] = own;
+    filter_air(Task{nullptr, nullptr, nullptr, nullptr, nullptr, owns}, flow, p, k);
+    return owns[MAP_UNIT_LOAD - MAP_UNIT_SPEED];
+}
 
 bool UNIT_CODE(unit_map_pulse)(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
                                uint32_t *load)

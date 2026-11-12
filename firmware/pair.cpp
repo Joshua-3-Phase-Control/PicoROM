@@ -2531,6 +2531,8 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[0] = period_t64(in[0], in[1]);
     else if (routine == 24)                                     // format 18: the speed in rpm: the length, SPEED_K
         out[0] = speed_rpm(in[0], in[1]);
+    else if (routine == 29)                                     // format 20: the air of a firing and its
+        out[0] = unit_filter_air(in[0], in[1], in[2], in[3]);   //   filter: flow, P, LoadK, the own word
     else if (routine == 26)                                     // format 19: Spark_Place at the advance in
     {                                                           //   1/64 tooth, SPARK_B, T64
         Place place = spark_place((int16_t)in[0], in[1], in[2]);

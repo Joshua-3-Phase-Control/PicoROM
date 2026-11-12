@@ -60,6 +60,8 @@ void map_unit_set_own(uint32_t input, uint32_t value);
 uint32_t map_unit_own(uint32_t input);
 static constexpr uint32_t MAP_UNIT_OWNS = 8;
 static constexpr uint32_t MAP_UNIT_SPEED = 0x80;       // the speed in rpm
+static constexpr uint32_t MAP_UNIT_LOAD = 0x81;        // format 20: the air of a firing, 0.1 mg (its filter's
+                                                       //   fraction in bits 16 to 23: read its 16 bits)
 static constexpr uint32_t MAP_UNIT_IDLE_TARGET = 0x82; // the idle target in rpm (task 17's, task 14 reads it)
 static constexpr uint32_t MAP_UNIT_IGN_SLOW = 0x83;    // the advance's slow sum (the slow work's)
 static constexpr uint32_t MAP_UNIT_HANDOVER = 0x84;    // the advance's sum (task 6's, task 11 takes it)
