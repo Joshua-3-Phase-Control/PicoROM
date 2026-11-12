@@ -14,13 +14,15 @@
 namespace
 {
 
-// A task at work: the image, the 8051's RAM bytes, where its description lists its inputs and its
-// outputs, and its data.
+// A task at work: the image, the 8051's RAM bytes, the bytes of its description that list its inputs
+// and its outputs, and its data (task_of keeps them within the image's 64 KiB, so that a byte of them
+// is read with no mask), and (format 18) the own values that go with ram (map_unit_owns_on).
 struct Task
 {
     const uint8_t *rom;
     uint8_t *ram;
-    uint32_t inputs, outputs, data;
+    const uint8_t *inputs, *outputs, *data;
+    uint32_t *own;
 };
 
 __force_inline uint32_t at(const uint8_t *rom, uint32_t address)
@@ -30,7 +32,7 @@ __force_inline uint32_t at(const uint8_t *rom, uint32_t address)
 
 __force_inline uint32_t get(const Task &t, uint32_t i)
 {
-    return at(t.rom, t.data + i);
+    return t.data[i];
 }
 
 __force_inline uint32_t word(const Task &t, uint32_t i)
@@ -41,7 +43,7 @@ __force_inline uint32_t word(const Task &t, uint32_t i)
 // Output j (from 0) into the 8051's RAM byte the description names.
 __force_inline void put(const Task &t, uint32_t j, uint32_t value)
 {
-    t.ram[at(t.rom, t.outputs + j) & 0x7F] = value & 0xFF;
+    t.ram[t.outputs[j] & 0x7F] = value & 0xFF;
 }
 
 // An 8051 bit (bit address 00h-7Fh: RAM 20h-2Fh), as the bytes sent hold it.
@@ -62,7 +64,7 @@ __force_inline void set_bit(const Task &t, uint32_t address, bool on)
 // data byte i, set (byte_of reads it).
 __force_inline void own(const Task &t, uint32_t i, uint32_t value)
 {
-    t.ram[at(t.rom, t.data + i) & 0x7F] = value & 0xFF;
+    t.ram[t.data[i] & 0x7F] = value & 0xFF;
 }
 
 // The 8051's RAM byte whose address is the task's data byte i, as sent.
@@ -74,7 +76,7 @@ __force_inline uint32_t byte_of(const Task &t, uint32_t i)
 // The task's input k (from 0, in its description's order), as sent.
 __force_inline uint32_t input(const Task &t, uint32_t k)
 {
-    return t.ram[at(t.rom, t.inputs + k) & 0x7F];
+    return t.ram[t.inputs[k] & 0x7F];
 }
 
 // Format 9: the bytes the pipeline keeps are the unit's own, never sent (the mark's fifth byte).
@@ -95,13 +97,53 @@ __force_inline bool wide(const Task &t)
 // The speed a threshold is compared with: the speed byte as given, or (format 18) the speed in rpm.
 __force_inline uint32_t speed_of(const Task &t, uint32_t byte)
 {
-    return wide(t) ? map_unit_own_on(MAP_UNIT_SPEED, t.ram) : byte;
+    return wide(t) ? t.own[0] : byte;                                   // MAP_UNIT_SPEED
 }
 
 // A speed constant at address: its byte, or (format 18) its word in rpm, high byte first.
 __force_inline uint32_t speed_at(const Task &t, uint32_t address)
 {
     return wide(t) ? at(t.rom, address) << 8 | at(t.rom, address + 1) : at(t.rom, address);
+}
+
+// Format 19 (step B): the spark in 1/64 tooth, signed 16 bits: the spark's maps signed words (0 none),
+// the advance's sums, limits, steps and terms; the sums and the advance the P28's own values
+// (map_unit.h's 83h to 87h), the bytes Advance and AdvanceDyn the nearest half-teeth beside them.
+constexpr uint32_t SPARK_FORMAT = 19;
+
+__force_inline bool fine_spark(const Task &t)
+{
+    return at(t.rom, 0x2004) >= SPARK_FORMAT;
+}
+
+// A value in 1/64 tooth held to 16 bits, signed.
+__force_inline int32_t held16(int32_t v)
+{
+    return v > 32767 ? 32767 : v < -32768 ? -32768 : v;
+}
+
+// A signed word at address (the constants in 1/64 tooth), high byte first.
+__force_inline int32_t word16(const Task &t, uint32_t address)
+{
+    return (int16_t)(at(t.rom, address) << 8 | at(t.rom, address + 1));
+}
+
+// An own value as this task's copy has it, signed; and set, held to 16 bits.
+__force_inline int32_t own16(const Task &t, uint32_t input)
+{
+    return (int16_t)t.own[(input - MAP_UNIT_SPEED) & (MAP_UNIT_OWNS - 1)];
+}
+
+__force_inline void set_own16(const Task &t, uint32_t input, int32_t v)
+{
+    t.own[(input - MAP_UNIT_SPEED) & (MAP_UNIT_OWNS - 1)] = (uint32_t)held16(v) & 0xFFFF;
+}
+
+// The nearest half-teeth (a signed byte) of a value in 1/64 tooth: the bytes beside it.
+__force_inline uint32_t half_teeth(int32_t v)
+{
+    int32_t h = (v + 16) >> 5;
+    return (uint32_t)(h > 127 ? 127 : h < -128 ? -128 : h) & 0xFF;
 }
 
 // Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
@@ -145,7 +187,13 @@ __force_inline void one_plus(uint32_t *r, uint32_t *shift, uint32_t a)
 
 __force_inline uint32_t value(const Task &t, uint32_t id)
 {
-    return unit_map_value(id, t.ram);
+    return unit_map_value(id, t.ram, t.own);
+}
+
+// A spark map's value: a signed word in 1/64 tooth.
+__force_inline int32_t spark_map(const Task &t, uint32_t id)
+{
+    return (int16_t)value(t, id);
 }
 
 // Sum_Map: the sum and the map's value less 20, mod 256 (ADD A,B; CLR C; SUBB A,#14h).
@@ -239,8 +287,13 @@ static void UNIT_CODE(fuel)(const Task &t)
 // gain by coolant, which task 18 takes, as it takes MapGainNow).
 static void UNIT_CODE(ign)(const Task &t)
 {
-    uint32_t sum = sum_map(t, 0, get(t, bit(t, get(t, 4))));            // the cold map after a cold start
-    put(t, 0, sum_map(t, sum, get(t, 2)));
+    if (fine_spark(t))                                                  // format 19: in 1/64 tooth, the
+        set_own16(t, MAP_UNIT_IGN_SLOW, spark_map(t, get(t, bit(t, get(t, 4)))) + spark_map(t, get(t, 2)));
+    else                                                                //   P28's own
+    {
+        uint32_t sum = sum_map(t, 0, get(t, bit(t, get(t, 4))));        // the cold map after a cold start
+        put(t, 0, sum_map(t, sum, get(t, 2)));
+    }
     put(t, 1, value(t, get(t, 3)));
     if (at(t.rom, 0x2004) >= DECEL_FORMAT)
         put(t, 2, value(t, get(t, 5)));
@@ -266,6 +319,18 @@ static void UNIT_CODE(charge)(const Task &t)
 // IgnSlow's RAM address. Out: Handover.
 static void UNIT_CODE(advance)(const Task &t)
 {
+    if (fine_spark(t))                                                  // format 19: the sum in 1/64 tooth
+    {
+        int32_t whole;
+        if (bit(t, get(t, 6)))
+            whole = spark_map(t, get(t, 0)) + spark_map(t, get(t, 1));
+        else if (bit(t, get(t, 7)))
+            whole = spark_map(t, get(t, bit(t, get(t, 8)) ? 3 : 2)) + spark_map(t, get(t, 4));
+        else
+            whole = spark_map(t, get(t, 5)) + own16(t, MAP_UNIT_IGN_SLOW);
+        set_own16(t, MAP_UNIT_HANDOVER, whole);
+        return;
+    }
     uint32_t sum;
     if (bit(t, get(t, 6)))                                              // JNB StartMode,Ign_Running
         sum = sum_map(t, sum_map(t, 0, get(t, 0)), get(t, 1));
@@ -587,7 +652,8 @@ enum : uint32_t
 // The advance's state as stage 4 takes and leaves it.
 struct AdvanceState
 {
-    uint32_t advance, slew, boost, count;
+    int32_t advance;                                                    // a byte, or (format 19) 1/64 tooth
+    uint32_t slew, boost, count;
     bool over, cut, fuel_cut, ramp, by_rpm, high, overrun, resume;
 };
 
@@ -744,8 +810,147 @@ static void UNIT_CODE(slew_step)(const Task &t, AdvanceState &s, uint32_t target
         s.advance = diff < step ? target : (s.advance + step) & 0xFF;   // SUBB A,R4; ADD A,R4
 }
 
+// Format 19: Ign_Offset to Ign_Limits in 1/64 tooth: the sum with the offset by speed, a positive sum
+// at most Cal_AdvanceMax, a negative one at least Cal_AdvanceMin (the word after it); no halving.
+static int32_t UNIT_CODE(target64)(const Task &t, int32_t handover)
+{
+    int32_t sum = handover + spark_map(t, get(t, 0));                   // Ign_SpeedOffset
+    uint32_t c = word(t, 1) + get(t, 3);
+    int32_t most = word16(t, c), least = word16(t, c + 2);
+    return held16(sum < 0 ? (sum >= least ? sum : least) : (most >= sum ? sum : most));
+}
+
+// Format 19: the resume (as resume), its step a word in 1/64 tooth.
+static bool UNIT_CODE(resume64)(const Task &t, AdvanceState &s, int32_t step, int32_t target)
+{
+    s.advance = held16(s.advance + step);
+    s.count = 0;
+    s.ramp = true;
+    s.fuel_cut = false;
+    if (target < s.advance)
+    {
+        s.slew = 0;
+        return false;
+    }
+    s.slew = (cal(t, 16) - 1) & 0xFF;                                   // Cal_SlewResume's firings
+    s.resume = true;
+    return true;
+}
+
+// Format 19: Ign_Overrun (as overrun_cut), the resume's steps words in 1/64 tooth.
+static bool UNIT_CODE(overrun64)(const Task &t, AdvanceState &s, int32_t target, bool idle)
+{
+    uint32_t c = word(t, 1);
+    if (!idle)
+    {
+        s.by_rpm = s.overrun = false;
+        return s.fuel_cut && resume64(t, s, word16(t, c + get(t, 14)), target);   // Cal_ResumeStepThrottle
+    }
+    uint32_t rpm = speed_of(t, input(t, 0)), cutoff = value(t, get(t, 6));
+    if (cutoff >= rpm)
+    {
+        s.overrun = false;
+        if (!s.fuel_cut)
+            return false;
+        s.by_rpm = true;
+        return resume64(t, s, word16(t, c + get(t, 15)), target);       // Cal_ResumeStepRpm
+    }
+    if (rpm - cutoff <= speed_at(t, c + get(t, 13) + (s.by_rpm ? 2 : 0)))
+        return false;
+    s.overrun = true;
+    if (target != s.advance)
+        return false;
+    s.fuel_cut = true;
+    s.overrun = false;
+    s.advance = target;
+    return true;
+}
+
+// Format 19: Ign_Target's resume end and Ign_Slew (as slew_target, slew_step): a pair's firings a byte,
+// its step a word in 1/64 tooth.
+static void UNIT_CODE(slew64)(const Task &t, AdvanceState &s, int32_t target, bool not_synced, bool slewed)
+{
+    if (!slewed)
+    {
+        bool c = cal(t, 20) < input(t, 1) || speed_at(t, word(t, 1) + get(t, 21)) >= speed_of(t, input(t, 0));
+        if (s.high)
+            c = !c;
+        if (c)
+        {
+            s.high = !s.high;
+            if (!s.resume && !s.overrun)
+                s.slew = 0;
+        }
+        if (not_synced)
+        {
+            s.advance = target;
+            s.slew = 0;
+        }
+        if (s.resume && target < s.advance)
+        {
+            s.resume = false;
+            s.slew = 0;
+        }
+    }
+    if (s.slew != 0)
+        return;
+    uint32_t place = word(t, 1) + get(t, s.resume ? 16 : s.overrun ? 17 : s.high ? 18 : 19);
+    s.slew = at(t.rom, place);                                          // its firings
+    int32_t step = at(t.rom, place + 1) << 8 | at(t.rom, place + 2), diff = target - s.advance;
+    if (diff < 0)
+        s.advance = -diff < step ? target : s.advance - step;
+    else
+        s.advance = diff < step ? target : s.advance + step;
+}
+
+static void UNIT_CODE(advance_rest64)(const Task &t)
+{
+    AdvanceState s;
+    s.advance = own16(t, MAP_UNIT_ADVANCE);
+    s.slew = byte_of(t, 35);
+    s.boost = byte_of(t, 36);
+    s.count = byte_of(t, 37);
+    s.over = bit(t, get(t, 26));
+    s.cut = bit(t, get(t, 27));
+    s.fuel_cut = bit(t, get(t, 25));
+    s.ramp = bit(t, get(t, 28));
+    s.by_rpm = bit(t, get(t, 29));
+    s.high = bit(t, get(t, 30));
+    s.overrun = bit(t, get(t, 31));
+    s.resume = bit(t, get(t, 32));
+    bool starting = bit(t, get(t, 22)), idle = bit(t, get(t, 23));
+    int32_t target = target64(t, own16(t, MAP_UNIT_HANDOVER));
+    boost_guard(t, s, starting, idle);
+    bool slewed = !starting && overrun64(t, s, target, idle);
+    slew64(t, s, target, bit(t, get(t, 24)), slewed);
+    uint32_t flags = (s.over ? ADV_BOOST_OVER : 0) | (s.cut ? ADV_BOOST_CUT : 0) | (s.fuel_cut ? ADV_FUEL_CUT : 0)
+                     | (s.ramp ? ADV_RESUME_RAMP : 0) | (s.by_rpm ? ADV_RESUME_BY_RPM : 0)
+                     | (s.high ? ADV_SLEW_HIGH_LOAD : 0) | (s.overrun ? ADV_SLEW_OVERRUN : 0)
+                     | (s.resume ? ADV_SLEW_RESUME : 0);
+    set_bit(t, get(t, 26), s.over);
+    set_bit(t, get(t, 27), s.cut);
+    set_bit(t, get(t, 25), s.fuel_cut);
+    set_bit(t, get(t, 28), s.ramp);
+    set_bit(t, get(t, 29), s.by_rpm);
+    set_bit(t, get(t, 30), s.high);
+    set_bit(t, get(t, 31), s.overrun);
+    set_bit(t, get(t, 32), s.resume);
+    set_own16(t, MAP_UNIT_HANDOVER, target);                            // the target, as rom_lean's left it
+    set_own16(t, MAP_UNIT_ADVANCE, s.advance);
+    own(t, 35, s.slew);
+    own(t, 36, s.boost);
+    own(t, 37, s.count);
+    put(t, 0, half_teeth(s.advance));                                   // Advance: the nearest half-teeth
+    put(t, 1, flags);
+}
+
 static void UNIT_CODE(advance_rest)(const Task &t)
 {
+    if (fine_spark(t))
+    {
+        advance_rest64(t);
+        return;
+    }
     AdvanceState s;                                                     // (field by field: no initializer in flash)
     s.advance = byte_of(t, 34);
     s.slew = byte_of(t, 35);
@@ -997,7 +1202,7 @@ uint32_t UNIT_CODE(unit_fine_error_rpm)(uint32_t target, uint32_t p, uint32_t k)
 static uint32_t UNIT_CODE(idle_error)(const Task &t, uint32_t p)
 {
     if (wide(t))                                                        // format 18: the idle task's target
-        return fine_error_rpm(map_unit_own_on(MAP_UNIT_IDLE_TARGET, t.ram), p, speed_k(t)); // in rpm
+        return fine_error_rpm(t.own[MAP_UNIT_IDLE_TARGET - MAP_UNIT_SPEED], p, speed_k(t)); // in rpm
     return fine_error(byte_of(t, 18), p, speed_k(t));                   // IdleTarget
 }
 
@@ -1026,6 +1231,8 @@ static void UNIT_CODE(idle_spark)(const Task &t)
     if (bit(t, get(t, 11)) || bit(t, get(t, 12)) || bit(t, get(t, 13))) // the full-load switch, starting, cut
     {
         own(t, 20, 0);
+        if (fine_spark(t))
+            set_own16(t, MAP_UNIT_ADVANCE_DYN, 0);
         return;
     }
     int32_t sum = (int32_t)(int8_t)idle_error(t, ph << 8 | pl) + (int32_t)fall;  // ADD A,R3; JNB OV
@@ -1034,6 +1241,22 @@ static void UNIT_CODE(idle_spark)(const Task &t)
     if (lag)
         a = (0x100 - a) & 0xFF;                                         // CPL A; INC A
     uint32_t c = word(t, 4), product = at(t.rom, c + get(t, 6)) * a;    // x Cal_IdleSparkGain: B:A
+    if (fine_spark(t))                                                  // format 19: the term in 1/64 tooth,
+    {                                                                   //   the product / 16 half-teeth
+        int32_t size = (int32_t)product * 2, limit;                     //   exactly (no floor), its limits
+        if (!lag)                                                       //   words
+        {
+            int32_t room = word16(t, c + get(t, 7)) - own16(t, MAP_UNIT_ADVANCE);  // Cal_IdleSparkTop
+            int32_t most = word16(t, c + get(t, 8));                    // Cal_IdleSparkMax
+            limit = room < 0 ? 0 : most < room ? most : room;
+        }
+        else
+            limit = -word16(t, c + get(t, 9));                          // Cal_IdleSparkMin (negative)
+        int32_t v = limit < size ? limit : size;
+        set_own16(t, MAP_UNIT_ADVANCE_DYN, lag ? -v : v);
+        own(t, 20, half_teeth(lag ? -v : v));
+        return;
+    }
     uint32_t low = product & 0xFF, high = product >> 8, size;
     if (high >= 0x10)
         size = 0xFF;                                                    // Idle_Spark_Full
@@ -1136,10 +1359,16 @@ enum : uint32_t
 
 // A task as its description places it: the input count and the inputs, the output count and the
 // outputs, then the data.
-__force_inline Task task_of(const uint8_t *rom, uint8_t *ram, uint32_t description)
+// (A description past FC00h, which no image has, is read from there: each of its three parts is at most
+// 256 bytes on, so that none reaches past the 64 KiB.)
+__force_inline Task task_of(const uint8_t *rom, uint8_t *ram, uint32_t description, uint32_t *own = nullptr)
 {
-    uint32_t outputs = description + 1 + at(rom, description);
-    return Task{rom, ram, description + 1, outputs + 1, outputs + 1 + at(rom, outputs)};
+    description &= 0xFFFF;
+    if (description > 0xFC00)
+        description = 0xFC00;
+    uint32_t outputs = description + 1 + rom[description];
+    uint32_t data = outputs + 1 + rom[outputs];
+    return Task{rom, ram, rom + description + 1, rom + outputs + 1, rom + data, own != nullptr ? own : map_unit_owns_on(ram)};
 }
 
 // Tick_Due: the tick counter's remainder by the period at Constants + place (DIV AB's B; by 0, B
@@ -1175,7 +1404,8 @@ __force_inline void afm_rise(const Task &t, uint32_t *rise, uint32_t *step)
 
 // Spark_Dyn_Adj: under Cal_SparkDynLoad and Cal_SparkDynRpm, the speed over its filter Cal_SparkAccel,
 // under it Cal_SparkDecel, at it none; over the load or the speed none.
-static uint32_t UNIT_CODE(spark_dyn_adj)(const Task &t)
+// Format 19: Cal_SparkAccel and Cal_SparkDecel words in 1/64 tooth (signed).
+static int32_t UNIT_CODE(spark_dyn_adj)(const Task &t)
 {
     uint32_t c = word(t, TW_CONSTANTS), rpm = byte_of(t, TW_RPM), filt = byte_of(t, TW_RPM_FILT);
     if (at(t.rom, c + get(t, TW_DYN_LOAD)) < byte_of(t, TW_LOAD))       // CJNE A,Load; JC Spark_Dyn_Zero
@@ -1184,7 +1414,20 @@ static uint32_t UNIT_CODE(spark_dyn_adj)(const Task &t)
         return 0;
     if (filt == rpm)                                                    // CJNE A,Rpm,Spark_Dyn_Moved
         return 0;
-    return at(t.rom, c + get(t, filt < rpm ? TW_SPARK_ACCEL : TW_SPARK_DECEL));
+    uint32_t place = c + get(t, filt < rpm ? TW_SPARK_ACCEL : TW_SPARK_DECEL);
+    return fine_spark(t) ? word16(t, place) : (int32_t)at(t.rom, place);
+}
+
+// AdvanceDyn: a byte, or (format 19) the own value in 1/64 tooth with the byte its nearest half-teeth.
+static __force_inline void set_dyn(const Task &t, int32_t v)
+{
+    if (fine_spark(t))
+    {
+        set_own16(t, MAP_UNIT_ADVANCE_DYN, v);
+        own(t, TW_DYN, half_teeth(v));
+    }
+    else
+        own(t, TW_DYN, (uint32_t)v);
 }
 
 // Spark_Dyn: under Cal_SparkDynRpm and in step, the speed filter a count toward the speed byte on the
@@ -1220,7 +1463,7 @@ static bool UNIT_CODE(accel_tick)(const Task &t)
     {
         if (!bit(t, get(t, TW_START)) && rise >= get(t, TW_RISE_MIN))   // JB StartMode; CJNE A,#RISE_MIN; JC
             return true;                                                // SETB AccelRaise
-        own(t, TW_DYN, spark_dyn_adj(t));                               // Accel_Tick_Dyn
+        set_dyn(t, spark_dyn_adj(t));                                   // Accel_Tick_Dyn
     }
     own(t, TW_AFM_FILT, byte_of(t, TW_AFM_FILT) + step);                // MOV A,AfmFilt; ADD A,R2
     return false;
@@ -1236,9 +1479,14 @@ static bool UNIT_CODE(accel_raise)(const Task &t)
     afm_rise(t, &rise, &step);
     t.ram[3] = rise;                                                    // R3
     uint32_t tip = value(t, get(t, TW_TIP_IN));
-    if (tip >= 0x40)                                                    // CJNE A,#40h; JC; MOV A,#3Fh
-        tip = 0x3F;
-    own(t, TW_DYN, spark_dyn_adj(t) + ((0x100 - tip) & 0xFF));          // CPL A; INC A; ADD A,R1
+    if (fine_spark(t))                                                  // format 19: a word in 1/64 tooth,
+        set_dyn(t, spark_dyn_adj(t) - (int32_t)(tip >= 0x800 ? 0x7E0 : tip)); // 63 half-teeth at most
+    else
+    {
+        if (tip >= 0x40)                                                // CJNE A,#40h; JC; MOV A,#3Fh
+            tip = 0x3F;
+        own(t, TW_DYN, spark_dyn_adj(t) + ((0x100 - tip) & 0xFF));      // CPL A; INC A; ADD A,R1
+    }
     uint32_t part = value(t, get(t, TW_PULSE_RISE));
     own(t, TW_ACCEL_PART, part);
     own(t, TW_AFM_FILT, byte_of(t, TW_AFM_FILT) + step);                // Accel_Raise_Step
@@ -1266,7 +1514,7 @@ static void UNIT_CODE(load_tick)(const Task &t)
 {
     if (!bit(t, get(t, TW_START)))                                      // JNB StartMode,Load_Tick_Run
     {
-        load(task_of(t.rom, t.ram, word(t, TW_LOAD_TASK)));
+        load(task_of(t.rom, t.ram, word(t, TW_LOAD_TASK), t.own));
         return;
     }
     uint32_t start = at(t.rom, word(t, TW_CONSTANTS) + get(t, TW_START_LOAD));
@@ -1612,7 +1860,7 @@ static bool UNIT_CODE(idle_state)(const Task &t)
     }
     if (wide(t))                                                        // format 18: the target in rpm the
     {                                                                   //   P28's own, IdleTarget the byte
-        pair_set_own(MAP_UNIT_IDLE_TARGET, target, t.ram);              //   nearest it (the log's), at most
+        t.own[MAP_UNIT_IDLE_TARGET - MAP_UNIT_SPEED] = target & 0xFFFF; //   nearest it (the log's), at most
         uint32_t nearest = map_unit_divide32(target + 20, 40);          //   FFh
         own(t, ID_TARGET, nearest > 0xFF ? 0xFF : nearest);
     }
@@ -1821,9 +2069,10 @@ bool UNIT_CODE(unit_map_pulse)(uint32_t description, const uint8_t *rom, uint8_t
     return map_pulse(task_of(rom, ram, description), slot & 1, read & 0xFF, load);
 }
 
-bool UNIT_CODE(unit_task_part)(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram)
+bool UNIT_CODE(unit_task_part)(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram,
+                               uint32_t *own)
 {
-    Task t = task_of(rom, ram, description);
+    Task t = task_of(rom, ram, description, own);
     if (task == TASK_TICKWORK && part == TICK_SWITCHES)
         tick_switches(t);
     else if (task == TASK_LAMBDA && part == LAMBDA_OPEN)
@@ -1839,9 +2088,9 @@ bool UNIT_CODE(unit_task_part)(uint32_t task, uint32_t part, uint32_t descriptio
     return true;
 }
 
-bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram)
+bool UNIT_CODE(unit_task)(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t *own)
 {
-    Task t = task_of(rom, ram, description);
+    Task t = task_of(rom, ram, description, own);
     if (task == TASK_WARMUP)
         warm_up(t);
     else if (task == TASK_FUEL)

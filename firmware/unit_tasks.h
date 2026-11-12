@@ -100,11 +100,13 @@ enum : uint32_t
     PULSE_LATE = 0x10,  // made again after its reference: its load not written
 };
 
-// Works task out from its description; false if there is no such task.
-bool unit_task(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram);
+// Works task out from its description on ram, with own the own values that go with it (format 18; null:
+// map_unit_owns_on's); false if there is no such task.
+bool unit_task(uint32_t task, uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t *own = nullptr);
 
 // Format 11: a part of task 15, 16 or 17 (above); IDLE_STATE's answer, else true.
-bool unit_task_part(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram);
+bool unit_task_part(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram,
+                    uint32_t *own = nullptr);
 
 // Format 12: task 18 for one MAP read (slot 0 the first MAP read's, 1 the second's; read its byte) on
 // ram: its slot's filter stepped; true if a pulse is due, its loads then in *load: TH0's start for a
@@ -112,8 +114,9 @@ bool unit_task_part(uint32_t task, uint32_t part, uint32_t description, const ui
 bool unit_map_pulse(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
                     uint32_t *load);
 
-// From the map unit (map_unit.cpp): map id's value, its inputs as ram holds them.
-uint32_t unit_map_value(uint32_t id, const uint8_t *ram);
+// From the map unit (map_unit.cpp): map id's value, its inputs as ram and own (format 18: the own values
+// that go with ram, map_unit_owns_on's) hold them.
+uint32_t unit_map_value(uint32_t id, const uint8_t *ram, const uint32_t *own);
 
 // Format 18: Idle_Error with the target in rpm (pair_test's, for DME-Sim's twin).
 uint32_t unit_fine_error_rpm(uint32_t target, uint32_t p, uint32_t k);

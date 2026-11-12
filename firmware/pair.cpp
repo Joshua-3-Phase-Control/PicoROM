@@ -104,6 +104,7 @@ static constexpr uint32_t MAPS = 12;     // the format with the MAP pulse on the
 static constexpr uint32_t SLOW = 13;     // the format with the slow work on the unit (slot 5's channel)
 static constexpr uint32_t KNOCK = 16;    // the format with the KLR's knock line (its mark, its counts)
 static constexpr uint32_t WIDE = 18;     // the format with 16-bit inputs: the speed in rpm (step A)
+static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -156,7 +157,7 @@ struct Pair
     volatile uint32_t missed;       // 36: events whose tooth passed before the vector held them
     volatile uint32_t lost_sparks;  // 40: planned sparks that did not come (the coil started again)
     volatile uint32_t beat;         // 44: the heartbeat
-    uint32_t plan_adv;              // 48: the advance the planned spark takes (half-teeth, a byte)
+    int32_t plan_adv;               // 48: the advance the planned spark takes (1/64 tooth; a byte x 32)
     uint32_t sload, shi;            // 52, 56: the arm's operands as planned, or refreshed
     int32_t arm_at, charge_at;      // 60, 64: the counts of the arm's and the charge's teeth, or NONE
     int32_t spark_at;               // 68: the count of the planned spark's tooth (its fall), or NONE
@@ -275,22 +276,24 @@ static uint32_t UNIT_CODE(period_t64)(uint32_t p, uint32_t recip)
     return t32 << 1 & 0xFFFF;                                   // doubled
 }
 
-// Spark_Place_A: from the advance (half-teeth, signed) and SPARK_B, the spark's tooth and the time
-// from its fall (its fraction x T64 / 256).
-static Place UNIT_CODE(spark_place)(uint32_t advance, uint32_t spark_b, uint32_t t64)
+// Spark_Place_A: from the advance (1/64 tooth, signed; rom_lean's half-teeth x 32) and SPARK_B (1/256
+// tooth), the spark's place: SPARK_B a tooth on less 4 x the advance, its tooth (a signed byte, as
+// R1) and the time from its fall (its fraction x T64 / 256). At a byte's advance x 32 rom_lean's own.
+static Place UNIT_CODE(spark_place)(int32_t advance, uint32_t spark_b, uint32_t t64)
 {
-    advance &= 0xFF;
-    uint32_t r2 = advance >> 1 | (advance & 0x80);              // MOV C,ACC.7; RRC A: its whole teeth
-    uint32_t r0 = (advance & 1) << 7;                           // CLR A; RRC A: its half (C clear)
-    uint32_t a = (spark_b & 0xFF) - r0;                         // the place's fraction ...
-    uint32_t borrow = a >> 31;
-    r0 = a & 0xFF;
-    uint32_t r1 = ((spark_b >> 8 & 0xFF) + 1 - r2 - borrow) & 0xFF; // ... and its tooth
+    uint32_t place = (spark_b & 0xFFFF) + 0x100 - (uint32_t)advance * 4;
+    uint32_t r1 = place >> 8 & 0xFF, r0 = place & 0xFF;         // its tooth; its fraction
     uint32_t r4 = r0 * (t64 & 0xFF) >> 8;                       // MUL AB: B
     uint32_t x = r0 * (t64 >> 8 & 0xFF);
-    a = (x & 0xFF) + r4;
+    uint32_t a = (x & 0xFF) + r4;
     uint32_t r5 = ((x >> 8) + (a >> 8)) & 0xFF;
     return {(int32_t)(int8_t)r1, r5 << 8 | (a & 0xFF)};          // R3 = 0
+}
+
+// The advance of a byte (half-teeth, signed) in 1/64 tooth.
+static __force_inline int32_t of_byte(uint32_t advance)
+{
+    return (int32_t)(int8_t)(advance & 0xFF) * 32;
 }
 
 // Lead_Short: the time (R3:R5:R4) under ARM_MIN_S: the spark too soon after its arm's tooth.
@@ -399,7 +402,7 @@ static bool UNIT_CODE(barred)(int32_t tooth)
 // (Spark_Set's rule: a tooth late if the spark is in its tooth, two if in its tooth's last quarter;
 // one if in the last quarter of the tooth before): its tooth in late_tooth (NONE: none), the teeth in
 // late. The strobe, the table's last event, never moves.
-static Load UNIT_CODE(arm_plan)(uint32_t advance, int32_t *arm, int32_t *late_tooth, uint32_t *late)
+static Load UNIT_CODE(arm_plan)(int32_t advance, int32_t *arm, int32_t *late_tooth, uint32_t *late)
 {
     Place place = spark_place(advance, pair.spark_b, pair.t64);
     int32_t spark = place.tooth;
@@ -410,7 +413,7 @@ static Load UNIT_CODE(arm_plan)(uint32_t advance, int32_t *arm, int32_t *late_to
     *arm = place.tooth;
     *late_tooth = NONE;
     *late = 0;
-    bool last_quarter = ((pair.spark_b & 0xFF) ^ (advance & 1) << 7) >= 0xC0;
+    bool last_quarter = ((pair.spark_b - (uint32_t)advance * 4) & 0xFF) >= 0xC0;  // the place's fraction
     for (int32_t k = 0; k <= 1; k++)                            // a read on the spark's tooth, or the next
     {
         uint32_t event = event_on(in_firing(spark + k));
@@ -429,7 +432,7 @@ static Load UNIT_CODE(arm_plan)(uint32_t advance, int32_t *arm, int32_t *late_to
 
 // The charge for the spark at the advance (Dwell_Plan), whose arm is on tooth arm: DJ teeth before
 // the spark's tooth (DJ kept), at least FLOOR_TEETH, before the arm, earlier as the rules say.
-static int32_t UNIT_CODE(charge_plan)(uint32_t advance, int32_t arm, uint32_t charge)
+static int32_t UNIT_CODE(charge_plan)(int32_t advance, int32_t arm, uint32_t charge)
 {
     Place place = spark_place(advance, pair.spark_b, pair.t64);
     pair.dj = dwell_teeth(place, pair.dj, pair.t64, pair.p, pair.margin, charge);
@@ -833,6 +836,7 @@ struct Control
     uint32_t fire_l, fire_h, advance_at, dyn_at, inj_l, inj_h, dead_at, flags_at, boost_at;
     uint32_t speed_task, advance_task, rest_task, pulse_task, again_task, speed_k;
     bool wide;                                                  // format 18: the speed in rpm too
+    bool spark;                                                 // format 19: the spark in 1/64 tooth
     uint32_t tick_task, load_at, accel_at, after_at, idle_bit, full_bit, afm_filt_at, afm_at; // format 10
     uint32_t start_task, lambda_task, idle_task, tick_at, lam_at, high_l, high_h; // format 11
     uint32_t stream_ticks, stream_list;                         //   the log's: Cal_StreamTicks, its list
@@ -907,24 +911,23 @@ static Pings pings UNIT_DATA = {};
 alignas(4) static uint8_t work[0x80] UNIT_DATA = {};        // an L1 job's copy of the 8051's RAM
 alignas(4) static uint8_t before[0x80] UNIT_DATA = {};      // ... as it took it
 alignas(4) static uint8_t tick_work[0x80] UNIT_DATA = {};   // L2's: the tick's, then the frame's
-static uint32_t tick_own_taken[4] UNIT_DATA = {}; // format 18: the own values as the tick took them
+static uint32_t tick_own_taken[MAP_UNIT_OWNS] UNIT_DATA = {}, work_own_taken[MAP_UNIT_OWNS] UNIT_DATA = {};
 
-// Format 18: the unit's own values into the tick's copy (the interrupts held off, as its RAM's copy), and
-// back where the tick changed them (at its commit, the events held).
-static void UNIT_CODE(take_own)()
+// Format 18: the copy of the own values that goes with a level's copy of the RAM (the tick's, an L1
+// job's), and the values as it took them; null for another.
+static __force_inline uint32_t *own_copy(const uint8_t *ram, uint32_t **taken)
 {
-    __asm volatile("cpsid i" ::: "memory");
-    map_unit_owns.tick_ram = tick_work;
-    for (uint32_t i = 0; i < 4; i++)
-        map_unit_owns.tick[i] = tick_own_taken[i] = map_unit_owns.own[i];
-    __asm volatile("cpsie i" ::: "memory");
-}
-
-static void UNIT_CODE(give_own)()
-{
-    for (uint32_t i = 0; i < 4; i++)
-        if (map_unit_owns.tick[i] != tick_own_taken[i])
-            map_unit_owns.own[i] = map_unit_owns.tick[i];
+    if (ram == tick_work)
+    {
+        *taken = tick_own_taken;
+        return map_unit_owns.tick;
+    }
+    if (ram == work)
+    {
+        *taken = work_own_taken;
+        return map_unit_owns.work;
+    }
+    return nullptr;
 }
 alignas(4) static uint8_t tick_before[0x80] UNIT_DATA = {};
 
@@ -1042,12 +1045,34 @@ static __force_inline void copy_words(uint32_t *to, const uint32_t *from)
                    : "r3", "r4", "r5", "r6", "cc", "memory");
 }
 
+// The own values (MAP_UNIT_OWNS: 8 words) from `from` to `to` and `also`, four a step.
+static __force_inline void copy_owns(uint32_t *to, uint32_t *also, const uint32_t *from)
+{
+    static_assert(MAP_UNIT_OWNS == 8, "copy_owns copies 8 words");
+    __asm volatile("ldmia %[f]!, {r3, r4, r5, r6}\n\t"
+                   "stmia %[t]!, {r3, r4, r5, r6}\n\t"
+                   "stmia %[a]!, {r3, r4, r5, r6}\n\t"
+                   "ldmia %[f]!, {r3, r4, r5, r6}\n\t"
+                   "stmia %[t]!, {r3, r4, r5, r6}\n\t"
+                   "stmia %[a]!, {r3, r4, r5, r6}"
+                   : [f] "+l"(from), [t] "+l"(to), [a] "+l"(also)
+                   :
+                   : "r3", "r4", "r5", "r6", "memory");
+}
+
 // The unit's copy of the 8051's RAM into `into` in one go (the interrupts held off), the snoop's bytes
 // put over it, as a task's snooped inputs are; `kept` (unless null) keeps it as taken.
 static void UNIT_CODE(take_inputs)(uint8_t *into, uint8_t *kept)
 {
+    uint32_t *taken, *own = own_copy(into, &taken);
     __asm volatile("cpsid i" ::: "memory");
     copy_words((uint32_t *)into, map_unit_ram_words());
+    if (own != nullptr)                                         // format 18: the own values with it
+    {
+        map_unit_owns.tick_ram = tick_work;
+        map_unit_owns.work_ram = work;
+        copy_owns(own, taken, map_unit_owns.own);
+    }
     __asm volatile("cpsie i" ::: "memory");
     map_unit_snooped_over(into);
     if (kept != nullptr)
@@ -1077,7 +1102,7 @@ static bool UNIT_CODE(give_back)(uint32_t generation, const uint8_t *job, const 
     const uint32_t *now = (const uint32_t *)job, *was = (const uint32_t *)kept;
     uint8_t changed[0x20];
     uint32_t changes = changed_words(changed, now, was);
-    uint32_t *ram = map_unit_ram_words();
+    uint32_t *ram = map_unit_ram_words(), *taken, *own = own_copy(job, &taken);
     bool given = false;
     __asm volatile("cpsid i" ::: "memory");
     if (generation == control.generation)
@@ -1087,6 +1112,10 @@ static bool UNIT_CODE(give_back)(uint32_t generation, const uint8_t *job, const 
             uint32_t i = changed[k], bits = now[i] ^ was[i];
             ram[i] = (ram[i] & ~bits) | (now[i] & bits);
         }
+        if (own != nullptr)                                     // format 18: the own values it changed
+            for (uint32_t i = 0; i < MAP_UNIT_OWNS; i++)
+                if (own[i] != taken[i])
+                    map_unit_owns.own[i] = own[i];
         given = true;
     }
     __asm volatile("cpsie i" ::: "memory");
@@ -1192,7 +1221,7 @@ static __force_inline uint32_t speed_rpm(uint32_t length, uint32_t speed_k)
 static void UNIT_CODE(firing_length)(uint32_t length)
 {
     if (control.wide && length != 0)
-        map_unit_set_own(MAP_UNIT_SPEED, speed_rpm(length > 0xFFFFFF ? 0xFFFFFF : length, control.speed_k));
+        pair_set_own(MAP_UNIT_SPEED, speed_rpm(length > 0xFFFFFF ? 0xFFFFFF : length, control.speed_k), work);
     if (length <= 0xFFFF)
     {
         work_byte(control.fire_l) = length & 0xFF;
@@ -1211,15 +1240,21 @@ static void UNIT_CODE(firing_length)(uint32_t length)
     work_byte(control.fire_l) = work_byte(control.fire_h) = 0xFF;
 }
 
-// A task, or a part of one, on a job's copy of the RAM (L1's work unless said).
+// A task, or a part of one, on a job's copy of the RAM (L1's work unless said: else the tick's), with the
+// own values that go with it.
+static __force_inline uint32_t *owns_with(const uint8_t *ram)
+{
+    return ram == work ? map_unit_owns.work : map_unit_owns.tick;
+}
+
 static __force_inline void run_task(uint32_t task, uint32_t description, uint8_t *ram = work)
 {
-    unit_task(task, description, (const uint8_t *)pair.rom, ram);
+    unit_task(task, description, (const uint8_t *)pair.rom, ram, owns_with(ram));
 }
 
 static __force_inline bool run_part(uint32_t task, uint32_t part, uint32_t description, uint8_t *ram = work)
 {
-    return unit_task_part(task, part, description, (const uint8_t *)pair.rom, ram);
+    return unit_task_part(task, part, description, (const uint8_t *)pair.rom, ram, owns_with(ram));
 }
 
 // An 8051 bit set or cleared in L1's copy of the RAM.
@@ -1252,6 +1287,12 @@ static void UNIT_CODE(run_stages)(bool pulse)
     run_task(TASK_SPEED, control.speed_task);
     run_task(TASK_ADVANCE, control.advance_task);
     run_task(TASK_REST, control.rest_task);
+    if (control.spark)                                                  // format 19: in 1/64 tooth, held
+    {
+        uint32_t *own = map_unit_owns.work;                             // (the job's copy's)
+        int32_t sum = (int16_t)own[MAP_UNIT_ADVANCE - MAP_UNIT_SPEED] + (int16_t)own[MAP_UNIT_ADVANCE_DYN - MAP_UNIT_SPEED];
+        own[MAP_UNIT_ADV_PLAN - MAP_UNIT_SPEED] = (uint32_t)(sum > 32767 ? 32767 : sum < -32768 ? -32768 : sum) & 0xFFFF;
+    }
     work_byte(pair.adv_at) = (work_byte(control.advance_at) + work_byte(control.dyn_at)) & 0xFF;
     if (pulse)
         make_pulse(false);
@@ -1327,11 +1368,13 @@ uint32_t UNIT_CODE(pair_log_read)(uint32_t *from, uint8_t *bytes, uint32_t most)
 // and the sum of the count and those bytes. Made after the tick's commit and the pulse made again from
 // the unit's copy as it is then (L2's copy again, the snoop's bytes over it), so the bus level's own
 // bits (NotSynced, ToothFault, the phase, RefMissing) are as it has them.
-// Format 18: a byte of the P28's own 16-bit values, as the log's list names them from 80h: 80h and 81h the
-// speed in rpm's high and low bytes, 82h and 83h the load's, 84h and 85h the idle target's.
+// Format 18: a byte of the P28's own 16-bit values, as the log's list names them from 80h, each value's
+// high byte then its low (map_unit.h's order): 80h and 81h the speed in rpm, 82h and 83h the load, 84h
+// and 85h the idle target; format 19, 86h on the spark's (8Ah and 8Bh the advance, 8Ch and 8Dh its
+// adjustment).
 static __force_inline uint32_t own_byte(uint32_t address)
 {
-    uint32_t value = map_unit_own(0x80 + ((address - 0x80) >> 1 & 3));
+    uint32_t value = map_unit_own(0x80 + ((address - 0x80) >> 1 & (MAP_UNIT_OWNS - 1)));
     return (address & 1 ? value : value >> 8) & 0xFF;
 }
 
@@ -1381,7 +1424,6 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
         uint32_t jobs = control.shared;
         uint8_t *ram = tick_work;
         take_inputs(ram, tick_before);
-        take_own();
         bool starting = copy_bit(ram, pair.start_bit), asked = control.duty_due, due = false, duty = false;
         if (ping.gap != 0)
         {
@@ -1430,7 +1472,6 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
             levels.tick_dropped++;
             return false;
         }
-        give_own();
         if (over)
             pair_start_over();
         if (asked)
@@ -1462,8 +1503,9 @@ bool UNIT_CODE(pair_on_tick_copy)(const uint8_t *ram)
 
 void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 {
-    if (ram == tick_work)
-        map_unit_owns.tick[(input - MAP_UNIT_SPEED) & 3] = value & 0xFFFF;
+    uint32_t *taken, *own = own_copy(ram, &taken);
+    if (own != nullptr)
+        own[(input - MAP_UNIT_SPEED) & (MAP_UNIT_OWNS - 1)] = value & 0xFFFF;
     else
         map_unit_set_own(input, value);
 }
@@ -1572,7 +1614,7 @@ static void UNIT_CODE(run_stop)(const Job &job)
     work[0x20 + (pair.decay_bit >> 3 & 0x0F)] &= ~(1u << (pair.decay_bit & 7)); // CLR CrankDecay
     work_byte(control.fire_l) = work_byte(control.fire_h) = 0xFF;       // no firing: the count skipped
     if (control.wide)                                                   // format 18: no firing's length, the
-        map_unit_set_own(MAP_UNIT_SPEED, 40 * work_byte(pair.rpm_at));  //   speed in rpm the byte's
+        pair_set_own(MAP_UNIT_SPEED, 40 * work_byte(pair.rpm_at), work); //   speed in rpm the byte's
     run_stages(true);
     if (pair.whole)                                                     // format 11: InjHold cleared (the
     {                                                                   //   8051's stop); the valve's duty
@@ -1984,7 +2026,8 @@ static void UNIT_CODE(plan)(int32_t base)
 {
     int32_t arm, late_tooth;
     uint32_t late;
-    pair.plan_adv = map_unit_ram(pair.adv_at) & 0xFF;
+    pair.plan_adv = control.spark ? (int32_t)(int16_t)map_unit_own(MAP_UNIT_ADV_PLAN)   // format 19
+                                  : of_byte(map_unit_ram(pair.adv_at));
     Load load = arm_plan(pair.plan_adv, &arm, &late_tooth, &late);
     pair.sload = load.start;
     pair.shi = load.overflows;
@@ -2334,6 +2377,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
     }
     control.pipelined = false;
     control.wide = false;
+    control.spark = false;
     control.in = control.out = control.generation = 0;
     control.gap = control.side = control.count = control.turn_pulses = control.all_pulses = 0;
     control.ticks = 0;
@@ -2392,6 +2436,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
                      && (!pair.whole || (control.start_task != 0 && control.lambda_task != 0 && control.idle_task != 0));
         control.pipelined = copies && tasks;
         control.wide = at(MARK + 4) >= WIDE;
+        control.spark = at(MARK + 4) >= SPARK;
         if (control.wide)                                       // format 18: the pipeline's rates in rpm
         {                                                       //   (words after format 16's knock mark)
             control.pipe_rpm = word(u + 137);
@@ -2486,11 +2531,17 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[0] = period_t64(in[0], in[1]);
     else if (routine == 24)                                     // format 18: the speed in rpm: the length, SPEED_K
         out[0] = speed_rpm(in[0], in[1]);
+    else if (routine == 26)                                     // format 19: Spark_Place at the advance in
+    {                                                           //   1/64 tooth, SPARK_B, T64
+        Place place = spark_place((int16_t)in[0], in[1], in[2]);
+        out[0] = (uint32_t)place.tooth & 0xFF;
+        out[1] = place.time;
+    }
     else if (routine == 25)                                     // format 18: the idle's fine error in rpm: the
         out[0] = unit_fine_error_rpm(in[0], in[1], in[2]);      //   target (rpm), the firing's length, SPEED_K
     else if (routine == 1)                                      // Spark_Place: advance, SPARK_B, T64
     {
-        Place place = spark_place(in[0], in[1], in[2]);
+        Place place = spark_place(of_byte(in[0]), in[1], in[2]);
         out[0] = (uint32_t)place.tooth & 0xFF;
         out[1] = place.time;
     }
@@ -2502,7 +2553,7 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     }
     else if (routine == 3)                                      // Dwell_Plan's DJ: advance, SPARK_B, T64,
     {                                                           //   DJ, P, MARGIN, the charge's time
-        Place place = spark_place(in[0], in[1], in[2]);
+        Place place = spark_place(of_byte(in[0]), in[1], in[2]);
         out[0] = dwell_teeth(place, in[3], in[2], in[4], in[5], in[6]);
     }
     else if (routine == 4)                                      // Main_Capture's T64: P, the last P,
@@ -2511,24 +2562,24 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[0] = capture_t64(in[0], &old, in[2] != 0, in[3]);
         out[1] = old;
     }
-    else if (routine == 5)                                      // the arm's plan with the image's table:
-    {                                                           //   advance, T64
+    else if (routine == 5 || routine == 27)                     // the arm's plan with the image's table:
+    {                                                           //   advance (27: in 1/64 tooth), T64
         pair.t64 = in[1];
         int32_t arm, late_tooth;
         uint32_t late;
-        Load load = arm_plan(in[0], &arm, &late_tooth, &late);
+        Load load = arm_plan(routine == 27 ? (int16_t)in[0] : of_byte(in[0]), &arm, &late_tooth, &late);
         out[0] = (uint32_t)arm & 0xFF;
         out[1] = load.start;
         out[2] = load.overflows;
         out[3] = late_tooth == NONE ? 0xFF : (uint32_t)late_tooth & 0xFF;
         out[4] = late;
     }
-    else if (routine == 6)                                      // the charge's plan with the image's table:
+    else if (routine == 6 || routine == 28)                     // the charge's plan with the image's table:
     {                                                           //   advance, T64, DJ, P, the charge's
         pair.t64 = in[1];                                       //   time, the arm's tooth
         pair.dj = in[2];
         pair.p = in[3];
-        out[0] = (uint32_t)charge_plan(in[0], (int32_t)(int8_t)in[5], in[4]) & 0xFF;
+        out[0] = (uint32_t)charge_plan(routine == 28 ? (int16_t)in[0] : of_byte(in[0]), (int32_t)(int8_t)in[5], in[4]) & 0xFF;
         out[1] = pair.dj;
     }
     else if (routine >= 7 && routine <= 18)                     // format 9: a pipeline's job at once on the

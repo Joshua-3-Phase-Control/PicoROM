@@ -37,8 +37,8 @@ void pair_start_over();
 // the task itself.
 bool pair_on_tick_copy(const uint8_t *ram);
 
-// Format 18: one of the P28's own 16-bit values (map_unit.h's) set by a task working on ram: on the tick's
-// copy of the RAM the tick's copy of it, given back at its commit (an L1 job breaking in sees the unit's
+// Format 18: one of the P28's own 16-bit values (map_unit.h's) set by a task working on ram: on a level's
+// copy of the RAM that level's copy of it, given back at its commit (a level breaking in sees the unit's
 // own, as with the RAM's bytes; map_unit_own_on reads them); else the unit's.
 void pair_set_own(uint32_t input, uint32_t value, const uint8_t *ram);
 

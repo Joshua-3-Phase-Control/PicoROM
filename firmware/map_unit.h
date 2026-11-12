@@ -54,28 +54,40 @@ uint32_t *map_unit_ram_words();
 void map_unit_snooped_over(uint8_t *bytes);
 uint32_t map_unit_task_at(uint32_t task);
 
-// Format 18: the P28's own 16-bit values, which axes from 80h on read (80h: the speed in rpm; 81h: the
-// load; 82h: the idle target in rpm): set by the code that makes them, read by any.
+// Format 18: the P28's own 16-bit values, which axes from 80h on read: set by the code that makes them,
+// read by any. Format 19 (step B) adds the spark's, in 1/64 tooth, signed.
 void map_unit_set_own(uint32_t input, uint32_t value);
 uint32_t map_unit_own(uint32_t input);
+static constexpr uint32_t MAP_UNIT_OWNS = 8;
 static constexpr uint32_t MAP_UNIT_SPEED = 0x80;       // the speed in rpm
 static constexpr uint32_t MAP_UNIT_IDLE_TARGET = 0x82; // the idle target in rpm (task 17's, task 14 reads it)
+static constexpr uint32_t MAP_UNIT_IGN_SLOW = 0x83;    // the advance's slow sum (the slow work's)
+static constexpr uint32_t MAP_UNIT_HANDOVER = 0x84;    // the advance's sum (task 6's, task 11 takes it)
+static constexpr uint32_t MAP_UNIT_ADVANCE = 0x85;     // the advance (task 11's)
+static constexpr uint32_t MAP_UNIT_ADVANCE_DYN = 0x86; // its adjustment (the idle spark, the dynamic spark)
+static constexpr uint32_t MAP_UNIT_ADV_PLAN = 0x87;    // the plans' advance: the two summed
 
-// The own values, and the tick's copy of them (pair.cpp's: taken with its copy of the RAM, given back at
-// its commit), so that a task reads them as fast as its RAM's bytes.
+// The own values, and L2's and L1's copies of them (pair.cpp's: taken with a level's copy of the RAM,
+// given back at its commit), so that a task reads them as fast as its RAM's bytes.
 struct MapUnitOwn
 {
-    uint32_t own[4];         // 80h the speed in rpm, 81h the load, 82h the idle target in rpm
-    const uint8_t *tick_ram; // the tick's copy of the RAM, whose tasks read ...
-    uint32_t tick[4];        // ... the tick's copy of the values
+    uint32_t own[MAP_UNIT_OWNS];
+    const uint8_t *tick_ram, *work_ram; // the tick's copy of the RAM and an L1 job's, whose tasks read ...
+    uint32_t tick[MAP_UNIT_OWNS], work[MAP_UNIT_OWNS]; // ... these copies of the values
 };
 extern MapUnitOwn map_unit_owns;
 
-// The own value input (80h on) as a task working on ram has it: on the tick's copy, the tick's.
+// The own values as a task working on ram has them: on a level's copy, that level's; else the unit's.
+static inline uint32_t *map_unit_owns_on(const uint8_t *ram)
+{
+    return ram == map_unit_owns.tick_ram ? map_unit_owns.tick
+           : ram == map_unit_owns.work_ram ? map_unit_owns.work : map_unit_owns.own;
+}
+
+// The own value input (80h on) as a task working on ram has it.
 static inline uint32_t map_unit_own_on(uint32_t input, const uint8_t *ram)
 {
-    uint32_t i = (input - MAP_UNIT_SPEED) & 3;
-    return ram == map_unit_owns.tick_ram ? map_unit_owns.tick[i] : map_unit_owns.own[i];
+    return map_unit_owns_on(ram)[(input - MAP_UNIT_SPEED) & (MAP_UNIT_OWNS - 1)];
 }
 
 // x / d (d not 0) by the SIO's divider, its state as it was for any code it broke in on.

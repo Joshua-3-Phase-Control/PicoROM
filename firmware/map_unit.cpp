@@ -256,22 +256,25 @@ static uint32_t UNIT_CODE(factor_map_lookup)(uint32_t map, uint32_t axes, uint32
 // has 40h beside its axes has its values 16 bits; an axis whose input is 80h or on reads the P28's own
 // 16-bit input of that number (80h: the speed in rpm; 81h: the load, step C) and has its points 16
 // bits, rising; both high byte first. The arithmetic is format 17's; a division too big for the
-// reciprocals goes to the SIO's divider. The 8-bit maps keep format 17's lookup.
+// reciprocals goes to the SIO's divider. The 8-bit maps keep format 17's lookup. Format 19: 20h beside
+// 40h makes the words signed (the spark's maps, step B).
 
 static constexpr uint32_t WIDE = 18;          // the format with 16-bit values and inputs
 static constexpr uint32_t WIDE_VALUES = 0x40; // beside an index entry's axes: the map's values 16 bits
 static constexpr uint32_t OWN = 0x80;         // an axis's input from here on: the P28's own, 16 bits
+static constexpr uint32_t SIGNED = 19;        // the format with signed 16-bit values (step B: the spark)
+static constexpr uint32_t SIGNED_VALUES = 0x20; // beside 40h: the words signed (two's complement)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
 void UNIT_CODE(map_unit_set_own)(uint32_t input, uint32_t value)
 {
-    map_unit_owns.own[(input - OWN) & 3] = value & 0xFFFF;
+    map_unit_owns.own[(input - OWN) & (MAP_UNIT_OWNS - 1)] = value & 0xFFFF;
 }
 
 uint32_t UNIT_CODE(map_unit_own)(uint32_t input)
 {
-    return map_unit_owns.own[(input - OWN) & 3];
+    return map_unit_owns.own[(input - OWN) & (MAP_UNIT_OWNS - 1)];
 }
 
 // x / d (d not 0) and its remainder by the SIO's divider. A level of the unit breaks in on any code of
@@ -405,8 +408,9 @@ static __force_inline uint32_t wide_interpolate(uint32_t from, uint32_t to, Wide
     return (to >= from ? from + q : from - q) & mask;
 }
 
-// The row whose cells (bytes or words) start at cells, at the column's place.
-static __force_inline uint32_t wide_row(uint32_t cells, Wide place, bool words)
+// The row whose cells (bytes or words) start at cells, at the column's place; the words' top bits
+// flipped by flip (8000h for signed words: offset binary, whose unsigned order is the signed order).
+static __force_inline uint32_t wide_row(uint32_t cells, Wide place, bool words, uint32_t flip)
 {
     const uint8_t *rom = unit.rom;
     if (!words)
@@ -414,27 +418,29 @@ static __force_inline uint32_t wide_row(uint32_t cells, Wide place, bool words)
         uint32_t a = (cells + place.index) & 0xFFFF, from = rom[a];
         return place.width == 0 ? from : wide_interpolate(from, rom[(a + 1) & 0xFFFF], place, 0xFF);
     }
-    uint32_t a = (cells + 2 * place.index) & 0xFFFF, from = rom[a] << 8 | rom[(a + 1) & 0xFFFF];
+    uint32_t a = (cells + 2 * place.index) & 0xFFFF, from = (rom[a] << 8 | rom[(a + 1) & 0xFFFF]) ^ flip;
     if (place.width == 0)
         return from;
-    return wide_interpolate(from, rom[(a + 2) & 0xFFFF] << 8 | rom[(a + 3) & 0xFFFF], place, 0xFFFF);
+    return wide_interpolate(from, (rom[(a + 2) & 0xFFFF] << 8 | rom[(a + 3) & 0xFFFF]) ^ flip, place, 0xFFFF);
 }
 
+// Format 18's lookup; from format 19 signed words interpolated in offset binary, flipped back at the end.
 static uint32_t UNIT_CODE(wide_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
 {
     bool words = axes & WIDE_VALUES;
+    uint32_t flip = words && (axes & SIGNED_VALUES) ? 0x8000 : 0;
     Wide row = wide_place(map, first);
     uint32_t after = wide_after(map);
     if ((axes & 3) < 2)
-        return wide_row(after, row, words);
+        return wide_row(after, row, words, flip) ^ flip;
     uint32_t columns = at(after + 1), width = words ? 2 : 1;
     Wide column = wide_place(after, second);
     uint32_t cells = (wide_after(after) + row.index * columns * width) & 0xFFFF;
-    uint32_t here = wide_row(cells, column, words);
+    uint32_t here = wide_row(cells, column, words, flip);
     if (row.width == 0)
-        return here;
-    return wide_interpolate(here, wide_row((cells + columns * width) & 0xFFFF, column, words), row,
-                            words ? 0xFFFF : 0xFF);
+        return here ^ flip;
+    return wide_interpolate(here, wide_row((cells + columns * width) & 0xFFFF, column, words, flip), row,
+                            words ? 0xFFFF : 0xFF) ^ flip;
 }
 
 // A map needs the wide lookup: its values 16 bits, or an axis on one of the P28's own inputs.
@@ -458,23 +464,34 @@ static uint32_t UNIT_CODE(points_lookup)(uint32_t map, uint32_t axes, uint32_t f
     return interpolate(here, points_row((cells + columns) & 0xFFFF, column), row);
 }
 
-// Format 18: a map on the P28's own input alone, its values bytes (the commonest wide map: one by the
-// speed in rpm).
-static uint32_t UNIT_CODE(own_one)(uint32_t map, uint32_t input)
+// Format 18: a map on the P28's own input alone (the commonest wide map: one by the speed in rpm), its
+// values bytes or words (format 19: signed with 20h, flipped as wide_lookup's).
+static uint32_t UNIT_CODE(own_one)(uint32_t map, uint32_t axes, uint32_t input)
 {
     Wide row = own_place(map, input);
-    uint32_t a = (map + 2 + 2 * at(map + 1) + row.index) & 0xFFFF, from = at(a);
-    return row.width == 0 ? from : wide_interpolate(from, at(a + 1), row, 0xFF);
+    uint32_t values = (map + 2 + 2 * at(map + 1)) & 0xFFFF;
+    if (!(axes & WIDE_VALUES))
+        return wide_row(values, row, false, 0);
+    uint32_t flip = axes & SIGNED_VALUES ? 0x8000 : 0;
+    return wide_row(values, row, true, flip) ^ flip;
 }
 
-// Format 18's lookup of a map whose inputs are known: one alone on the P28's own input, another wide
-// one, or format 17's.
+// Format 18: a map on an 8051 byte alone, its values words (format 19: signed with 20h).
+static uint32_t UNIT_CODE(byte_one)(uint32_t map, uint32_t axes, uint32_t input)
+{
+    Wide row = wide_place(map, input);
+    uint32_t flip = axes & SIGNED_VALUES ? 0x8000 : 0;
+    return wide_row((map + 2 + at(map + 1)) & 0xFFFF, row, true, flip) ^ flip;
+}
+
+// Format 18's lookup of a map whose inputs are known: one on one axis (the P28's own input, its values
+// bytes or words; an 8051 byte, words), another wide one, or format 17's.
 static __force_inline uint32_t wide_or_points(uint32_t map, uint32_t axes, uint32_t first, uint32_t second, bool wide)
 {
     if (!wide)
         return points_lookup(map, axes, first, second);
-    if (axes == 1 && (at(map) & OWN))
-        return own_one(map, first);
+    if ((axes & 3) < 2)
+        return at(map) & OWN ? own_one(map, axes, first) : byte_one(map, axes, first);
     return wide_lookup(map, axes, first, second);
 }
 
@@ -484,6 +501,8 @@ static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t
     uint32_t format = at(MARK + 4);
     if (format < POINTS)
         return factor_map_lookup(map, axes, first, second);
+    if (format < SIGNED || !(axes & WIDE_VALUES))
+        axes &= ~SIGNED_VALUES;                                 // (signed: format 19's words alone)
     return wide_or_points(map, axes, first, second, format >= WIDE && wide_map(map, axes));
 }
 
@@ -504,16 +523,18 @@ static __force_inline uint32_t entry_of(uint32_t id)
     return (at(MARK + 7) << 8 | at(MARK + 8)) + 3 * id;
 }
 
-uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes)
+uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes, const uint32_t *own)
 {
     uint32_t entry = entry_of(id), map = at(entry) << 8 | at(entry + 1), axes = at(entry + 2), input = at(map);
     if (at(MARK + 4) < WIDE)
         return map_unit_lookup(map, axes, bytes[input & 0x7F], (axes & 3) > 1 ? bytes[at(second_axis(map)) & 0x7F] : 0);
-    uint32_t first = input & OWN ? map_unit_own_on(input, bytes) : bytes[input & 0x7F];   // format 18: the
+    if (at(MARK + 4) < SIGNED || !(axes & WIDE_VALUES))
+        axes &= ~SIGNED_VALUES;
+    uint32_t first = input & OWN ? own[(input - OWN) & (MAP_UNIT_OWNS - 1)] : bytes[input & 0x7F]; // format 18:
     if ((axes & 3) < 2)                                                                 //   inputs and the
         return wide_or_points(map, axes, first, 0, (axes & WIDE_VALUES) || (input & OWN)); // lookup, once
     uint32_t next = at(wide_after(map));
-    uint32_t second = next & OWN ? map_unit_own_on(next, bytes) : bytes[next & 0x7F];
+    uint32_t second = next & OWN ? own[(next - OWN) & (MAP_UNIT_OWNS - 1)] : bytes[next & 0x7F];
     return wide_or_points(map, axes, first, second, (axes & WIDE_VALUES) || ((input | next) & OWN));
 }
 
@@ -854,7 +875,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > WIDE)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > SIGNED)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

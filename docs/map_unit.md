@@ -373,6 +373,29 @@ Format 18 (DME-Sim's docs/Paired_Precision.md, step A, the owner's of 2026-11-11
   415 on two (the 951's; the 944's 387), 757 at most. L1's longest job in the car to 7,000 rpm 28.7
   us (format 17's 27.7).
 
+Format 19 (DME-Sim's docs/Paired_Precision.md, step B, the owner's of 2026-11-11) puts the spark in
+1/64 tooth:
+- **Signed words:** 20h beside 40h in a map's index entry makes its words signed (two's complement).
+  The lookup interpolates them in offset binary (8000h flipped), whose unsigned order is the signed
+  one, and flips the value back; 20h means nothing beside bytes or before format 19. A map on one
+  axis has a path of its own for words, on the P28's own input (`own_one`) or an 8051 byte
+  (`byte_one`).
+- **The own values** 83h to 87h, signed, in 1/64 tooth: the advance's slow sum (task 2), its sum
+  (task 4), the advance (task 11: its target the sum with the offset by speed, held within
+  Cal_AdvanceMax and the word after it, Cal_AdvanceMin; no halving), its adjustment (the idle spark,
+  exact; the dynamic spark; the tip-in retard) and the plans' advance (their sum at the stages'
+  end). The bytes Advance and AdvanceDyn are their nearest half-teeth (the idle valve reads
+  AdvanceDyn). The constants in quarter- or half-teeth are signed words; a slew's firings a byte,
+  its step a word after it. A task is given the own values of its copy of the RAM.
+- **The plan:** `spark_place` at the advance in 1/64 tooth (pair_test 26): the place SPARK_B a tooth
+  on less 4 x the advance; a byte's advance x 32 is rom_lean's Spark_Place_A.
+- **The log:** list addresses 80h to 8Fh are the own values' bytes, high byte first.
+- **Its time:** a task's description is read through pointers (`task_of` keeps it within the 64
+  KiB, so a byte of it needs no mask) and the own values are copied four words a step. L1's longest
+  job in the car to 7,000 rpm 29.1 us (format 18's 28.7); in DME-Sim, rom_pair's maps of build 7,
+  their words looked up as words (build 6's figures above read them as bytes): 197 cycles a lookup
+  on one axis on average, 375 at most; 425 on two (the 951's; the 944's 397), 801 at most.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
