@@ -168,6 +168,199 @@ __force_inline uint32_t word_at(const Task &t, uint32_t address)
     return at(t.rom, address) << 8 | at(t.rom, address + 1);
 }
 
+// Format 21 (step D: the owner's choices of 2026-11-12): the fuel's factors words, 8000h a whole fuel
+// (the bytes' /128 x 256), their product in 16-bit mantissas with exponents (F16, m x 2^(e - 15), m
+// 8000h to FFFFh or 0: none), on the air's base: the air of a firing x K (fuel_k) x the trim x the
+// intake air's; the enrichments the P28's own words (map_unit.h's 88h to 8Bh), their bytes beside them
+// the nearest counts (/128 of the fuel), fading in shares of a count each tick.
+constexpr uint32_t FUEL_FORMAT = 21;
+
+__force_inline bool fine_fuel(const Task &t)
+{
+    return at(t.rom, 0x2004) >= FUEL_FORMAT;
+}
+
+struct F16
+{
+    uint32_t m;
+    int32_t e;
+};
+
+// A word, 8000h one, as an F16.
+__force_inline F16 f16_word(uint32_t v)
+{
+    v &= 0xFFFF;
+    if (v == 0)
+        return {0, 0};
+    int32_t e = 0;
+    while (v < 0x8000)
+    {
+        v <<= 1;
+        e--;
+    }
+    return {v, e};
+}
+
+// A whole number as an F16 (bits past its top 16 dropped).
+static F16 UNIT_CODE(f16_whole)(uint32_t x)
+{
+    if (x == 0)
+        return {0, 0};
+    int32_t e = 15;
+    while (x >= 0x10000)
+    {
+        x >>= 1;
+        e++;
+    }
+    while (x < 0x8000)
+    {
+        x <<= 1;
+        e--;
+    }
+    return {x, e};
+}
+
+// 1 + x / 8000h (x a word) as an F16.
+__force_inline F16 f16_one_plus(uint32_t x)
+{
+    uint32_t v = 0x8000 + (x & 0xFFFF);
+    return v >= 0x10000 ? F16{v >> 1, 1} : F16{v, 0};
+}
+
+// a x b, the product's top 16 bits (truncated).
+__force_inline F16 f16_mul(F16 a, F16 b)
+{
+    if (a.m == 0 || b.m == 0)
+        return {0, 0};
+    uint32_t p = a.m * b.m;
+    return p >= 0x80000000u ? F16{p >> 16, a.e + b.e + 1} : F16{p >> 15, a.e + b.e};
+}
+
+// a / b (b 0: none), the SIO's divider's quotient.
+__force_inline F16 f16_div(F16 a, F16 b)
+{
+    if (a.m == 0 || b.m == 0)
+        return {0, 0};
+    return a.m < b.m ? F16{map_unit_divide32(a.m << 16, b.m), a.e - b.e - 1}
+                     : F16{map_unit_divide32(a.m << 15, b.m), a.e - b.e};
+}
+
+// The square root of x, rounded down, a bit at a time (the bank calls no library).
+__force_inline uint32_t root32(uint32_t x)
+{
+    uint32_t r = 0, bit = 1u << 30;
+    while (bit > x)
+        bit >>= 2;
+    while (bit != 0)
+    {
+        if (x >= r + bit)
+        {
+            x -= r + bit;
+            r = (r >> 1) + bit;
+        }
+        else
+            r >>= 1;
+        bit >>= 2;
+    }
+    return r;
+}
+
+// The square root of a as an F16: its mantissa's (with an even exponent) to 16 bits.
+__force_inline F16 f16_root(F16 a)
+{
+    if (a.m == 0)
+        return {0, 0};
+    int32_t p = a.e - 15;                                               // a = m x 2^p
+    uint32_t m = a.m;
+    if (p & 1)
+    {
+        m <<= 1;
+        p -= 1;
+    }
+    F16 r = f16_whole(root32(m << 14));                                 // the root of m x 2^14: of m x 2^7
+    r.e += p / 2 - 7;
+    return r;
+}
+
+// K: the cycles of 2 us a turn takes for 0.1 mg of air at lambda 1 (half an injection's, one each two
+// turns): 1.5 x 10^8 / (the stoichiometric ratio x 100 x the injectors' flow, cc/min, x the fuel's
+// density, g/L) x the root of the flow's pressure over the rail's (kPa).
+static F16 UNIT_CODE(fuel_k)(uint32_t stoich, uint32_t flow, uint32_t density, uint32_t rated, uint32_t rail)
+{
+    F16 below = f16_mul(f16_mul(f16_whole(stoich), f16_whole(flow)), f16_whole(density));
+    return f16_mul(f16_div(f16_whole(150000000), below), f16_root(f16_div(f16_whole(rated), f16_whole(rail))));
+}
+
+// The base (a whole number to 16 bits) x s in whole cycles, rounded down, held to 16 bits.
+__force_inline uint32_t f16_apply(uint32_t base, F16 s)
+{
+    if (s.m == 0 || base == 0)
+        return 0;
+    int32_t shift = 15 - s.e;
+    if (shift < 0)
+        return 0xFFFF;                                                  // (s 2 or more: the base x 2 at least)
+    if (shift >= 32)
+        return 0;
+    uint32_t v = (base & 0xFFFF) * s.m >> shift;
+    return v > 0xFFFF ? 0xFFFF : v;
+}
+
+// An own word (map_unit.h's input), as this task's copy has it.
+__force_inline uint32_t own_word(const Task &t, uint32_t input)
+{
+    return t.own[(input - MAP_UNIT_SPEED) & (MAP_UNIT_OWNS - 1)] & 0xFFFF;
+}
+
+// The nearest count of an enrichment's word (/128 of the fuel: the word / 256), held to FFh.
+__force_inline uint32_t nearest_count(uint32_t w)
+{
+    uint32_t c = (w + 0x80) >> 8;
+    return c > 0xFF ? 0xFF : c;
+}
+
+// The time a turn running: the base x the slow factor s x (1 + the warm-up's weight) x (1 + the
+// after-start) x the main map x (1 + the acceleration's), held to 16 bits (fuel_time's, inline: a firing's
+// L1 job; pair_test's through running_time).
+__force_inline uint32_t fuel_running(F16 s, uint32_t base, uint32_t warm, uint32_t after, uint32_t map, uint32_t accel)
+{
+    s = f16_mul(s, f16_one_plus(warm));
+    s = f16_mul(s, f16_one_plus(after));
+    s = f16_mul(s, f16_word(map));
+    return f16_apply(base, f16_mul(s, f16_one_plus(accel)));
+}
+
+static uint32_t UNIT_CODE(running_time)(F16 s, uint32_t base, uint32_t warm, uint32_t after, uint32_t map, uint32_t accel)
+{
+    return fuel_running(s, base, warm, after, map, accel);
+}
+
+// The cranking's factor from Crank_Fuel's word as decayed (2^-11 a whole factor): under 1, none.
+__force_inline F16 crank_factor(uint32_t fuel)
+{
+    if (fuel < 0x800)
+        return {0, 0};
+    F16 f = f16_whole(fuel);
+    f.e -= 11;
+    return f;
+}
+
+// The time a turn starting: the base x s x Cal_StartFactor x the cranking's factor (if any) x (1 + the
+// acceleration's), held to 16 bits.
+static uint32_t UNIT_CODE(fuel_starting)(F16 s, uint32_t base, uint32_t factor, uint32_t crank, uint32_t accel)
+{
+    s = f16_mul(s, f16_word(factor));
+    F16 c = crank_factor(crank);
+    if (c.m != 0)
+        s = f16_mul(s, c);
+    return f16_apply(base, f16_mul(s, f16_one_plus(accel)));
+}
+
+// A fade's share of a count (256 a period) at the tick counter's remainder r by the period (0: a count).
+__force_inline uint32_t fade_share(uint32_t period, uint32_t r)
+{
+    return period == 0 ? 0x100 : map_unit_divide32((r + 1) << 8, period) - map_unit_divide32(r << 8, period);
+}
+
 // Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
 // count left. A value not 0 reaches the top bit within 23 shifts; 0 shifts its whole count away (up
 // to 255 turns on the 8051), so that ends here at once with the count 0, as there.
@@ -284,18 +477,39 @@ static uint32_t UNIT_CODE(step_table)(const uint8_t *rom, const uint8_t *ram, ui
     return at(rom, table + 2 + n + ((r1 - 1) & 0xFF)); // DEC R1; MOV A,R1; MOVC A,@A+DPTR (DPTR past the axis)
 }
 
-// Slow_WarmUp. Data: Fuel_WarmUp's id, Fuel_WarmUp_Cold's, ColdStartFuel's bit. Out: WarmUp.
+// Slow_WarmUp. Data: Fuel_WarmUp's id, Fuel_WarmUp_Cold's, ColdStartFuel's bit. Out: WarmUp. Format 21:
+// the warm-up a word, the own value 88h, WarmUp its nearest count.
 static void UNIT_CODE(warm_up)(const Task &t)
 {
-    put(t, 0, value(t, get(t, bit(t, get(t, 2)))));    // the cold map after a cold start
+    uint32_t v = value(t, get(t, bit(t, get(t, 2))));   // the cold map after a cold start
+    if (fine_fuel(t))
+    {
+        t.own[MAP_UNIT_WARM_UP - MAP_UNIT_SPEED] = v & 0xFFFF;
+        v = nearest_count(v);
+    }
+    put(t, 0, v);
 }
 
 // Slow_Fuel. Data: Fuel_Quality_Table's address, Constants', Cal_FuelTrim's and Cal_InjScale's places
-// in Constants, Fuel_AirTemp's id. Out: FuelFactorL, FuelFactorH, FuelShift.
+// in Constants, Fuel_AirTemp's id. Out: FuelFactorL, FuelFactorH, FuelShift. Format 21: Cal_FuelTrim
+// words, and in Cal_InjScale's place Cal_Stoich's, the four words after it Cal_InjBaseFlow,
+// Cal_FuelDensity, Cal_InjFlowKpa and Cal_RailKpa: K x the trim x Fuel_AirTemp (words), its mantissa
+// FuelFactorH:L and its exponent FuelShift (signed).
 static void UNIT_CODE(fuel)(const Task &t)
 {
     uint32_t constants = word(t, 2);
     uint32_t step = step_table(t.rom, t.ram, word(t, 0));
+    if (fine_fuel(t))
+    {
+        uint32_t c = constants + get(t, 5);
+        F16 k = fuel_k(word_at(t, c), word_at(t, c + 2), word_at(t, c + 4), word_at(t, c + 6), word_at(t, c + 8));
+        uint32_t trim = word_at(t, constants + get(t, 4) + 2 * step);
+        F16 s = f16_mul(f16_mul(k, f16_word(trim)), f16_word(value(t, get(t, 6))));
+        put(t, 0, s.m);
+        put(t, 1, s.m >> 8);
+        put(t, 2, (uint32_t)s.e);
+        return;
+    }
     uint32_t trim = at(t.rom, constants + ((step + get(t, 4)) & 0xFF)); // ADD A,#(Cal_FuelTrim - Constants); MOVC
     uint32_t r = trim * value(t, get(t, 6)), shift = 2;                 // Fuel_AirTemp; MUL AB: R7:R6; FuelShift
     normalise(&r, &shift, at(t.rom, constants + get(t, 5)));            // x Cal_InjScale (Mul_Normalise)
@@ -569,21 +783,64 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
     return {(ofs - pulse) & 0xFF, overflows};                           // MOV A,#INJ_OFS; SUBB A,R6
 }
 
+// Format 21: the cranking fuel's word as Fuel_Crank decides it (its decay begun as there), Crank_Fuel (2^-11
+// a whole factor), decaying x Crank_DecayCount x Crank_DecayRpm (words, 2^-16 a whole).
+static uint32_t UNIT_CODE(crank_word)(const Task &t, uint32_t *flags)
+{
+    uint32_t fuel = value(t, get(t, 2));                                // Crank_Fuel
+    bool decaying = bit(t, get(t, 18));
+    if (!decaying && (value(t, get(t, 3)) < speed_of(t, input(t, 0))    // Crank_DecaySpeed
+                      || at(t.rom, word(t, 7) + get(t, 10)) < byte_of(t, 24))) // Cal_CrankCount; InjCount
+    {
+        *flags |= PULSE_DECAY;
+        set_bit(t, get(t, 18), true);
+        own(t, 24, 0);
+        decaying = true;
+    }
+    if (decaying && fuel != 0)
+        fuel = fuel * (value(t, get(t, 4)) * value(t, get(t, 5)) >> 16) >> 16;
+    return fuel;
+}
+
+// Format 21: the time a turn (cycles): the base, the air of a firing (starting Cal_StartAir), x the slow
+// factor (FuelFactorH:L, FuelShift), running x (1 + the warm-up's weight) x (1 + the after-start) x the
+// main map (Fuel_Idle at idle, Fuel_Main off it), starting x Cal_StartFactor x the cranking's factor (if
+// any); then x (1 + the acceleration's), held to 16 bits.
+static uint32_t UNIT_CODE(fuel_time)(const Task &t, uint32_t *flags)
+{
+    F16 s = f16_word(input(t, 6) << 8 | input(t, 5));                  // (as Slow_Fuel leaves it, normalised)
+    s.e += (int8_t)input(t, 7);
+    uint32_t accel = own_word(t, MAP_UNIT_ACCEL);
+    if (bit(t, get(t, 16)))
+    {
+        uint32_t c = word(t, 7);                                        // Cal_StartAir, Cal_StartFactor
+        uint32_t crank = crank_word(t, flags);
+        return fuel_starting(s, word_at(t, c + get(t, 29)), word_at(t, c + get(t, 30)), crank, accel);
+    }
+    return fuel_running(s, air(t), own_word(t, MAP_UNIT_WARM_WEIGHT), own_word(t, MAP_UNIT_AFTER_START),
+                        value(t, get(t, bit(t, get(t, 17)) ? 1 : 0)), accel);
+}
+
 // The pulse: the cranking fuel's factor starting, else the main map (Fuel_Idle at idle, Fuel_Main
 // off it), then Fuel_Time's arithmetic (the base time starting Cal_StartLoad x 25), then Fuel_Mode;
-// TH0's load into the 8051's code.
+// TH0's load into the 8051's code. Format 21: fuel_time, then Fuel_Mode.
 static void UNIT_CODE(pulse)(const Task &t, bool again)
 {
-    uint32_t flags = 0, exponent = 0x80, map, base = input(t, 10) << 8 | input(t, 11);
-    if (bit(t, get(t, 16)))                                             // JB StartMode,Fuel_Crank
-    {
-        map = crank_fuel(t, &exponent, &flags);
-        base = at(t.rom, word(t, 7) + get(t, 9)) * 0x19;                // Cal_StartLoad x 25
-    }
+    uint32_t flags = 0, exponent = 0x80, map, base = input(t, 10) << 8 | input(t, 11), time;
+    if (fine_fuel(t))
+        time = fuel_time(t, &flags);
     else
-        map = value(t, get(t, bit(t, get(t, 17)) ? 1 : 0));             // JB IdleSwitch: Fuel_Idle, else Fuel_Main
-    uint32_t time = time_a_turn(input(t, 6) << 8 | input(t, 5), input(t, 7), exponent, input(t, 8), input(t, 9),
-                                map, base, input(t, 12));
+    {
+        if (bit(t, get(t, 16)))                                         // JB StartMode,Fuel_Crank
+        {
+            map = crank_fuel(t, &exponent, &flags);
+            base = at(t.rom, word(t, 7) + get(t, 9)) * 0x19;            // Cal_StartLoad x 25
+        }
+        else
+            map = value(t, get(t, bit(t, get(t, 17)) ? 1 : 0));         // JB IdleSwitch: Fuel_Idle, else Fuel_Main
+        time = time_a_turn(input(t, 6) << 8 | input(t, 5), input(t, 7), exponent, input(t, 8), input(t, 9), map,
+                           base, input(t, 12));
+    }
     uint32_t dead = value(t, get(t, 6));                                // Inj_DeadTime
     uint32_t count = byte_of(t, 24);                                    // InjCount (0 if the decay began)
     Pulse load = fuel_mode(t, &time, dead, again, &count, &flags);
@@ -1519,11 +1776,31 @@ static bool UNIT_CODE(accel_tick)(const Task &t)
     return false;
 }
 
+// Format 21: an enrichment (map_unit.h's input, an own word) set, its byte (data place) its nearest count.
+__force_inline void set_enrichment(const Task &t, uint32_t input, uint32_t place, uint32_t w)
+{
+    t.own[(input - MAP_UNIT_SPEED) & (MAP_UNIT_OWNS - 1)] = w & 0xFFFF;
+    own(t, place, nearest_count(w));
+}
+
+// Format 21: an enrichment less its share of a count this tick, to 0: a count (256) each period of the
+// tick counter at Constants + Cal_Prescalers' place (the counter's remainder r by the period: (r + 1) x
+// 256 / it less r x 256 / it); a period of 0, a count each tick. The fades keep today's rates.
+static void UNIT_CODE(fade)(const Task &t, uint32_t input, uint32_t place, uint32_t prescaler, uint32_t tick)
+{
+    uint32_t w = own_word(t, input);
+    if (w == 0)
+        return;
+    uint32_t period = at(t.rom, word(t, TW_CONSTANTS) + (prescaler & 0xFF));
+    uint32_t share = fade_share(period, tick_due(t, prescaler, tick));
+    set_enrichment(t, input, place, w > share ? w - share : 0);
+}
+
 // Accel_Raise: the tip-in retard, AdvanceDyn the dynamic spark's adjustment less Ign_TipIn by the rise
-// (63 at most); the enrichment's first part by the rise (Accel_PulseRise: AccelPart); the filter's
+// (63 at most); the enrichment's first part by the rise (Accel_PulseRise: AccelPart, *part); the filter's
 // step. Both maps take the rise from R3 (03h), as Map_Lookup leaves it. True: the next test
-// (EnrichDue).
-static bool UNIT_CODE(accel_raise)(const Task &t, uint32_t load_air)
+// (EnrichDue). Format 21: the part a word, AccelPart its nearest byte.
+static bool UNIT_CODE(accel_raise)(const Task &t, uint32_t load_air, uint32_t *part_out)
 {
     uint32_t rise, step;
     afm_rise(t, &rise, &step);
@@ -1538,19 +1815,30 @@ static bool UNIT_CODE(accel_raise)(const Task &t, uint32_t load_air)
         own(t, TW_DYN, spark_dyn_adj(t, load_air) + ((0x100 - tip) & 0xFF)); // CPL A; INC A; ADD A,R1
     }
     uint32_t part = value(t, get(t, TW_PULSE_RISE));
-    own(t, TW_ACCEL_PART, part);
+    *part_out = part;
+    own(t, TW_ACCEL_PART, fine_fuel(t) ? nearest_count(part) : part);
     own(t, TW_AFM_FILT, byte_of(t, TW_AFM_FILT) + step);                // Accel_Raise_Step
     return part != 0;                                                   // JZ; SETB EnrichDue
 }
 
 // Accel_Enrich: the first part x Accel_Coolant by coolant / 256 x Accel_SpeedLoad by speed and load /
-// 256 (none: none), into AccelEnrich if over it.
-static void UNIT_CODE(accel_enrich)(const Task &t)
+// 256 (none: none), into AccelEnrich if over it. Format 21: words, each product / 65,536.
+static void UNIT_CODE(accel_enrich)(const Task &t, uint32_t part)
 {
     uint32_t by_coolant = value(t, get(t, TW_ACCEL_COOLANT));
     if (by_coolant == 0)                                                // JZ Accel_Enrich_Out
         return;
-    uint32_t b = by_coolant * byte_of(t, TW_ACCEL_PART) >> 8;           // MUL AB; MOV A,B
+    if (fine_fuel(t))
+    {
+        uint32_t b = by_coolant * part >> 16;
+        if (b == 0)
+            return;
+        uint32_t v = value(t, get(t, TW_ACCEL_SPEED_LOAD)) * b >> 16;
+        if (v > own_word(t, MAP_UNIT_ACCEL))
+            set_enrichment(t, MAP_UNIT_ACCEL, TW_ACCEL, v);
+        return;
+    }
+    uint32_t b = by_coolant * part >> 8;                                // MUL AB; MOV A,B
     if (b == 0)
         return;
     uint32_t v = value(t, get(t, TW_ACCEL_SPEED_LOAD)) * b >> 8;        // Map_Lookup_2D (B kept); MUL AB
@@ -1595,9 +1883,17 @@ static void UNIT_CODE(load_byte)(const Task &t)
 }
 
 // Load_Weight: the warm-up x its weight / 256 (off idle by speed and load, at idle by speed; the
-// warm-up 0: none).
+// warm-up 0: none). Format 21: words, the product / 65,536, the own value 89h.
 static void UNIT_CODE(load_weight)(const Task &t)
 {
+    if (fine_fuel(t))
+    {
+        uint32_t warm = own_word(t, MAP_UNIT_WARM_UP), weight = 0;
+        if (warm != 0)
+            weight = value(t, get(t, bit(t, get(t, TW_IDLE)) ? TW_WEIGHT_IDLE : TW_WEIGHT)) * warm >> 16;
+        set_enrichment(t, MAP_UNIT_WARM_WEIGHT, TW_WARM_WEIGHT, weight);
+        return;
+    }
     uint32_t warm = byte_of(t, TW_WARM_UP), weight = 0;
     if (warm != 0)                                                      // JZ Load_Weight_Out
         weight = value(t, get(t, bit(t, get(t, TW_IDLE)) ? TW_WEIGHT_IDLE : TW_WEIGHT)) * warm >> 8;
@@ -1619,28 +1915,36 @@ static void UNIT_CODE(tick_work)(const Task &t)
     uint32_t tick = (byte_of(t, TW_TICK_COUNT) + 1) & 0xFF;             // the tick counter as moved on
     if (tick == 180)
         tick = 0;
+    bool words = fine_fuel(t);                                          // (format 21: the enrichments' words)
     if (!bit(t, get(t, TW_START)))                                      // JB StartMode,Main_Tick_Start
     {
         uint32_t after = byte_of(t, TW_AFTER);                          // one less each Cal_Prescalers'
-        if (tick_due(t, get(t, TW_PRESCALERS), tick) == 0 && after != 0) //   first ticks, to 0
+        if (words)                                                      //   first ticks, to 0
+            fade(t, MAP_UNIT_AFTER_START, TW_AFTER, get(t, TW_PRESCALERS), tick);
+        else if (tick_due(t, get(t, TW_PRESCALERS), tick) == 0 && after != 0)
             own(t, TW_AFTER, after - 1);
     }
     else                                                                // starting: by coolant, or over
     {                                                                   //   Cal_AfterStartHot by air
         uint32_t hot = at(t.rom, word(t, TW_CONSTANTS) + get(t, TW_AFTER_HOT));
         uint32_t id = get(t, hot < byte_of(t, TW_COOLANT) ? TW_AFTER_AIR : TW_AFTER_COOLANT);
-        own(t, TW_AFTER, value(t, id));                                 // CJNE A,Coolant; JNC; Map_Lookup
+        if (words)
+            set_enrichment(t, MAP_UNIT_AFTER_START, TW_AFTER, value(t, id));
+        else
+            own(t, TW_AFTER, value(t, id));                             // CJNE A,Coolant; JNC; Map_Lookup
     }
     uint32_t accel = byte_of(t, TW_ACCEL);                              // one less each Cal_Prescalers'
-    if (tick_due(t, get(t, TW_PRESCALERS) + 1, tick) == 0 && accel != 0) //   second ticks, to 0
+    if (words)                                                          //   second ticks, to 0
+        fade(t, MAP_UNIT_ACCEL, TW_ACCEL, get(t, TW_PRESCALERS) + 1, tick);
+    else if (tick_due(t, get(t, TW_PRESCALERS) + 1, tick) == 0 && accel != 0)
         own(t, TW_ACCEL, accel - 1);
     spark_dyn(t, tick);
     bool raise = accel_tick(t);
     own(t, TW_LOAD_K, value(t, get(t, TW_LOAD_FILTER)));                // Main_Tick_Filter
-    uint32_t before = air(t);                                           // (format 20: Accel_Raise's load the
+    uint32_t before = air(t), part = 0;                                 // (format 20: Accel_Raise's load the
     load_tick(t);                                                       //   air before Main_Load, as its byte)
-    if (raise && accel_raise(t, before))                                // Accel_Raise, then Accel_Enrich
-        accel_enrich(t);
+    if (raise && accel_raise(t, before, &part))                         // Accel_Raise, then Accel_Enrich
+        accel_enrich(t, part);
     load_byte(t);                                                       // Main_Byte
     load_weight(t);
 }
@@ -2123,6 +2427,29 @@ uint32_t UNIT_CODE(unit_filter_air)(uint32_t flow, uint32_t p, uint32_t k, uint3
     owns[MAP_UNIT_LOAD - MAP_UNIT_SPEED] = own;
     filter_air(Task{nullptr, nullptr, nullptr, nullptr, nullptr, owns}, flow, p, k);
     return owns[MAP_UNIT_LOAD - MAP_UNIT_SPEED];
+}
+
+// Format 21 (pair_test's, for DME-Sim's twins): K's mantissa (bits 0-15) and exponent (16-31, signed).
+uint32_t UNIT_CODE(unit_fuel_k)(uint32_t stoich, uint32_t flow, uint32_t density, uint32_t rated, uint32_t rail)
+{
+    F16 k = fuel_k(stoich, flow, density, rated, rail);
+    return (k.m & 0xFFFF) | (uint32_t)k.e << 16;
+}
+
+// Format 21: the time a turn, in[0] and in[1] the slow factor's mantissa and exponent, in[2] the base;
+// running in[3] to in[6] the warm-up's weight, the after-start, the main map, the acceleration's;
+// starting in[3] to in[5] Cal_StartFactor, the cranking's word, the acceleration's.
+uint32_t UNIT_CODE(unit_fuel_time)(const uint32_t *in, bool starting)
+{
+    F16 s = f16_word(in[0]);
+    s.e += (int32_t)in[1];
+    return starting ? fuel_starting(s, in[2], in[3], in[4], in[5]) : running_time(s, in[2], in[3], in[4], in[5], in[6]);
+}
+
+// Format 21: a fade's share at the period and the tick counter's remainder by it.
+uint32_t UNIT_CODE(unit_fade_share)(uint32_t period, uint32_t r)
+{
+    return fade_share(period, r);
 }
 
 bool UNIT_CODE(unit_map_pulse)(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,

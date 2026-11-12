@@ -410,6 +410,29 @@ a cylinder:
   rom_pair's maps of build 8: 204 cycles a lookup on one axis on average, 382 at most; 518 on two
   (the 951's; the 944's 513), 856 at most.
 
+Format 21 (DME-Sim's docs/Paired_Precision.md, step D, the owner's of 2026-11-12) puts the fuel in
+16 bits on the air's base:
+- **The fuel's maps** are words, 8000h a whole fuel (40h beside their axes), and so are Cal_FuelTrim
+  and the fuel's constants. The product is in 16-bit mantissas with exponents (`F16`: m x 2^(e -
+  15), a product of two in 32 bits, its top 16 bits kept).
+- **The base:** the slow work makes K, the cycles a turn takes for 0.1 mg of air at lambda 1, from
+  Cal_Stoich and the four words after it (the injectors' flow at its rated pressure, the fuel's
+  density, the rail's pressure: `fuel_k`, the SIO's divider and a root a bit at a time), and the
+  slow factor K x the trim x Fuel_AirTemp into FuelFactorH:L and FuelShift (signed). The time a turn
+  is the air of a firing x it x the enrichments x Fuel_Main or Fuel_Idle (`fuel_running`); starting,
+  Cal_StartAir x it x Cal_StartFactor x the cranking's (`fuel_starting`); then Fuel_Mode as before.
+- **The enrichments** are the P28's own words (88h to 8Bh: the warm-up, its weight, the after-start,
+  the acceleration's; MAP_UNIT_OWNS 16, the levels copying 12), their bytes beside them their
+  nearest counts; the after-start and the acceleration's fade in shares of a count each tick
+  (`fade`, `fade_share`), at today's rates. The 8051's start clears them.
+- **The log:** list addresses 90h to 97h are their bytes (94h and 95h the after-start, 96h and 97h
+  the acceleration's).
+- **The checks:** pair_test 30 (K), 31 and 32 (the time a turn running and starting) and 33 (a
+  fade's share), against DME-Sim's twins.
+- **Its time:** L1's longest job in the car to 7,000 rpm 29.8 us (format 20's 29.2), after the own
+  values' give-back went into a function of its own (`give_owns`) and the running product inline;
+  the bank 59.5 KB.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds

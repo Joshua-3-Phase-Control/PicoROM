@@ -55,10 +55,13 @@ void map_unit_snooped_over(uint8_t *bytes);
 uint32_t map_unit_task_at(uint32_t task);
 
 // Format 18: the P28's own 16-bit values, which axes from 80h on read: set by the code that makes them,
-// read by any. Format 19 (step B) adds the spark's, in 1/64 tooth, signed.
+// read by any. Format 19 (step B) adds the spark's, in 1/64 tooth, signed; format 21 (step D) the fuel's
+// enrichments, 8000h a whole fuel. MAP_UNIT_OWNS (a power of 2) words each, the first MAP_UNIT_USED in use
+// (the levels copy those).
 void map_unit_set_own(uint32_t input, uint32_t value);
 uint32_t map_unit_own(uint32_t input);
-static constexpr uint32_t MAP_UNIT_OWNS = 8;
+static constexpr uint32_t MAP_UNIT_OWNS = 16;
+static constexpr uint32_t MAP_UNIT_USED = 12;
 static constexpr uint32_t MAP_UNIT_SPEED = 0x80;       // the speed in rpm
 static constexpr uint32_t MAP_UNIT_LOAD = 0x81;        // format 20: the air of a firing, 0.1 mg (its filter's
                                                        //   fraction in bits 16 to 23: read its 16 bits)
@@ -68,6 +71,10 @@ static constexpr uint32_t MAP_UNIT_HANDOVER = 0x84;    // the advance's sum (tas
 static constexpr uint32_t MAP_UNIT_ADVANCE = 0x85;     // the advance (task 11's)
 static constexpr uint32_t MAP_UNIT_ADVANCE_DYN = 0x86; // its adjustment (the idle spark, the dynamic spark)
 static constexpr uint32_t MAP_UNIT_ADV_PLAN = 0x87;    // the plans' advance: the two summed
+static constexpr uint32_t MAP_UNIT_WARM_UP = 0x88;     // format 21: the warm-up enrichment (the slow work's)
+static constexpr uint32_t MAP_UNIT_WARM_WEIGHT = 0x89; // its weight by speed and air (the tick's)
+static constexpr uint32_t MAP_UNIT_AFTER_START = 0x8A; // the after-start enrichment (the tick's)
+static constexpr uint32_t MAP_UNIT_ACCEL = 0x8B;       // the acceleration enrichment (the tick's)
 
 // The own values, and L2's and L1's copies of them (pair.cpp's: taken with a level's copy of the RAM,
 // given back at its commit), so that a task reads them as fast as its RAM's bytes.

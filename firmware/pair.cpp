@@ -104,6 +104,7 @@ static constexpr uint32_t MAPS = 12;     // the format with the MAP pulse on the
 static constexpr uint32_t SLOW = 13;     // the format with the slow work on the unit (slot 5's channel)
 static constexpr uint32_t KNOCK = 16;    // the format with the KLR's knock line (its mark, its counts)
 static constexpr uint32_t WIDE = 18;     // the format with 16-bit inputs: the speed in rpm (step A)
+static constexpr uint32_t FUEL = 21;     // the format with the fuel in 16 bits on the air's base (step D)
 static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
@@ -1045,11 +1046,14 @@ static __force_inline void copy_words(uint32_t *to, const uint32_t *from)
                    : "r3", "r4", "r5", "r6", "cc", "memory");
 }
 
-// The own values (MAP_UNIT_OWNS: 8 words) from `from` to `to` and `also`, four a step.
+// The own values in use (MAP_UNIT_USED: 12 words) from `from` to `to` and `also`, four a step.
 static __force_inline void copy_owns(uint32_t *to, uint32_t *also, const uint32_t *from)
 {
-    static_assert(MAP_UNIT_OWNS == 8, "copy_owns copies 8 words");
+    static_assert(MAP_UNIT_USED == 12, "copy_owns copies 12 words");
     __asm volatile("ldmia %[f]!, {r3, r4, r5, r6}\n\t"
+                   "stmia %[t]!, {r3, r4, r5, r6}\n\t"
+                   "stmia %[a]!, {r3, r4, r5, r6}\n\t"
+                   "ldmia %[f]!, {r3, r4, r5, r6}\n\t"
                    "stmia %[t]!, {r3, r4, r5, r6}\n\t"
                    "stmia %[a]!, {r3, r4, r5, r6}\n\t"
                    "ldmia %[f]!, {r3, r4, r5, r6}\n\t"
@@ -1095,6 +1099,16 @@ static uint32_t UNIT_CODE(changed_words)(uint8_t *changed, const uint32_t *now, 
     return c - changed;
 }
 
+// The own values in use a job changed (`now` against `was`) back into the unit's: a function of its own, so
+// that its pointers stay in the low registers (give_back's, the interrupts held off).
+static void UNIT_CODE(give_owns)(const uint32_t *now, const uint32_t *was)
+{
+    uint32_t *own = map_unit_owns.own;
+    for (uint32_t i = 0; i < MAP_UNIT_USED; i++)
+        if (now[i] != was[i])
+            own[i] = now[i];
+}
+
 // The bits a job changed (`job` against `kept`, as it took them) back into the unit's copy in one go
 // (the interrupts held off), unless the 8051's start or a stop overtook it; true if given.
 static bool UNIT_CODE(give_back)(uint32_t generation, const uint8_t *job, const uint8_t *kept)
@@ -1113,9 +1127,7 @@ static bool UNIT_CODE(give_back)(uint32_t generation, const uint8_t *job, const 
             ram[i] = (ram[i] & ~bits) | (now[i] & bits);
         }
         if (own != nullptr)                                     // format 18: the own values it changed
-            for (uint32_t i = 0; i < MAP_UNIT_OWNS; i++)
-                if (own[i] != taken[i])
-                    map_unit_owns.own[i] = own[i];
+            give_owns(own, taken);
         given = true;
     }
     __asm volatile("cpsie i" ::: "memory");
@@ -1371,7 +1383,8 @@ uint32_t UNIT_CODE(pair_log_read)(uint32_t *from, uint8_t *bytes, uint32_t most)
 // Format 18: a byte of the P28's own 16-bit values, as the log's list names them from 80h, each value's
 // high byte then its low (map_unit.h's order): 80h and 81h the speed in rpm, 82h and 83h the load, 84h
 // and 85h the idle target; format 19, 86h on the spark's (8Ah and 8Bh the advance, 8Ch and 8Dh its
-// adjustment).
+// adjustment); format 21, 90h on the fuel's enrichments (94h and 95h the after-start, 96h and 97h the
+// acceleration's).
 static __force_inline uint32_t own_byte(uint32_t address)
 {
     uint32_t value = map_unit_own(0x80 + ((address - 0x80) >> 1 & (MAP_UNIT_OWNS - 1)));
@@ -1868,6 +1881,9 @@ static void UNIT_CODE(control_as_built)()
         map_unit_ram_write(control.isv_ramp_at, 0xFF);          //   Power_Up_Inputs sent with task 12), start
         control.powered = false;                                //   mode and the slow work at the first stop
     }
+    if (at(MARK + 4) >= FUEL)                                   // format 21: the fuel's enrichments 0, as
+        for (uint32_t i = MAP_UNIT_WARM_UP; i <= MAP_UNIT_ACCEL; i++)   //   Power_Up clears their bytes
+            map_unit_set_own(i, 0);
     own_sync();                                                 // (the RAM's copy cleared before: not in step)
 }
 
@@ -2533,6 +2549,12 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[0] = speed_rpm(in[0], in[1]);
     else if (routine == 29)                                     // format 20: the air of a firing and its
         out[0] = unit_filter_air(in[0], in[1], in[2], in[3]);   //   filter: flow, P, LoadK, the own word
+    else if (routine == 30)                                     // format 21: K from the fuel's constants
+        out[0] = unit_fuel_k(in[0], in[1], in[2], in[3], in[4]); //   (mantissa, exponent)
+    else if (routine == 31 || routine == 32)                    // format 21: the time a turn, running (31)
+        out[0] = unit_fuel_time(in, routine == 32);             //   or starting (32)
+    else if (routine == 33)                                     // format 21: a fade's share: the period,
+        out[0] = unit_fade_share(in[0], in[1]);                 //   the remainder
     else if (routine == 26)                                     // format 19: Spark_Place at the advance in
     {                                                           //   1/64 tooth, SPARK_B, T64
         Place place = spark_place((int16_t)in[0], in[1], in[2]);

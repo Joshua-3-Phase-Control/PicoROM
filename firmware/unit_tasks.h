@@ -125,6 +125,13 @@ uint32_t unit_fine_error_rpm(uint32_t target, uint32_t p, uint32_t k);
 // value 81h's word after a firing of P cycles at the flow (g/min), filtered by k.
 uint32_t unit_filter_air(uint32_t flow, uint32_t p, uint32_t k, uint32_t own);
 
+// Format 21 (pair_test's, for DME-Sim's twins): K (its mantissa, bits 0-15, and exponent, 16-31) from the
+// fuel's constants; the time a turn from its parts (unit_tasks.cpp's in[] order), running or starting;
+// a fade's share of a count at its period and the tick counter's remainder.
+uint32_t unit_fuel_k(uint32_t stoich, uint32_t flow, uint32_t density, uint32_t rated, uint32_t rail);
+uint32_t unit_fuel_time(const uint32_t *in, bool starting);
+uint32_t unit_fade_share(uint32_t period, uint32_t r);
+
 #endif
 
 #endif
