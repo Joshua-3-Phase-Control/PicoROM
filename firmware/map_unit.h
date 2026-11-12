@@ -54,6 +54,33 @@ uint32_t *map_unit_ram_words();
 void map_unit_snooped_over(uint8_t *bytes);
 uint32_t map_unit_task_at(uint32_t task);
 
+// Format 18: the P28's own 16-bit values, which axes from 80h on read (80h: the speed in rpm; 81h: the
+// load; 82h: the idle target in rpm): set by the code that makes them, read by any.
+void map_unit_set_own(uint32_t input, uint32_t value);
+uint32_t map_unit_own(uint32_t input);
+static constexpr uint32_t MAP_UNIT_SPEED = 0x80;       // the speed in rpm
+static constexpr uint32_t MAP_UNIT_IDLE_TARGET = 0x82; // the idle target in rpm (task 17's, task 14 reads it)
+
+// The own values, and the tick's copy of them (pair.cpp's: taken with its copy of the RAM, given back at
+// its commit), so that a task reads them as fast as its RAM's bytes.
+struct MapUnitOwn
+{
+    uint32_t own[4];         // 80h the speed in rpm, 81h the load, 82h the idle target in rpm
+    const uint8_t *tick_ram; // the tick's copy of the RAM, whose tasks read ...
+    uint32_t tick[4];        // ... the tick's copy of the values
+};
+extern MapUnitOwn map_unit_owns;
+
+// The own value input (80h on) as a task working on ram has it: on the tick's copy, the tick's.
+static inline uint32_t map_unit_own_on(uint32_t input, const uint8_t *ram)
+{
+    uint32_t i = (input - MAP_UNIT_SPEED) & 3;
+    return ram == map_unit_owns.tick_ram ? map_unit_owns.tick[i] : map_unit_owns.own[i];
+}
+
+// x / d (d not 0) by the SIO's divider, its state as it was for any code it broke in on.
+uint32_t map_unit_divide32(uint32_t x, uint32_t d);
+
 // x / d for x and d below 256 (d not 0), as the 8051's DIV AB: by the unit's reciprocals (the bank has
 // no divider).
 uint32_t map_unit_divide(uint32_t x, uint32_t d);

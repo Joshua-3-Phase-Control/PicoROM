@@ -350,6 +350,29 @@ Format 17 (DME-Sim's docs/Paired_Maps.md, the owner's of 2026-11-11) puts the ma
 - In DME-Sim, rom_pair's maps at every input: 138 cycles a lookup on one axis on average, 331 at
   most; 295 on two (the 951's; the 944's 246), 610 at most, a step of the search about 10 cycles.
 
+Format 18 (DME-Sim's docs/Paired_Precision.md, step A, the owner's of 2026-11-11) puts the speed in
+16 bits:
+- **The P28's own values** (`map_unit_owns`): 80h the speed in rpm, 81h the load (step C), 82h the
+  idle target in rpm. An axis whose input is 80h or on reads one, its points words, high byte
+  first, rising; a map's index entry with 40h beside its axes has 16-bit values. The lookup is
+  format 17's arithmetic; on an own axis its search is by halves (the points rise), and a division
+  past the reciprocals goes by subtraction (a quotient under 8) or to the SIO's divider
+  (`map_unit_divide32`: its state saved and put back when dirty, as the SDK's interrupt code does).
+  The 8-bit maps keep format 17's lookup.
+- **The speed in rpm**: 40 x SPEED_K over each firing's length, rounded, at most FFFFh, in the
+  firing's L1 job; at the tick at most 40 rpm a tooth a tick; at the engine's stop the byte's x 40.
+  The tick works on a copy of the own values taken with its copy of the RAM, given back at its
+  commit.
+- **The tasks**: the load from the firing's length (50 x the flow x P / SPEED_K, task 7's data
+  adding FirePeriodL's and FirePeriodH's addresses and SPEED_K); the speed thresholds in rpm (their
+  constants words, the speed-valued maps 16 bits, the pipeline's rates words at the pair table's
+  end, u + 137, Idle_Ramp's speed a word at task 17's end); the idle target in rpm and its error
+  (`fine_error_rpm`, pair_test 25), the byte IdleTarget its nearest.
+- **The log**: list addresses 80h to 85h are the own values' bytes, high byte first.
+- In DME-Sim, rom_pair's maps of build 6: 178 cycles a lookup on one axis on average, 337 at most;
+  415 on two (the 951's; the 944's 387), 757 at most. L1's longest job in the car to 7,000 rpm 28.7
+  us (format 17's 27.7).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds

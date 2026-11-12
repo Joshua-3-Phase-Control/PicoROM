@@ -7,6 +7,7 @@
 
 #if defined(FEATURE_MAP_UNIT)
 
+#include "map_unit.h"
 #include "pair.h"
 #include "unit_ram.h"
 
@@ -80,6 +81,27 @@ __force_inline uint32_t input(const Task &t, uint32_t k)
 __force_inline bool kept(const Task &t)
 {
     return at(t.rom, 0x2004) >= PIPELINE_FORMAT;
+}
+
+constexpr uint32_t WIDE_FORMAT = 18; // the format with 16-bit inputs (docs/Paired_Precision.md)
+
+// Format 18 (step A): a speed compared in rpm, the P28's own (map_unit.h's 80h), its thresholds words
+// in rpm where the bytes were, and the maps whose values are speeds 16 bits in rpm.
+__force_inline bool wide(const Task &t)
+{
+    return at(t.rom, 0x2004) >= WIDE_FORMAT;
+}
+
+// The speed a threshold is compared with: the speed byte as given, or (format 18) the speed in rpm.
+__force_inline uint32_t speed_of(const Task &t, uint32_t byte)
+{
+    return wide(t) ? map_unit_own_on(MAP_UNIT_SPEED, t.ram) : byte;
+}
+
+// A speed constant at address: its byte, or (format 18) its word in rpm, high byte first.
+__force_inline uint32_t speed_at(const Task &t, uint32_t address)
+{
+    return wide(t) ? at(t.rom, address) << 8 | at(t.rom, address + 1) : at(t.rom, address);
 }
 
 // Shift_Left: R7:R6:R5 left a bit at a time while the count lasts and R7's top bit is clear; the
@@ -358,7 +380,7 @@ static uint32_t UNIT_CODE(crank_fuel)(const Task &t, uint32_t *exponent, uint32_
 {
     uint32_t r7 = value(t, get(t, 2)), r6 = 8, r3 = 5;                  // Crank_Fuel; MOV R6,#08h; MOV R3,#05h
     bool decaying = bit(t, get(t, 18));                                 // JB CrankDecay,Fuel_Crank_Decaying
-    if (!decaying && (value(t, get(t, 3)) < input(t, 0)                 // Crank_DecaySpeed; SUBB A,Rpm; JC
+    if (!decaying && (value(t, get(t, 3)) < speed_of(t, input(t, 0))    // Crank_DecaySpeed; SUBB A,Rpm; JC
                       || at(t.rom, word(t, 7) + get(t, 10)) < byte_of(t, 24))) // Cal_CrankCount; InjCount
     {
         *flags |= PULSE_DECAY;                                          // SETB CrankDecay
@@ -498,12 +520,24 @@ static void UNIT_CODE(pulse)(const Task &t, bool again)
 // (Mul16x16), held to 16 bits, x Cal_LoadScale / 256 (Mul16x8) and doubled unless its top bit is set:
 // the new load; filtered by LoadK (Lag_Filter24, its low byte 0) into LoadHi:LoadMid. Inputs, in turn:
 // Rpm, Afm, LoadK, LoadHi, LoadMid (format 9: Rpm not sent, the unit's own: its address the data's
-// sixth). Data: Constants' address; Cal_LoadScale's place there; Afm_Flow's address. Out: LoadHi,
-// LoadMid.
+// sixth). Data: Constants' address; Cal_LoadScale's place there; Afm_Flow's address; format 18,
+// FirePeriodL's and FirePeriodH's addresses and SPEED_K (low byte first). Out: LoadHi, LoadMid.
+// Format 18 (docs/Paired_Precision.md, step A): with the firing's length P in 16 bits, 50 x the air
+// flow x P / SPEED_K in place of the first product: the air of a firing, none of the speed byte's
+// steps (its 50 / the speed is 50 x P / SPEED_K, the speed byte SPEED_K / P rounded).
 static void UNIT_CODE(load)(const Task &t)
 {
     uint32_t afm = kept(t) ? 0 : 1, rpm = kept(t) ? byte_of(t, 5) : input(t, 0); // the inputs from the AFM's
-    uint32_t wide = per_turn(rpm) * airflow(t, word(t, 3), input(t, afm)) >> 8;  // R7:R6:R5
+    uint32_t flow = airflow(t, word(t, 3), input(t, afm)), wide;
+    uint32_t p = at(t.rom, 0x2004) >= WIDE_FORMAT ? byte_of(t, 7) << 8 | byte_of(t, 6) : 0xFFFF;
+    if (p != 0xFFFF && p != 0)                                          // format 18: the air a firing,
+    {                                                                   //   50 x flow x P / SPEED_K in
+        uint32_t k = get(t, 8) | get(t, 9) << 8 | get(t, 10) << 16;     //   two divisions (flow x P is
+        uint32_t q = map_unit_divide32(flow * p, k), r = flow * p - q * k; // 32 bits, the rest under K)
+        wide = 50 * q + map_unit_divide32(50 * r, k);
+    }
+    else
+        wide = per_turn(rpm) * flow >> 8;                               // R7:R6:R5
     if (wide > 0xFFFF)                                                  // MOV A,R7; JZ Load_Tick_Fits
         wide = 0xFFFF;                                                  // MOV R6,#0FFh; MOV R5,#0FFh
     wide *= at(t.rom, word(t, 0) + get(t, 2));                          // x Cal_LoadScale: R7:R6:R5
@@ -642,7 +676,7 @@ static bool UNIT_CODE(overrun_cut)(const Task &t, AdvanceState &s, uint32_t targ
         s.by_rpm = s.overrun = false;
         return s.fuel_cut && resume(t, s, cal(t, 14), target);          // Cal_ResumeStepThrottle
     }
-    uint32_t rpm = input(t, 0), cutoff = value(t, get(t, 6));           // Overrun_CutSpeed
+    uint32_t rpm = speed_of(t, input(t, 0)), cutoff = value(t, get(t, 6)); // Overrun_CutSpeed
     if (cutoff >= rpm)                                                  // SUBB A,Rpm; JNC Ign_Overrun_Below
     {
         s.overrun = false;
@@ -651,9 +685,13 @@ static bool UNIT_CODE(overrun_cut)(const Task &t, AdvanceState &s, uint32_t targ
         s.by_rpm = true;
         return resume(t, s, cal(t, 15), target);                        // Cal_ResumeStepRpm
     }
-    uint32_t hyst = at(t.rom, word(t, 1) + get(t, 13) + (s.by_rpm ? 1 : 0)); // Cal_OverrunHyst (+1)
-    if (hyst + ((cutoff - rpm) & 0xFF) > 0xFF)                          // ADD A,R3; JC Ign_Taken: within it
-        return false;
+    if (wide(t))                                                        // format 18: Cal_OverrunHyst's two
+    {                                                                   //   words in rpm: within it
+        if (rpm - cutoff <= speed_at(t, word(t, 1) + get(t, 13) + (s.by_rpm ? 2 : 0)))
+            return false;
+    }
+    else if (at(t.rom, word(t, 1) + get(t, 13) + (s.by_rpm ? 1 : 0)) + ((cutoff - rpm) & 0xFF) > 0xFF)
+        return false;                                                   // Cal_OverrunHyst (+1); ADD A,R3; JC
     s.overrun = true;                                                   // the advance to its target first
     if (target != s.advance)                                            // CJNE A,Advance,Ign_Taken
         return false;
@@ -669,7 +707,7 @@ static bool UNIT_CODE(overrun_cut)(const Task &t, AdvanceState &s, uint32_t targ
 static void UNIT_CODE(slew_target)(const Task &t, AdvanceState &s, uint32_t target, bool not_synced)
 {
     bool c = cal(t, 20) < input(t, 1)                                   // Cal_SlewLoad; SUBB A,Load; JC
-             || cal(t, 21) >= input(t, 0);                              // Cal_SlewRpm; SUBB A,Rpm; CPL C
+             || speed_at(t, word(t, 1) + get(t, 21)) >= speed_of(t, input(t, 0)); // Cal_SlewRpm; SUBB A,Rpm
     if (s.high)                                                         // JNB SlewHighLoad; CPL C
         c = !c;
     if (c)                                                              // JNC Ign_Target_Sync
@@ -789,7 +827,8 @@ static void UNIT_CODE(start_mode)(const Task &t)
     uint32_t ramp = input(t, own_bytes ? 0 : 1), ticks = input(t, own_bytes ? 1 : 3);
     uint32_t coolant = input(t, own_bytes ? 2 : 4);
     bool starting = bit(t, get(t, 6));
-    if (at(t.rom, c + get(t, 2)) >= rpm)                                // Cal_StartRpmEnter; SUBB A,Rpm; JNC
+    uint32_t speed = speed_of(t, rpm);
+    if (speed_at(t, c + get(t, 2)) >= speed)                            // Cal_StartRpmEnter; SUBB A,Rpm; JNC
     {
         starting = true;
         flags |= START_VARIANTS;
@@ -803,7 +842,7 @@ static void UNIT_CODE(start_mode)(const Task &t)
             set_bit(t, get(t, 11), flags & START_COLD_IGN);
         }
     }
-    else if (starting && (ramp == 0 || value(t, get(t, 5)) < rpm))     // IsvRamp 0; Start_ExitSpeed; JNC
+    else if (starting && (ramp == 0 || value(t, get(t, 5)) < speed))   // IsvRamp 0; Start_ExitSpeed; JNC
     {
         starting = false;
         flags |= START_OVER;
@@ -927,17 +966,38 @@ static void UNIT_CODE(speed_count)(const Task &t)
 // Idle_Error: the idle speed's fine error, (the target x P - SPEED_K) / 1024: the top two bytes of the
 // 24-bit difference (the low byte's borrow kept), two right with their sign, within -128 and 127,
 // else the range's end by the sign.
-static uint32_t UNIT_CODE(fine_error)(uint32_t target, uint32_t p, uint32_t k)
+static __force_inline uint32_t error_of(uint32_t difference)
 {
-    uint32_t difference = (target * p - k) & 0xFFFFFF;                  // MUL AB x 2; SUBB x 3
+    difference &= 0xFFFFFF;                                             // MUL AB x 2; SUBB x 3
     int32_t v = (int32_t)(int16_t)(difference >> 8 & 0xFFFF) >> 2;     // MOV C,ACC.7; RRC A, twice
     if (v < -128 || v > 127)                                            // RLC A; CLR A; ADDC A,R2; JZ
         return v < 0 ? 0x80 : 0x7F;                                     // MOV A,#7Fh; ADDC A,#00h
     return (uint32_t)v & 0xFF;                                          // MOV A,R1
 }
 
+static uint32_t UNIT_CODE(fine_error)(uint32_t target, uint32_t p, uint32_t k)
+{
+    return error_of(target * p - k);
+}
+
+// Format 18: Idle_Error with the target in rpm: the difference (the target x P - 40 x SPEED_K) / 40,
+// rounded half up, taken as the byte target's (the target x P - SPEED_K) is; at a target of whole 40
+// rpm the byte's error, and finer between.
+static uint32_t UNIT_CODE(fine_error_rpm)(uint32_t target, uint32_t p, uint32_t k)
+{
+    uint32_t n = target * p + 20, m = 40 * k;
+    return error_of(n >= m ? map_unit_divide32(n - m, 40) : 0 - map_unit_divide32(m - n + 39, 40));
+}
+
+uint32_t UNIT_CODE(unit_fine_error_rpm)(uint32_t target, uint32_t p, uint32_t k)
+{
+    return fine_error_rpm(target, p, k);
+}
+
 static uint32_t UNIT_CODE(idle_error)(const Task &t, uint32_t p)
 {
+    if (wide(t))                                                        // format 18: the idle task's target
+        return fine_error_rpm(map_unit_own_on(MAP_UNIT_IDLE_TARGET, t.ram), p, speed_k(t)); // in rpm
     return fine_error(byte_of(t, 18), p, speed_k(t));                   // IdleTarget
 }
 
@@ -1400,7 +1460,7 @@ static void UNIT_CODE(lambda_run)(const Task &t)
     bool open = bit(t, get(t, LM_START)) || bit(t, get(t, LM_NOT_SYNCED)) || bit(t, get(t, LM_FUEL_CUT))
                 || bit(t, get(t, LM_BOOST_CUT)) || lambda_load_open(t);
     if (!open)                                                          // CJNE A,Rpm: C; JC Main_Lambda_Open
-        open = constant(t, closed ? LM_RPM_MAX : LM_RPM_CLOSE) < byte_of(t, LM_RPM);
+        open = speed_at(t, word(t, 0) + get(t, closed ? LM_RPM_MAX : LM_RPM_CLOSE)) < speed_of(t, byte_of(t, LM_RPM));
     if (open)
         closed = false;                                                 // CLR ClosedLoop
     else
@@ -1468,7 +1528,7 @@ namespace
 // Cal_IsvBasicSetting, Cal_IsvDutyGain and Cal_IsvDutyOffset; the ids of Idle_Target_Map, Idle_Crank,
 // Isv_Base_Map and Isv_Overrun; the bits NotSynced, StartMode, FuelCut, IdleSwitch, FullLoadSwitch and
 // IdleReturn; the addresses of the marks' byte, FirePeriodL, FirePeriodH, IdleTarget, AdvanceDyn,
-// IdleIntLo, IdleIntHi, IsvRamp, Rpm, IsvHighL and IsvHighH.
+// IdleIntLo, IdleIntHi, IsvRamp, Rpm, IsvHighL and IsvHighH; format 18, Idle_Ramp's speed in rpm (a word).
 enum : uint32_t
 {
     ID_CONSTANTS = 0,
@@ -1506,6 +1566,7 @@ enum : uint32_t
     ID_RPM,
     ID_HIGH_L,
     ID_HIGH_H,
+    ID_RAMP_RPM_WIDE,   // format 18: Idle_Ramp's speed in rpm (a word)
 };
 
 // Add_Saturate: the sum, at most FFh.
@@ -1545,11 +1606,18 @@ static bool UNIT_CODE(idle_state)(const Task &t)
     uint32_t target = value(t, get(t, ID_TARGET_MAP));                  // SETB IdleDuty; Idle_Target_Map
     if (!(byte_of(t, ID_PINS) & PIN_AC))                                // JB AC_REQUEST: requested, low
     {
-        uint32_t ac = constant(t, ID_TARGET_AC);                        // CJNE A,B; JNC: the larger
+        uint32_t ac = speed_at(t, word(t, 0) + get(t, ID_TARGET_AC));   // CJNE A,B; JNC: the larger
         if (ac >= target)
             target = ac;
     }
-    own(t, ID_TARGET, target);
+    if (wide(t))                                                        // format 18: the target in rpm the
+    {                                                                   //   P28's own, IdleTarget the byte
+        pair_set_own(MAP_UNIT_IDLE_TARGET, target, t.ram);              //   nearest it (the log's), at most
+        uint32_t nearest = map_unit_divide32(target + 20, 40);          //   FFh
+        own(t, ID_TARGET, nearest > 0xFF ? 0xFF : nearest);
+    }
+    else
+        own(t, ID_TARGET, target);
     if (bit(t, get(t, ID_START)))                                       // starting: held
         return true;
     if (bit(t, get(t, ID_FUEL_CUT)) || !bit(t, get(t, ID_IDLE)))        // Idle_Held
@@ -1564,7 +1632,7 @@ static bool UNIT_CODE(idle_state)(const Task &t)
     {
         uint32_t p = byte_of(t, ID_FIRE_H) << 8 | byte_of(t, ID_FIRE_L);
         uint32_t k = get(t, ID_SPEED_K) | get(t, ID_SPEED_K + 1) << 8 | get(t, ID_SPEED_K + 2) << 16;
-        if (!(fine_error(target, p, k) & 0x80))
+        if (!((wide(t) ? fine_error_rpm(target, p, k) : fine_error(target, p, k)) & 0x80))
         {
             back = false;
             set_bit(t, get(t, ID_RETURN), false);                       // CLR IdleReturn
@@ -1603,7 +1671,9 @@ static bool UNIT_CODE(idle_state)(const Task &t)
 static uint32_t UNIT_CODE(idle_ramp)(const Task &t, uint32_t r)
 {
     uint32_t a;
-    if (byte_of(t, ID_RPM) < get(t, ID_RAMP_RPM))                       // CJNE A,#10: C; JNC Idle_Ramp_Step
+    bool under = wide(t) ? speed_of(t, 0) < word(t, ID_RAMP_RPM_WIDE)   // format 18: in rpm
+                         : byte_of(t, ID_RPM) < get(t, ID_RAMP_RPM);
+    if (under)                                                          // CJNE A,#10: C; JNC Idle_Ramp_Step
     {
         own(t, ID_RAMP, 0xFF);
         a = value(t, get(t, ID_CRANK));

@@ -103,6 +103,7 @@ static constexpr uint32_t WHOLE = 11;    // the format with the whole tick at th
 static constexpr uint32_t MAPS = 12;     // the format with the MAP pulse on the unit (its own take)
 static constexpr uint32_t SLOW = 13;     // the format with the slow work on the unit (slot 5's channel)
 static constexpr uint32_t KNOCK = 16;    // the format with the KLR's knock line (its mark, its counts)
+static constexpr uint32_t WIDE = 18;     // the format with 16-bit inputs: the speed in rpm (step A)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -633,6 +634,14 @@ enum : uint32_t
     TURN_CUT,   // a cut: the next reference left out, the injection counted
 };
 
+// The turn's rev limit: the speed byte over Cal_RevLimit, or (format 18) the speed in rpm over its word.
+static __force_inline bool over_limit()
+{
+    if (at(MARK + 4) >= WIDE)
+        return (at(pair.rev_limit) << 8 | at(pair.rev_limit + 1)) < map_unit_own(MAP_UNIT_SPEED);
+    return at(pair.rev_limit) < map_unit_ram(pair.rpm_at);
+}
+
 static uint32_t UNIT_CODE(turn)()
 {
     uint32_t target = pair.turn_due, decision = TURN_PULSE;
@@ -643,7 +652,7 @@ static uint32_t UNIT_CODE(turn)()
             target = pair.turn_speed;
             decision = TURN_NONE;
         }
-        else if (at(pair.rev_limit) < map_unit_ram(pair.rpm_at) || ram_bit(pair.fuel_cut_bit)
+        else if (over_limit() || ram_bit(pair.fuel_cut_bit)
                  || ram_bit(pair.boost_cut_bit))                // SUBB A,Rpm; ORL C,FuelCut; ORL C,BoostCut
         {
             pair.next_skips = 1;
@@ -823,6 +832,7 @@ struct Control
     uint32_t count_at, switch_at, copy[2], pipe_rpm, remake_rpm;
     uint32_t fire_l, fire_h, advance_at, dyn_at, inj_l, inj_h, dead_at, flags_at, boost_at;
     uint32_t speed_task, advance_task, rest_task, pulse_task, again_task, speed_k;
+    bool wide;                                                  // format 18: the speed in rpm too
     uint32_t tick_task, load_at, accel_at, after_at, idle_bit, full_bit, afm_filt_at, afm_at; // format 10
     uint32_t start_task, lambda_task, idle_task, tick_at, lam_at, high_l, high_h; // format 11
     uint32_t stream_ticks, stream_list;                         //   the log's: Cal_StreamTicks, its list
@@ -886,11 +896,36 @@ struct Pings
 };
 
 static Control control UNIT_DATA = {};
+
+// Format 18: the speed to compare with a speed in rpm: the P28's own, else the speed byte as given.
+static __force_inline uint32_t speed_of(uint32_t byte, const uint8_t *ram)
+{
+    return control.wide ? map_unit_own_on(MAP_UNIT_SPEED, ram) : byte;
+}
 static Levels levels UNIT_DATA = {};
 static Pings pings UNIT_DATA = {};
 alignas(4) static uint8_t work[0x80] UNIT_DATA = {};        // an L1 job's copy of the 8051's RAM
 alignas(4) static uint8_t before[0x80] UNIT_DATA = {};      // ... as it took it
 alignas(4) static uint8_t tick_work[0x80] UNIT_DATA = {};   // L2's: the tick's, then the frame's
+static uint32_t tick_own_taken[4] UNIT_DATA = {}; // format 18: the own values as the tick took them
+
+// Format 18: the unit's own values into the tick's copy (the interrupts held off, as its RAM's copy), and
+// back where the tick changed them (at its commit, the events held).
+static void UNIT_CODE(take_own)()
+{
+    __asm volatile("cpsid i" ::: "memory");
+    map_unit_owns.tick_ram = tick_work;
+    for (uint32_t i = 0; i < 4; i++)
+        map_unit_owns.tick[i] = tick_own_taken[i] = map_unit_owns.own[i];
+    __asm volatile("cpsie i" ::: "memory");
+}
+
+static void UNIT_CODE(give_own)()
+{
+    for (uint32_t i = 0; i < 4; i++)
+        if (map_unit_owns.tick[i] != tick_own_taken[i])
+            map_unit_owns.own[i] = map_unit_owns.tick[i];
+}
 alignas(4) static uint8_t tick_before[0x80] UNIT_DATA = {};
 
 static __force_inline uint32_t now_us()
@@ -1142,11 +1177,22 @@ static __force_inline void count_injection()
         count++;
 }
 
+// Format 18: the speed in rpm from a firing's length (machine cycles, at most 24 bits), rounded: 40 x
+// SPEED_K over it, SPEED_K being what the speed byte's 40 rpm a count are from; at most FFFFh (a
+// length under about 230 cycles, no engine's: never wrapped round to a low speed).
+static __force_inline uint32_t speed_rpm(uint32_t length, uint32_t speed_k)
+{
+    uint32_t rpm = map_unit_divide32(speed_k * 40 + (length >> 1), length);
+    return rpm > 0xFFFF ? 0xFFFF : rpm;
+}
+
 // Main_Capture: the firing's length into FirePeriod; past 16 bits (Capture_Long: the engine under about
 // 229 rpm) FFFFh, and the speed byte the times the length goes into SPEED_K + half of it (Speed_Count
-// then keeps it).
+// then keeps it). Format 18: the speed in rpm from any length (the P28's own input 80h).
 static void UNIT_CODE(firing_length)(uint32_t length)
 {
+    if (control.wide && length != 0)
+        map_unit_set_own(MAP_UNIT_SPEED, speed_rpm(length > 0xFFFFFF ? 0xFFFFFF : length, control.speed_k));
     if (length <= 0xFFFF)
     {
         work_byte(control.fire_l) = length & 0xFF;
@@ -1217,9 +1263,12 @@ static void UNIT_CODE(run_firing)(const Job &job)
     take_inputs(work, before);
     bool starting = pair.whole ? job.starting != 0 : work_bit(pair.start_bit);   // format 11: as the
     bool stages = false, pulse = false, cut = false;                             //   branch took it
-    if (job.length != 0)
+    uint32_t was = speed_of(work_byte(pair.rpm_at), work);              // (format 18: the rate's, as the
+    if (job.length != 0)                                                //   byte before the stages)
     {
         firing_length(job.length);                                      // Main_Capture
+        if (!control.wide || job.length > 0xFFFF)
+            was = speed_of(work_byte(pair.rpm_at), work);               // (Capture_Long's byte, at once)
         uint8_t &slew = work_byte(pair.slew_at);                        // Turn_Start: the slew's count
         if (slew != 0)
             slew--;
@@ -1235,7 +1284,7 @@ static void UNIT_CODE(run_firing)(const Job &job)
             count_injection();                                          // Main_Turn_Cut's
     }
     else if (job.length != 0)
-        stages = work_byte(pair.rpm_at) < control.pipe_rpm;             // the rate: CJNE A,#PIPE_RPM; CPL C
+        stages = was < control.pipe_rpm;                                // the rate: CJNE A,#PIPE_RPM; CPL C
     if (stages)
         run_stages(pulse);
     if (give_back(job.generation, work, before))
@@ -1278,6 +1327,14 @@ uint32_t UNIT_CODE(pair_log_read)(uint32_t *from, uint8_t *bytes, uint32_t most)
 // and the sum of the count and those bytes. Made after the tick's commit and the pulse made again from
 // the unit's copy as it is then (L2's copy again, the snoop's bytes over it), so the bus level's own
 // bits (NotSynced, ToothFault, the phase, RefMissing) are as it has them.
+// Format 18: a byte of the P28's own 16-bit values, as the log's list names them from 80h: 80h and 81h the
+// speed in rpm's high and low bytes, 82h and 83h the load's, 84h and 85h the idle target's.
+static __force_inline uint32_t own_byte(uint32_t address)
+{
+    uint32_t value = map_unit_own(0x80 + ((address - 0x80) >> 1 & 3));
+    return (address & 1 ? value : value >> 8) & 0xFF;
+}
+
 static void UNIT_CODE(make_frame)(uint32_t tick)
 {
     uint32_t every = at(control.stream_ticks);
@@ -1296,7 +1353,7 @@ static void UNIT_CODE(make_frame)(uint32_t tick)
         uint32_t address = at(control.stream_list + i);
         if (address == 0xFF)
             break;
-        uint32_t b = copy_byte(tick_work, address);
+        uint32_t b = control.wide && address >= 0x80 ? own_byte(address) : copy_byte(tick_work, address);
         log_put(b);
         sum += b;
     }
@@ -1324,12 +1381,19 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
         uint32_t jobs = control.shared;
         uint8_t *ram = tick_work;
         take_inputs(ram, tick_before);
+        take_own();
         bool starting = copy_bit(ram, pair.start_bit), asked = control.duty_due, due = false, duty = false;
         if (ping.gap != 0)
         {
             uint32_t bound = map_unit_divide(pair.teeth, ping.gap);     // DIV AB
             if (bound < copy_byte(ram, pair.rpm_at))                    // CJNE A,Rpm; JNC
                 copy_byte(ram, pair.rpm_at) = bound;
+            if (control.wide)                                           // format 18: the speed in rpm's,
+            {                                                           //   40 rpm a tooth a tick
+                uint32_t most = map_unit_divide32(pair.teeth * 40, ping.gap);
+                if (most < map_unit_owns.tick[0])
+                    map_unit_owns.tick[0] = most;
+            }
         }
         run_part(TASK_TICKWORK, TICK_SWITCHES, control.tick_task, ram); // Main_Tick's first: the switches
         run_part(TASK_LAMBDA, LAMBDA_OPEN, control.lambda_task, ram);
@@ -1366,6 +1430,7 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
             levels.tick_dropped++;
             return false;
         }
+        give_own();
         if (over)
             pair_start_over();
         if (asked)
@@ -1377,7 +1442,7 @@ static bool UNIT_CODE(tick_job)(const Ping &ping, uint32_t *counter)
         if ((int32_t)(control.out - queued) >= 0)
             write(pair.ping + 1, ++pair.beat & 0xFF);                   // the heartbeat
         bool waits = control.pulse_made && pair.references == pair.pulse_reference;  // PulseWaits
-        if (waits && !copy_bit(ram, pair.start_bit) && copy_byte(ram, pair.rpm_at) < control.remake_rpm)
+        if (waits && !copy_bit(ram, pair.start_bit) && speed_of(copy_byte(ram, pair.rpm_at), ram) < control.remake_rpm)
         {                                                               // the pulse made again (its job
             __asm volatile("cpsid i" ::: "memory");                     //   asks again: a reference may
             push(JOB_SENT, 0, 0, 0);                                    //   come first); the bus level
@@ -1394,6 +1459,15 @@ bool UNIT_CODE(pair_on_tick_copy)(const uint8_t *ram)
 {
     return ram == tick_work;
 }
+
+void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
+{
+    if (ram == tick_work)
+        map_unit_owns.tick[(input - MAP_UNIT_SPEED) & 3] = value & 0xFFFF;
+    else
+        map_unit_set_own(input, value);
+}
+
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
 // the pulse made again), then its frame.
@@ -1430,13 +1504,20 @@ void UNIT_CODE(pair_tick)()
         pend_tick();
 }
 
-// Format 10's tick (L1's): the beat, and the speed byte's bound.
+// Format 10's tick (L1's): the beat, and the speed byte's bound (format 18: the speed in rpm's too, 40
+// rpm a tooth a tick).
 static void UNIT_CODE(run_tick)(const Job &job)
 {
     write(pair.ping + 1, ++pair.beat & 0xFF);                           // the heartbeat, from this level
     uint32_t gap = job.length;
     if (gap == 0 || job.generation != control.generation)
         return;
+    if (control.wide)
+    {
+        uint32_t most = map_unit_divide32(pair.teeth * 40, gap);
+        if (most < map_unit_own(MAP_UNIT_SPEED))
+            map_unit_set_own(MAP_UNIT_SPEED, most);
+    }
     uint32_t bound = map_unit_divide(pair.teeth, gap);                  // DIV AB
     if (bound >= map_unit_ram(pair.rpm_at))                             // CJNE A,Rpm; JNC
         return;
@@ -1448,7 +1529,7 @@ static void UNIT_CODE(run_sent)(const Job &job)
 {
     take_inputs(work, before);
     bool waits = control.pulse_made && pair.references == pair.pulse_reference;  // PulseWaits
-    if (work_bit(pair.start_bit) || work_byte(pair.rpm_at) >= control.remake_rpm || !waits)
+    if (work_bit(pair.start_bit) || speed_of(work_byte(pair.rpm_at), work) >= control.remake_rpm || !waits)
         return;                                                         // Main_Byte_Again
     make_pulse(true);
     if (give_back(job.generation, work, before))
@@ -1490,6 +1571,8 @@ static void UNIT_CODE(run_stop)(const Job &job)
     work_byte(pair.inj_at) = 0;                                         // MOV InjCount,#00h
     work[0x20 + (pair.decay_bit >> 3 & 0x0F)] &= ~(1u << (pair.decay_bit & 7)); // CLR CrankDecay
     work_byte(control.fire_l) = work_byte(control.fire_h) = 0xFF;       // no firing: the count skipped
+    if (control.wide)                                                   // format 18: no firing's length, the
+        map_unit_set_own(MAP_UNIT_SPEED, 40 * work_byte(pair.rpm_at));  //   speed in rpm the byte's
     run_stages(true);
     if (pair.whole)                                                     // format 11: InjHold cleared (the
     {                                                                   //   8051's stop); the valve's duty
@@ -2250,6 +2333,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         reach = reach && pair.whole;
     }
     control.pipelined = false;
+    control.wide = false;
     control.in = control.out = control.generation = 0;
     control.gap = control.side = control.count = control.turn_pulses = control.all_pulses = 0;
     control.ticks = 0;
@@ -2262,7 +2346,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         control.switch_at = word(u + 69);
         control.copy[0] = word(u + 71);
         control.copy[1] = word(u + 73);
-        control.pipe_rpm = at(u + 75);
+        control.pipe_rpm = at(u + 75);                          // (format 18: in rpm, below)
         control.remake_rpm = at(u + 76);
         control.fire_l = at(u + 77) & 0x7F;
         control.fire_h = at(u + 78) & 0x7F;
@@ -2307,6 +2391,12 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
                      && control.pulse_task != 0 && control.again_task != 0 && control.tick_task != 0
                      && (!pair.whole || (control.start_task != 0 && control.lambda_task != 0 && control.idle_task != 0));
         control.pipelined = copies && tasks;
+        control.wide = at(MARK + 4) >= WIDE;
+        if (control.wide)                                       // format 18: the pipeline's rates in rpm
+        {                                                       //   (words after format 16's knock mark)
+            control.pipe_rpm = word(u + 137);
+            control.remake_rpm = word(u + 139);
+        }
         reach = reach && control.pipelined;
     }
     control.mapped = false;
@@ -2394,6 +2484,10 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     uint32_t *out = pair_case.out;
     if (routine == 0)                                           // Period_T64: P, RECIP32
         out[0] = period_t64(in[0], in[1]);
+    else if (routine == 24)                                     // format 18: the speed in rpm: the length, SPEED_K
+        out[0] = speed_rpm(in[0], in[1]);
+    else if (routine == 25)                                     // format 18: the idle's fine error in rpm: the
+        out[0] = unit_fine_error_rpm(in[0], in[1], in[2]);      //   target (rpm), the firing's length, SPEED_K
     else if (routine == 1)                                      // Spark_Place: advance, SPARK_B, T64
     {
         Place place = spark_place(in[0], in[1], in[2]);

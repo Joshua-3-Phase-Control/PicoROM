@@ -251,11 +251,202 @@ static uint32_t UNIT_CODE(factor_map_lookup)(uint32_t map, uint32_t axes, uint32
     return factor_lookup(map, axes, first, second);
 }
 
-// The value of the map at map at its inputs, by the image's format.
-static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+// ---------------------------------------------------------------------------------------------------
+// Format 18 on (DME-Sim's docs/Paired_Precision.md): 16-bit values and inputs. A map whose index entry
+// has 40h beside its axes has its values 16 bits; an axis whose input is 80h or on reads the P28's own
+// 16-bit input of that number (80h: the speed in rpm; 81h: the load, step C) and has its points 16
+// bits, rising; both high byte first. The arithmetic is format 17's; a division too big for the
+// reciprocals goes to the SIO's divider. The 8-bit maps keep format 17's lookup.
+
+static constexpr uint32_t WIDE = 18;          // the format with 16-bit values and inputs
+static constexpr uint32_t WIDE_VALUES = 0x40; // beside an index entry's axes: the map's values 16 bits
+static constexpr uint32_t OWN = 0x80;         // an axis's input from here on: the P28's own, 16 bits
+
+MapUnitOwn map_unit_owns UNIT_DATA = {};
+
+void UNIT_CODE(map_unit_set_own)(uint32_t input, uint32_t value)
 {
-    if (at(MARK + 4) < POINTS)
-        return factor_map_lookup(map, axes, first, second);
+    map_unit_owns.own[(input - OWN) & 3] = value & 0xFFFF;
+}
+
+uint32_t UNIT_CODE(map_unit_own)(uint32_t input)
+{
+    return map_unit_owns.own[(input - OWN) & 3];
+}
+
+// x / d (d not 0) and its remainder by the SIO's divider. A level of the unit breaks in on any code of
+// the core, the SDK's own divisions among it, so a calculation that was going or not yet read (DIRTY) is
+// saved and put back after, as the SDK's interrupt code does (hw_divider_save_state's order); the
+// interrupts are held off throughout, so that no level breaks in on this one.
+static __force_inline uint32_t divide(uint32_t x, uint32_t d, uint32_t *remainder)
+{
+    uint32_t ints = save_and_disable_interrupts();
+    bool dirty = sio_hw->div_csr & SIO_DIV_CSR_DIRTY_BITS;
+    uint32_t saved[4] = {};
+    if (dirty)
+    {
+        saved[0] = sio_hw->div_udividend;
+        saved[1] = sio_hw->div_udivisor;
+        while (!(sio_hw->div_csr & SIO_DIV_CSR_READY_BITS))
+            ;
+        saved[2] = sio_hw->div_remainder;
+        saved[3] = sio_hw->div_quotient;
+    }
+    sio_hw->div_udividend = x;
+    sio_hw->div_udivisor = d;
+    while (!(sio_hw->div_csr & SIO_DIV_CSR_READY_BITS))
+        ;
+    *remainder = sio_hw->div_remainder;
+    uint32_t q = sio_hw->div_quotient;
+    if (dirty)
+    {
+        sio_hw->div_udividend = saved[0];
+        sio_hw->div_udivisor = saved[1];
+        sio_hw->div_remainder = saved[2];
+        sio_hw->div_quotient = saved[3];
+    }
+    restore_interrupts(ints);
+    return q;
+}
+
+uint32_t UNIT_CODE(map_unit_divide32)(uint32_t x, uint32_t d)
+{
+    uint32_t rest;
+    return divide(x, d, &rest);
+}
+
+// A place on an axis: the index of its point, the distance above it and the width to the next (0 at
+// either end: the end's value).
+struct Wide
+{
+    uint32_t index, distance, width;
+};
+
+// Point k (from 1) of an axis on the P28's own input: a word, high byte first.
+static __force_inline uint32_t own_point(const uint8_t *rom, uint32_t axis, uint32_t k)
+{
+    uint32_t a = axis + 2 * k;
+    return rom[a & 0xFFFF] << 8 | rom[(a + 1) & 0xFFFF];
+}
+
+// The input's place on an axis on the P28's own input, its points rising: the highest point at or below
+// it, which format 17's search from the top finds, found by halves (4 steps for 16 points).
+static __force_inline Wide own_place(uint32_t axis, uint32_t input)
+{
+    const uint8_t *rom = unit.rom;
+    uint32_t count = rom[(axis + 1) & 0xFFFF], low = 0, high = count;  // the point at low at or below the
+    while (low < high)                                                  //   input (0: none), those past
+    {                                                                   //   high above it
+        uint32_t mid = (low + high + 1) >> 1;
+        if (own_point(rom, axis, mid) <= input)
+            low = mid;
+        else
+            high = mid - 1;
+    }
+    if (low == 0)
+        return {0, 0, 0};                                               // below the first, or no points
+    if (low == count)
+        return {count - 1, 0, 0};                                       // at the last or past it
+    uint32_t point = own_point(rom, axis, low);
+    return {low - 1, input - point, own_point(rom, axis, low + 1) - point};
+}
+
+// The input's place on the axis at axis: on an 8051 byte, searched from the top as format 17's (on any
+// bytes); on the P28's own input, its points rising, by halves.
+static __force_inline Wide wide_place(uint32_t axis, uint32_t input)
+{
+    const uint8_t *rom = unit.rom;
+    if (rom[axis & 0xFFFF] & OWN)
+        return own_place(axis, input);
+    uint32_t count = rom[(axis + 1) & 0xFFFF], k = count, point = 0;
+    uint32_t a = axis + 1 + count;                      // point k at axis + 1 + k
+    for (; k > 1; k--, a--)
+        if (input >= (point = rom[a & 0xFFFF]))
+            break;
+    if (k == 0)
+        return {0, 0, 0};
+    if (k == 1)
+        point = rom[(axis + 2) & 0xFFFF], a = axis + 2;
+    if (k == count || input < point)
+        return {k - 1, 0, 0};
+    return {k - 1, input - point, rom[(a + 1) & 0xFFFF] - point};
+}
+
+// The bytes after the axis at axis: its input, count and points.
+static __force_inline uint32_t wide_after(uint32_t axis)
+{
+    return (axis + 2 + at(axis + 1) * (at(axis) & OWN ? 2 : 1)) & 0xFFFF;
+}
+
+// from + (to - from) x distance / width at the place, its size rounded half up, for either sign: by the
+// reciprocals where they serve (format 17's), a quotient under 8 by subtraction (neighbouring cells are
+// near), else the SIO's divider.
+static __force_inline uint32_t wide_interpolate(uint32_t from, uint32_t to, Wide place, uint32_t mask)
+{
+    if (place.width == 0)
+        return from;
+    uint32_t size = (to >= from ? to - from : from - to) * place.distance, q, rest;
+    if (place.width < 0x100 && size < 0x10000)
+    {
+        q = size * reciprocals.of[place.width] >> 16; // at most one too high
+        if (q * place.width > size)
+            q--;
+        rest = size - q * place.width;
+    }
+    else if (size < 8 * place.width)
+    {
+        for (q = 0, rest = size; rest >= place.width; q++)
+            rest -= place.width;
+    }
+    else
+        q = divide(size, place.width, &rest);
+    if (2 * rest >= place.width)
+        q++;
+    return (to >= from ? from + q : from - q) & mask;
+}
+
+// The row whose cells (bytes or words) start at cells, at the column's place.
+static __force_inline uint32_t wide_row(uint32_t cells, Wide place, bool words)
+{
+    const uint8_t *rom = unit.rom;
+    if (!words)
+    {
+        uint32_t a = (cells + place.index) & 0xFFFF, from = rom[a];
+        return place.width == 0 ? from : wide_interpolate(from, rom[(a + 1) & 0xFFFF], place, 0xFF);
+    }
+    uint32_t a = (cells + 2 * place.index) & 0xFFFF, from = rom[a] << 8 | rom[(a + 1) & 0xFFFF];
+    if (place.width == 0)
+        return from;
+    return wide_interpolate(from, rom[(a + 2) & 0xFFFF] << 8 | rom[(a + 3) & 0xFFFF], place, 0xFFFF);
+}
+
+static uint32_t UNIT_CODE(wide_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+{
+    bool words = axes & WIDE_VALUES;
+    Wide row = wide_place(map, first);
+    uint32_t after = wide_after(map);
+    if ((axes & 3) < 2)
+        return wide_row(after, row, words);
+    uint32_t columns = at(after + 1), width = words ? 2 : 1;
+    Wide column = wide_place(after, second);
+    uint32_t cells = (wide_after(after) + row.index * columns * width) & 0xFFFF;
+    uint32_t here = wide_row(cells, column, words);
+    if (row.width == 0)
+        return here;
+    return wide_interpolate(here, wide_row((cells + columns * width) & 0xFFFF, column, words), row,
+                            words ? 0xFFFF : 0xFF);
+}
+
+// A map needs the wide lookup: its values 16 bits, or an axis on one of the P28's own inputs.
+static __force_inline bool wide_map(uint32_t map, uint32_t axes)
+{
+    return (axes & WIDE_VALUES) || (at(map) & OWN) || ((axes & 3) > 1 && (at(wide_after(map)) & OWN));
+}
+
+// Format 17's lookup, and format 18's of a map with neither 16-bit values nor an axis on the P28's own
+// input; a function of its own, so that the others don't save the registers it needs.
+static uint32_t UNIT_CODE(points_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+{
     uint32_t row = points_place(map, first), after = (map + 2 + at(map + 1)) & 0xFFFF;
     if (axes < 2)
         return points_row(after, row);
@@ -267,11 +458,44 @@ static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t
     return interpolate(here, points_row((cells + columns) & 0xFFFF, column), row);
 }
 
-// A map's second axis's first byte (its input's RAM address): after the first's 9 bytes, or (format
-// 17) after the first's count and points.
+// Format 18: a map on the P28's own input alone, its values bytes (the commonest wide map: one by the
+// speed in rpm).
+static uint32_t UNIT_CODE(own_one)(uint32_t map, uint32_t input)
+{
+    Wide row = own_place(map, input);
+    uint32_t a = (map + 2 + 2 * at(map + 1) + row.index) & 0xFFFF, from = at(a);
+    return row.width == 0 ? from : wide_interpolate(from, at(a + 1), row, 0xFF);
+}
+
+// Format 18's lookup of a map whose inputs are known: one alone on the P28's own input, another wide
+// one, or format 17's.
+static __force_inline uint32_t wide_or_points(uint32_t map, uint32_t axes, uint32_t first, uint32_t second, bool wide)
+{
+    if (!wide)
+        return points_lookup(map, axes, first, second);
+    if (axes == 1 && (at(map) & OWN))
+        return own_one(map, first);
+    return wide_lookup(map, axes, first, second);
+}
+
+// The value of the map at map at its inputs, by the image's format.
+static uint32_t UNIT_CODE(map_unit_lookup)(uint32_t map, uint32_t axes, uint32_t first, uint32_t second)
+{
+    uint32_t format = at(MARK + 4);
+    if (format < POINTS)
+        return factor_map_lookup(map, axes, first, second);
+    return wide_or_points(map, axes, first, second, format >= WIDE && wide_map(map, axes));
+}
+
+// A map's second axis's first byte (its input): after the first's 9 bytes, or (format 17) after the
+// first's count and points (format 18: words, its input the P28's own).
 static __force_inline uint32_t second_axis(uint32_t map)
 {
-    return (at(MARK + 4) >= POINTS ? map + 2 + at(map + 1) : map + 9) & 0xFFFF;
+    if (at(MARK + 4) < POINTS)
+        return (map + 9) & 0xFFFF;
+    if (at(MARK + 4) < WIDE)
+        return (map + 2 + at(map + 1)) & 0xFFFF;
+    return wide_after(map);
 }
 
 // A map's entry in the index, by id.
@@ -282,8 +506,15 @@ static __force_inline uint32_t entry_of(uint32_t id)
 
 uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes)
 {
-    uint32_t entry = entry_of(id), map = at(entry) << 8 | at(entry + 1), axes = at(entry + 2);
-    return map_unit_lookup(map, axes, bytes[at(map) & 0x7F], axes > 1 ? bytes[at(second_axis(map)) & 0x7F] : 0);
+    uint32_t entry = entry_of(id), map = at(entry) << 8 | at(entry + 1), axes = at(entry + 2), input = at(map);
+    if (at(MARK + 4) < WIDE)
+        return map_unit_lookup(map, axes, bytes[input & 0x7F], (axes & 3) > 1 ? bytes[at(second_axis(map)) & 0x7F] : 0);
+    uint32_t first = input & OWN ? map_unit_own_on(input, bytes) : bytes[input & 0x7F];   // format 18: the
+    if ((axes & 3) < 2)                                                                 //   inputs and the
+        return wide_or_points(map, axes, first, 0, (axes & WIDE_VALUES) || (input & OWN)); // lookup, once
+    uint32_t next = at(wide_after(map));
+    uint32_t second = next & OWN ? map_unit_own_on(next, bytes) : bytes[next & 0x7F];
+    return wide_or_points(map, axes, first, second, (axes & WIDE_VALUES) || ((input | next) & OWN));
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -623,7 +854,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > POINTS)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > WIDE)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

@@ -37,6 +37,11 @@ void pair_start_over();
 // the task itself.
 bool pair_on_tick_copy(const uint8_t *ram);
 
+// Format 18: one of the P28's own 16-bit values (map_unit.h's) set by a task working on ram: on the tick's
+// copy of the RAM the tick's copy of it, given back at its commit (an L1 job breaking in sees the unit's
+// own, as with the RAM's bytes; map_unit_own_on reads them); else the unit's.
+void pair_set_own(uint32_t input, uint32_t value, const uint8_t *ram);
+
 // Format 9 (the pipeline on the unit, DME-Sim's docs/Paired_Pipeline.md): from the bus level's tasks,
 // a job for the pipeline's level: task 12's overboost guard's period (BoostCount one less, to 0) and
 // task 13's tick values sent (the waiting pulse made again).
