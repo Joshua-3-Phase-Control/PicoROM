@@ -445,8 +445,11 @@ its cut and the dead time in machine cycles:
   makes their factor from K (`map_gain_k`: K x Cal_Stoich x Cal_MapPa / 156,250) into MapK, task 2
   the two words by coolant from it.
 - **The dead time:** Inj_DeadTime's words in cycles, looked up by task 3 at each slow result into
-  DeadNow (the battery's read before the firing's, which the pulse task looked it up with), so that
-  the firing's job reads it; the pulse task reads DeadNow.
+  DeadNow, so that the firing's job reads it; the pulse task reads DeadNow. The turn's pulse so has
+  the battery's read (each firing's slot 2) the pulse task looked it up with; a pulse made again at a
+  tick between that read and the slow result (slot 8) has the read before, where format 21's looked
+  it up itself: a count's dead time behind while the battery moves, after the start (left so, the
+  owner's of 2026-11-12).
 - **The words** are in the RAM's copy, low byte first (the address its description names and the
   next): MapGainNow, DecelGainNow, DeadNow, DecelOwed, DecelCut; MapK three bytes (the mantissa low
   byte first, the exponent).

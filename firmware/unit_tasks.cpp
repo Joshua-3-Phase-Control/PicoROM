@@ -184,9 +184,10 @@ __force_inline bool fine_fuel(const Task &t)
 // machine cycles. The MAP pulse's gains by coolant are fuel a kPa (Accel_MapGain's and Decel_MapGain's
 // words, ug of fuel a cylinder a kPa), which task 2 makes into 1/32 cycle a count of the MAP (MapGainNow,
 // DecelGainNow) by the factor task 1 makes with K (map_gain_k, MapK); the dead time a word in cycles
-// (Inj_DeadTime's words), task 3's at each slow result (DeadNow: the battery's read before the firing's,
-// as the pulse looked it up); the cut owed and taken words (DecelOwed, DecelCut). Each word in the RAM's
-// copy low byte first, at the address its description names and the next.
+// (Inj_DeadTime's words), task 3's at each slow result (DeadNow: for the turn's pulse by the battery's read
+// the pulse looked it up with, for a pulse made again between that read and its slow result by the read
+// before: charge's); the cut owed and taken words (DecelOwed, DecelCut). Each word in the RAM's copy low
+// byte first, at the address its description names and the next.
 constexpr uint32_t CYCLES_FORMAT = 22;
 constexpr uint32_t MAP_LONGEST = 255 * 64; // the MAP pulse and the cut owed at most (format 21's 255 units)
 constexpr uint32_t MAP_STOP = 4;           // the cycles Map_On's stop of TH0 adds to a pulse it lengthens
@@ -599,7 +600,10 @@ static void UNIT_CODE(ign)(const Task &t)
 // Slow_Charge's time: (Dwell_Time x CHARGE_K + CHARGE_0) / 256, a byte at a time. Data: Dwell_Time's id,
 // CHARGE_K's low byte and high byte, CHARGE_0's; format 22, Inj_DeadTime's id and DeadNow's address. Out:
 // ChargeL, ChargeH; format 22, the dead time by battery into DeadNow (a word, cycles), which the pulse's
-// task and the MAP pulse take (the battery as the pulse's task had it: the read before its firing's).
+// task and the MAP pulse take. The battery is read at each firing's slot 2, this slow result is its slot
+// 8: the turn's pulse (slot 0) has the read format 21's pulse task looked it up with, but a pulse made
+// again at a tick between the two has the read before, where format 21's looked it up itself (a count's
+// dead time behind while the battery moves, after the start; left so: the owner, 2026-11-12).
 static void UNIT_CODE(charge)(const Task &t)
 {
     uint32_t time = value(t, get(t, 0));
