@@ -433,6 +433,29 @@ Format 21 (DME-Sim's docs/Paired_Precision.md, step D, the owner's of 2026-11-12
   values' give-back went into a function of its own (`give_owns`) and the running product inline;
   the bank 59.5 KB.
 
+Format 22 (DME-Sim's docs/Paired_Precision.md, step E, the owner's of 2026-11-12) puts the MAP pulse,
+its cut and the dead time in machine cycles:
+- **The MAP pulse** (task 18) is the rise past the deadband x MapGainNow / 32 cycles (MapGainNow 1/32
+  cycle a count of the MAP), from 32 cycles on and at most 16,320; a pulse of its own the dead time
+  and that, a pulse on lengthened by it (`map_lengthen`: less the 4 cycles Map_On's stop of TH0 adds,
+  the low byte none or 32 at least, so that TH0 less it can't overflow again while an overflow waits
+  for its held-off handler). A fall past its deadband owes x DecelGainNow / 32 cycles (`owe`), which
+  the pulse task takes off the turn's pulse down to Cal_InjMinTime exactly.
+- **The gains:** Accel_MapGain's and Decel_MapGain's words are ug of fuel a cylinder a kPa; task 1
+  makes their factor from K (`map_gain_k`: K x Cal_Stoich x Cal_MapPa / 156,250) into MapK, task 2
+  the two words by coolant from it.
+- **The dead time:** Inj_DeadTime's words in cycles, looked up by task 3 at each slow result into
+  DeadNow (the battery's read before the firing's, which the pulse task looked it up with), so that
+  the firing's job reads it; the pulse task reads DeadNow.
+- **The words** are in the RAM's copy, low byte first (the address its description names and the
+  next): MapGainNow, DecelGainNow, DeadNow, DecelOwed, DecelCut; MapK three bytes (the mantissa low
+  byte first, the exponent).
+- **The checks:** pair_test 34 (the gains' factor from K's constants and Cal_MapPa), against DME-Sim's
+  twin.
+- **Its time:** L1's longest job in the car to 7,000 rpm 29.4 us (format 21's 29.8: the dead time's
+  lookup out of the firing's job), the slow job 14.9 us; the division and the root are functions now
+  (the slow work alone calls them); the bank 60.5 KB.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds

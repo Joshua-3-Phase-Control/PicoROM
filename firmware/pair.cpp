@@ -105,6 +105,8 @@ static constexpr uint32_t SLOW = 13;     // the format with the slow work on the
 static constexpr uint32_t KNOCK = 16;    // the format with the KLR's knock line (its mark, its counts)
 static constexpr uint32_t WIDE = 18;     // the format with 16-bit inputs: the speed in rpm (step A)
 static constexpr uint32_t FUEL = 21;     // the format with the fuel in 16 bits on the air's base (step D)
+                                         //   (22, step E: the MAP pulse, the cut and the dead time in cycles,
+                                         //   unit_tasks.cpp's alone)
 static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
@@ -2555,6 +2557,8 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[0] = unit_fuel_time(in, routine == 32);             //   or starting (32)
     else if (routine == 33)                                     // format 21: a fade's share: the period,
         out[0] = unit_fade_share(in[0], in[1]);                 //   the remainder
+    else if (routine == 34)                                     // format 22: the MAP pulse's gains' factor
+        out[0] = unit_map_gain_k(in);                           //   (mantissa, exponent): K's constants, Pa
     else if (routine == 26)                                     // format 19: Spark_Place at the advance in
     {                                                           //   1/64 tooth, SPARK_B, T64
         Place place = spark_place((int16_t)in[0], in[1], in[2]);

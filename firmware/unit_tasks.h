@@ -132,6 +132,11 @@ uint32_t unit_fuel_k(uint32_t stoich, uint32_t flow, uint32_t density, uint32_t 
 uint32_t unit_fuel_time(const uint32_t *in, bool starting);
 uint32_t unit_fade_share(uint32_t period, uint32_t r);
 
+// Format 22 (pair_test's, for DME-Sim's twin): the MAP pulse's gains' factor, 1/32 cycle a count of the MAP
+// for 1 ug of fuel a kPa (its mantissa, bits 0-15, and exponent, 16-31), from K's constants (in[0] to in[4])
+// and the MAP sensor's Pa a count (in[5]).
+uint32_t unit_map_gain_k(const uint32_t *in);
+
 #endif
 
 #endif

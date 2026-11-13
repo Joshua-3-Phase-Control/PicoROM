@@ -180,6 +180,34 @@ __force_inline bool fine_fuel(const Task &t)
     return at(t.rom, 0x2004) >= FUEL_FORMAT;
 }
 
+// Format 22 (step E: the owner's choices of 2026-11-12): the MAP pulse, the pulse cut and the dead time in
+// machine cycles. The MAP pulse's gains by coolant are fuel a kPa (Accel_MapGain's and Decel_MapGain's
+// words, ug of fuel a cylinder a kPa), which task 2 makes into 1/32 cycle a count of the MAP (MapGainNow,
+// DecelGainNow) by the factor task 1 makes with K (map_gain_k, MapK); the dead time a word in cycles
+// (Inj_DeadTime's words), task 3's at each slow result (DeadNow: the battery's read before the firing's,
+// as the pulse looked it up); the cut owed and taken words (DecelOwed, DecelCut). Each word in the RAM's
+// copy low byte first, at the address its description names and the next.
+constexpr uint32_t CYCLES_FORMAT = 22;
+constexpr uint32_t MAP_LONGEST = 255 * 64; // the MAP pulse and the cut owed at most (format 21's 255 units)
+constexpr uint32_t MAP_STOP = 4;           // the cycles Map_On's stop of TH0 adds to a pulse it lengthens
+
+__force_inline bool fine_map(const Task &t)
+{
+    return at(t.rom, 0x2004) >= CYCLES_FORMAT;
+}
+
+// The RAM's word at address (its low byte) and the next (its high).
+__force_inline uint32_t ram_word(const Task &t, uint32_t address)
+{
+    return t.ram[address & 0x7F] | t.ram[(address + 1) & 0x7F] << 8;
+}
+
+__force_inline void set_ram_word(const Task &t, uint32_t address, uint32_t value)
+{
+    t.ram[address & 0x7F] = value & 0xFF;
+    t.ram[(address + 1) & 0x7F] = value >> 8 & 0xFF;
+}
+
 struct F16
 {
     uint32_t m;
@@ -237,7 +265,7 @@ __force_inline F16 f16_mul(F16 a, F16 b)
 }
 
 // a / b (b 0: none), the SIO's divider's quotient.
-__force_inline F16 f16_div(F16 a, F16 b)
+static F16 UNIT_CODE(f16_div)(F16 a, F16 b)
 {
     if (a.m == 0 || b.m == 0)
         return {0, 0};
@@ -266,7 +294,7 @@ __force_inline uint32_t root32(uint32_t x)
 }
 
 // The square root of a as an F16: its mantissa's (with an even exponent) to 16 bits.
-__force_inline F16 f16_root(F16 a)
+static F16 UNIT_CODE(f16_root)(F16 a)
 {
     if (a.m == 0)
         return {0, 0};
@@ -289,6 +317,21 @@ static F16 UNIT_CODE(fuel_k)(uint32_t stoich, uint32_t flow, uint32_t density, u
 {
     F16 below = f16_mul(f16_mul(f16_whole(stoich), f16_whole(flow)), f16_whole(density));
     return f16_mul(f16_div(f16_whole(150000000), below), f16_root(f16_div(f16_whole(rated), f16_whole(rail))));
+}
+
+// Format 22: the MAP pulse's gains' factor, 1/32 cycle a count of the MAP for 1 ug of fuel a kPa: the MAP
+// sensor's Pa a count x 32 / 1,000 x the cycles 1 ug of fuel takes, 30,000 / (the injectors' flow x the
+// fuel's density) x the root, which is K x the stoichiometric ratio (x 100) / 5,000,000: K x the ratio x
+// Pa / 156,250 (no division or root of its own).
+static F16 UNIT_CODE(map_gain_k)(F16 k, uint32_t stoich, uint32_t pa)
+{
+    return f16_div(f16_mul(k, f16_whole(stoich * pa)), f16_whole(156250));
+}
+
+// Format 22: the factor at a in the RAM's copy: its mantissa low byte first, then its exponent (signed).
+__force_inline F16 map_k_at(const Task &t, uint32_t a)
+{
+    return {(uint32_t)t.ram[a & 0x7F] | (uint32_t)t.ram[(a + 1) & 0x7F] << 8, (int8_t)t.ram[(a + 2) & 0x7F]};
 }
 
 // The base (a whole number to 16 bits) x s in whole cycles, rounded down, held to 16 bits.
@@ -494,7 +537,8 @@ static void UNIT_CODE(warm_up)(const Task &t)
 // in Constants, Fuel_AirTemp's id. Out: FuelFactorL, FuelFactorH, FuelShift. Format 21: Cal_FuelTrim
 // words, and in Cal_InjScale's place Cal_Stoich's, the four words after it Cal_InjBaseFlow,
 // Cal_FuelDensity, Cal_InjFlowKpa and Cal_RailKpa: K x the trim x Fuel_AirTemp (words), its mantissa
-// FuelFactorH:L and its exponent FuelShift (signed).
+// FuelFactorH:L and its exponent FuelShift (signed). Format 22: data Cal_MapPa's address and MapK's; the
+// MAP pulse's gains' factor (map_gain_k) into MapK, for task 2.
 static void UNIT_CODE(fuel)(const Task &t)
 {
     uint32_t constants = word(t, 2);
@@ -508,6 +552,14 @@ static void UNIT_CODE(fuel)(const Task &t)
         put(t, 0, s.m);
         put(t, 1, s.m >> 8);
         put(t, 2, (uint32_t)s.e);
+        if (fine_map(t))
+        {
+            F16 g = map_gain_k(k, word_at(t, c), word_at(t, word(t, 7)));
+            uint32_t a = get(t, 9);
+            t.ram[a & 0x7F] = g.m & 0xFF;
+            t.ram[(a + 1) & 0x7F] = g.m >> 8 & 0xFF;
+            t.ram[(a + 2) & 0x7F] = (uint32_t)g.e & 0xFF;
+        }
         return;
     }
     uint32_t trim = at(t.rom, constants + ((step + get(t, 4)) & 0xFF)); // ADD A,#(Cal_FuelTrim - Constants); MOVC
@@ -519,8 +571,10 @@ static void UNIT_CODE(fuel)(const Task &t)
 }
 
 // Main_Ign. Data: Ign_Coolant's id, Ign_Coolant_Cold's, Ign_AirTemp's, Accel_MapGain's, ColdStartIgn's
-// bit; format 15, Decel_MapGain's id. Out: IgnSlow, MapGainNow; format 15, DecelGainNow (the pulse cut's
-// gain by coolant, which task 18 takes, as it takes MapGainNow).
+// bit; format 15, Decel_MapGain's id; format 22, MapK's address (task 1's factor). Out: IgnSlow,
+// MapGainNow; format 15, DecelGainNow (the pulse cut's gain by coolant, which task 18 takes, as it takes
+// MapGainNow). Format 22: the two gains words, 1/32 cycle a count of the MAP: the maps' fuel a kPa x MapK,
+// held to FFFFh.
 static void UNIT_CODE(ign)(const Task &t)
 {
     if (fine_spark(t))                                                  // format 19: in 1/64 tooth, the
@@ -530,13 +584,22 @@ static void UNIT_CODE(ign)(const Task &t)
         uint32_t sum = sum_map(t, 0, get(t, bit(t, get(t, 4))));        // the cold map after a cold start
         put(t, 0, sum_map(t, sum, get(t, 2)));
     }
+    if (fine_map(t))
+    {
+        F16 k = map_k_at(t, get(t, 6));                                 // MapK
+        set_ram_word(t, t.outputs[1], f16_apply(value(t, get(t, 3)), k));     // MapGainNow
+        set_ram_word(t, t.outputs[2], f16_apply(value(t, get(t, 5)), k));     // DecelGainNow
+        return;
+    }
     put(t, 1, value(t, get(t, 3)));
     if (at(t.rom, 0x2004) >= DECEL_FORMAT)
         put(t, 2, value(t, get(t, 5)));
 }
 
 // Slow_Charge's time: (Dwell_Time x CHARGE_K + CHARGE_0) / 256, a byte at a time. Data: Dwell_Time's id,
-// CHARGE_K's low byte and high byte, CHARGE_0's. Out: ChargeL, ChargeH.
+// CHARGE_K's low byte and high byte, CHARGE_0's; format 22, Inj_DeadTime's id and DeadNow's address. Out:
+// ChargeL, ChargeH; format 22, the dead time by battery into DeadNow (a word, cycles), which the pulse's
+// task and the MAP pulse take (the battery as the pulse's task had it: the read before its firing's).
 static void UNIT_CODE(charge)(const Task &t)
 {
     uint32_t time = value(t, get(t, 0));
@@ -546,6 +609,8 @@ static void UNIT_CODE(charge)(const Task &t)
     sum = (high & 0xFF) + r6;                                           // ADD A,R6
     put(t, 0, sum);                                                     // ChargeL
     put(t, 1, (high >> 8) + (sum >> 8));                                // CLR A; ADDC A,B: ChargeH
+    if (fine_map(t))
+        set_ram_word(t, get(t, 6), value(t, get(t, 5)));                // DeadNow: Inj_DeadTime
 }
 
 // Ign_Advance: the advance's maps summed, each less 20 (Sum_Map). Starting: by speed, then by coolant;
@@ -709,7 +774,7 @@ static uint32_t UNIT_CODE(crank_fuel)(const Task &t, uint32_t *exponent, uint32_
 // Fuel_Mode: the injection time (*time: the time a turn x lambda, twice it unless starting and at most
 // F800h, the shortest at least) and the pulse's TH0 load: the time ramped after an overrun cut (16
 // injections; made again at the step it was made at; format 15, less the cut a fall owes), the dead time
-// on, held over 15/16 of its turns (then twice that), less INJ_OFS. The turn's pulse counted (InjCount,
+// on (format 22: in cycles, and the cut too), held over 15/16 of its turns (then twice that), less INJ_OFS. The turn's pulse counted (InjCount,
 // to 80h; not starting).
 static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, bool again, uint32_t *count,
                                   uint32_t *flags)
@@ -750,7 +815,21 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
     // Format 15 (DME-Sim's docs/Paired_Tip_Outs.md): the cut a fall of the MAP owes (task 18's units of 64
     // cycles, DecelOwed) taken off the turn's pulse, down to the shortest time; the units it took kept
     // (DecelCut) for the pulse made again, which takes as many. None starting.
-    if (at(t.rom, 0x2004) >= DECEL_FORMAT && !starting)
+    bool cycles = fine_map(t);
+    if (cycles && !starting)                                            // format 22: in cycles, words, down
+    {                                                                   //   to the shortest time exactly
+        uint32_t owed = ram_word(t, get(t, 27)), room = r > least ? r - least : 0;
+        uint32_t cut = again ? ram_word(t, get(t, 28)) : owed;
+        if (cut > room)
+            cut = room;
+        r -= cut;
+        if (!again)
+        {
+            set_ram_word(t, get(t, 27), owed - cut);                    // DecelOwed
+            set_ram_word(t, get(t, 28), cut);                           // DecelCut
+        }
+    }
+    else if (at(t.rom, 0x2004) >= DECEL_FORMAT && !starting)
     {
         uint8_t &owed = t.ram[get(t, 27) & 0x7F], &taken = t.ram[get(t, 28) & 0x7F];
         uint32_t room = r > least ? (r - least) >> 6 : 0, cut = again ? taken : owed;
@@ -765,7 +844,7 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
     }
     if (!again && !starting && *count < 0x80)                           // JB ACC.7,Fuel_Mode_Dead; INC InjCount
         (*count)++;
-    uint32_t pulse = dead * 5 + r;                                      // MOV B,#05h; MUL AB; ADD A,R6; ADDC A,R7
+    uint32_t pulse = (cycles ? dead : dead * 5) + r;                    // MOV B,#05h; MUL AB; ADD A,R6; ADDC A,R7
     if (pulse > 0xFFFF)
         pulse = 0xFF00 | (pulse & 0xFF);                                // MOV R3,#0FFh
     uint32_t wide = (input(t, 4) << 8 | input(t, 3)) * get(t, starting ? 22 : 21); // FirePeriod; Mul16x8
@@ -841,8 +920,9 @@ static void UNIT_CODE(pulse)(const Task &t, bool again)
         time = time_a_turn(input(t, 6) << 8 | input(t, 5), input(t, 7), exponent, input(t, 8), input(t, 9), map,
                            base, input(t, 12));
     }
-    uint32_t dead = value(t, get(t, 6));                                // Inj_DeadTime
-    uint32_t count = byte_of(t, 24);                                    // InjCount (0 if the decay began)
+    bool cycles = fine_map(t);
+    uint32_t dead = cycles ? ram_word(t, t.outputs[2]) : value(t, get(t, 6));   // Inj_DeadTime (format 22:
+    uint32_t count = byte_of(t, 24);                                    //   task 3's, DeadNow)                                    // InjCount (0 if the decay began)
     Pulse load = fuel_mode(t, &time, dead, again, &count, &flags);
     if (!pair_pulse(load.start, load.overflows, again))
         flags |= PULSE_LATE;
@@ -856,7 +936,8 @@ static void UNIT_CODE(pulse)(const Task &t, bool again)
     }
     put(t, 0, time);                                                    // InjTimeL
     put(t, 1, time >> 8);                                               // InjTimeH
-    put(t, 2, dead);                                                    // DeadNow
+    if (!cycles)
+        put(t, 2, dead);                                                // DeadNow (format 22: task 3's)
     put(t, 3, flags);                                                   // PulseFlags
 }
 
@@ -2340,7 +2421,7 @@ static void UNIT_CODE(idle_duty)(const Task &t)
 // task's). Format 14: Cal_MapCarry's address, and the bytes MapCarry0 and MapCarry1 (the rise each
 // slot carries, the unit's own: 0 from the 8051's start, as the RAM's copy). Format 15: the bytes
 // DecelGainNow (task 2's) and DecelOwed (the pulse cut a fall owes, the unit's own), and
-// Cal_DecelDeadband's address.
+// Cal_DecelDeadband's address. Format 22: the gains, the dead time and the cut owed words (fine_map).
 namespace
 {
 
@@ -2356,28 +2437,52 @@ enum : uint32_t
     MP_CARRY_ON, // format 14: a word
     MP_CARRY = MP_CARRY_ON + 2, // two: the first MAP read's carry, the second's
     MP_DECEL_GAIN = MP_CARRY + 2, // format 15: the pulse cut's gain by coolant (task 2's)
-    MP_DECEL_OWED,               // the cut owed, in 64-cycle units
+    MP_DECEL_OWED,               // the cut owed, in 64-cycle units (format 22: a word, cycles)
     MP_DECEL_DEAD,               // a word: the falls' deadband
 };
 
 // Format 15 (DME-Sim's docs/Paired_Tip_Outs.md: the owner, 2026-11-09): a read's fall below its slot's
 // filter past Cal_DecelDeadband, each read alone (falls are not carried: steady reads sit a count or
 // two under their filters), x DecelGainNow (Decel_MapGain by coolant, task 2's) / 32, owed to the pulse
-// task's cut (DecelOwed, at most 255).
+// task's cut (DecelOwed, at most 255). Format 22: in cycles, DecelGainNow 1/32 cycle a count (at most
+// MAP_LONGEST).
 __force_inline void owe(const Task &t, uint32_t fall)
 {
     uint32_t deadband = at(t.rom, word(t, MP_DECEL_DEAD));
     if (fall <= deadband)
         return;
+    if (fine_map(t))
+    {
+        uint32_t at_owed = get(t, MP_DECEL_OWED);
+        uint32_t sum = ram_word(t, at_owed) + (((fall - deadband) * ram_word(t, get(t, MP_DECEL_GAIN)) + 0x10) >> 5);
+        set_ram_word(t, at_owed, sum > MAP_LONGEST ? MAP_LONGEST : sum);
+        return;
+    }
     uint8_t &owed = t.ram[get(t, MP_DECEL_OWED) & 0x7F];
     uint32_t sum = owed + (((fall - deadband) * byte_of(t, MP_DECEL_GAIN) + 0x10) >> 5);
     owed = sum > 0xFF ? 0xFF : sum;
 }
 
+// Format 22: a pulse on lengthened by longer cycles, R7:R6: it less the cycles Map_On's stop of TH0 adds,
+// its low byte none or 32 at least (1 to 31 to the nearer of them). Map_On takes R6 off TH0 with TH0's
+// handler held off; with an overflow waiting there (TH0 a few counts past FFh), TH0 less a byte under 32
+// would overflow again before the handler took the first, and that overflow be lost (256 cycles more).
+// Format 21's units of 64 cycles never gave such a byte.
+__force_inline uint32_t map_lengthen(uint32_t longer)
+{
+    uint32_t r = longer - MAP_STOP, low = r & 0xFF;
+    if (low != 0 && low < 32)
+        r = low < 16 ? r - low : r + 32 - low;
+    return r;
+}
+
 // Format 14 (DME-Sim's docs/Paired_Transients.md: the owner, 2026-11-09): with Cal_MapCarry on, a rise
 // under the deadband is carried to its slot's next read and added to its rise, so the deadband is paid
 // once on the sum; a read with no rise, the idle switch or start mode ends the carry. Off, each read
-// pays the deadband (format 12's). Format 15: a fall owes the pulse cut (owe).
+// pays the deadband (format 12's). Format 15: a fall owes the pulse cut (owe). Format 22: the pulse in
+// cycles, the rise past the deadband x MapGainNow (1/32 cycle a count), from 32 cycles on (where format
+// 21's rounding made a unit) and at most MAP_LONGEST, the dead time a word; a pulse on lengthened by it
+// as map_lengthen gives it.
 __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint32_t *load)
 {
     uint8_t &filter = t.ram[get(t, MP_PREV + slot) & 0x7F];
@@ -2405,17 +2510,31 @@ __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint3
         return false;
     }
     carry = 0;
-    uint32_t units = ((total - deadband) * byte_of(t, MP_GAIN) + 0x10) >> 5;  // MUL AB; ADD A,#10h ...; / 32
-    if (units > 0xFF)                                                   // CJNE A,#10h; JNC: at most 255
-        units = 0xFF;
-    if (units == 0)                                                     // JZ Main_Map_Out
-        return false;
-    uint32_t longer = units * 64;                                       // Accel_Pulse: R7:R6 = A x 64
-    uint32_t whole = byte_of(t, MP_DEAD) * 5 + longer;                  // R3:R2: the dead time x 5 and it
+    uint32_t whole, lengthen;
+    if (format >= CYCLES_FORMAT)                                        // format 22: in cycles
+    {
+        uint32_t longer = ((total - deadband) * ram_word(t, get(t, MP_GAIN)) + 0x10) >> 5;
+        if (longer < 32)
+            return false;
+        if (longer > MAP_LONGEST)
+            longer = MAP_LONGEST;
+        whole = ram_word(t, get(t, MP_DEAD)) + longer;
+        lengthen = map_lengthen(longer);
+    }
+    else
+    {
+        uint32_t units = ((total - deadband) * byte_of(t, MP_GAIN) + 0x10) >> 5;  // MUL AB; ADD A,#10h ...; / 32
+        if (units > 0xFF)                                               // CJNE A,#10h; JNC: at most 255
+            units = 0xFF;
+        if (units == 0)                                                 // JZ Main_Map_Out
+            return false;
+        lengthen = units * 64;                                          // Accel_Pulse: R7:R6 = A x 64
+        whole = byte_of(t, MP_DEAD) * 5 + lengthen;                     // R3:R2: the dead time x 5 and it
+    }
     uint32_t ofs = get(t, MP_OFS), low = whole & 0xFF;
     uint32_t start = (ofs - low) & 0xFF;                                // MOV A,#INJ_OFS; CLR C; SUBB A,R2
     uint32_t overflows = ((whole >> 8) + (low > ofs ? 1 : 0)) & 0xFF;   // ADD A,#(255 - INJ_OFS); ADDC
-    *load = start | overflows << 8 | longer << 16;
+    *load = start | overflows << 8 | lengthen << 16;
     return true;
 }
 
@@ -2450,6 +2569,14 @@ uint32_t UNIT_CODE(unit_fuel_time)(const uint32_t *in, bool starting)
 uint32_t UNIT_CODE(unit_fade_share)(uint32_t period, uint32_t r)
 {
     return fade_share(period, r);
+}
+
+// Format 22: the MAP pulse's gains' factor's mantissa (bits 0-15) and exponent (16-31, signed), from K's
+// constants (in[0] to in[4], as unit_fuel_k's) and the sensor's Pa a count (in[5]).
+uint32_t UNIT_CODE(unit_map_gain_k)(const uint32_t *in)
+{
+    F16 k = map_gain_k(fuel_k(in[0], in[1], in[2], in[3], in[4]), in[0], in[5]);
+    return (k.m & 0xFFFF) | (uint32_t)k.e << 16;
 }
 
 bool UNIT_CODE(unit_map_pulse)(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
