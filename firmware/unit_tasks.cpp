@@ -2471,9 +2471,16 @@ __force_inline void owe(const Task &t, uint32_t fall)
 // its low byte none or 32 at least (1 to 31 to the nearer of them). Map_On takes R6 off TH0 with TH0's
 // handler held off; with an overflow waiting there (TH0 a few counts past FFh), TH0 less a byte under 32
 // would overflow again before the handler took the first, and that overflow be lost (256 cycles more).
-// Format 21's units of 64 cycles never gave such a byte.
-__force_inline uint32_t map_lengthen(uint32_t longer)
+// Format 21's units of 64 cycles never gave such a byte. Format 23 (the owner, 2026-11-12): Map_On tests
+// TF1 in its stop and lets the handler take an overflow waiting first, so any byte is safe: the pulse
+// less its 5 cycles' stop, exactly.
+constexpr uint32_t STOP_FORMAT = 23;
+constexpr uint32_t MAP_STOP_TESTED = 5;
+
+__force_inline uint32_t map_lengthen(uint32_t longer, uint32_t format)
 {
+    if (format >= STOP_FORMAT)
+        return longer - MAP_STOP_TESTED;
     uint32_t r = longer - MAP_STOP, low = r & 0xFF;
     if (low != 0 && low < 32)
         r = low < 16 ? r - low : r + 32 - low;
@@ -2523,7 +2530,7 @@ __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint3
         if (longer > MAP_LONGEST)
             longer = MAP_LONGEST;
         whole = ram_word(t, get(t, MP_DEAD)) + longer;
-        lengthen = map_lengthen(longer);
+        lengthen = map_lengthen(longer, format);
     }
     else
     {

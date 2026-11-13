@@ -106,7 +106,8 @@ static constexpr uint32_t KNOCK = 16;    // the format with the KLR's knock line
 static constexpr uint32_t WIDE = 18;     // the format with 16-bit inputs: the speed in rpm (step A)
 static constexpr uint32_t FUEL = 21;     // the format with the fuel in 16 bits on the air's base (step D)
                                          //   (22, step E: the MAP pulse, the cut and the dead time in cycles,
-                                         //   unit_tasks.cpp's alone)
+                                         //   unit_tasks.cpp's alone; 23, Map_On's stop tests an overflow
+                                         //   waiting, map_lengthen's)
 static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;

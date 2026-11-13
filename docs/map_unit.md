@@ -459,6 +459,11 @@ its cut and the dead time in machine cycles:
   lookup out of the firing's job), the slow job 14.9 us; the division and the root are functions now
   (the slow work alone calls them); the bank 60.5 KB.
 
+Format 23 (the owner, 2026-11-12) goes with the 8051's Map_On testing TF1 in its stop of TH0: an
+overflow waiting there (TH0's handler held off by Map_Apply) is the handler's first, then the take
+again, so a lengthening by any low byte loses no overflow. `map_lengthen` gives the pulse less the
+stop's 5 cycles, exactly (format 22's low byte of none or 32 at least goes).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
