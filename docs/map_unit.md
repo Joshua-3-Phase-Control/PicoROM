@@ -10,7 +10,7 @@ too (`docs/snoop.md`): what the board learns of the 8051 from the socket alone.
 
 | Build               | Board                   | Serves  | Note                         |
 |---------------------|-------------------------|---------|------------------------------|
-| P28_27C512_70ns_MAP | P28, in the DME socket  | 64 KiB  | Built, not yet run on a P28  |
+| P28_27C512_70ns_MAP | P28, in the DME socket  | 64 KiB  | Run on a P28 by USB alone    |
 | POG_27C020_70ns_MAP | POG, 32 pins            | 192 KiB | To try it on a 32-pin board  |
 
 The unit's code and data live in the last 64 KiB SRAM bank, so the POG build serves three. Both
@@ -30,7 +30,9 @@ powershell -ExecutionPolicy Bypass -File firmware/load_uf2.ps1 -Board dme `
    maps (DME-Sim's `tools/coproc_maps/make_coproc.py` makes rom_lean's), and set `addr_mask` to
    `0x1fff`, as for any 2764 image: the DME ties the socket's A13-A15 high (951digit.pdf), so the
    8051 reads only the first 8 KiB and the rest is the board's own. The unit is on while the mark
-   is there and the mask is 0x1fff.
+   is there and the mask is 0x1fff. The paired core (format 6 on) starts with the board alone
+   (`pair_start` in `map_unit_init`): written over USB, such an image turns the map unit on, not
+   the paired core, so commit it and restart the board.
 2. The 8051 asks by the addresses it reads in the window, a page of its 8 KiB that the mark names,
    the socket having no write line. The unit fills the page with each answer:
 
@@ -567,12 +569,38 @@ The load too (31bb5ba, coproc_load's 951 image): all eight tasks have rom_lean's
 or lost; the last send's answer 5.8 us at most. A pick's or a send's answer took 6.6 us once with
 USB busy (the 8051 reads 7.5 us after), the interrupt itself 0.82 us of it at most.
 
+A P28 (the owner's "p28", on USB, not in a DME) with this build (6c9f510), 2026-11-14, by DME-Sim's
+BoardCheck, which runs the same benches on DME-Sim's core from the same unit bank:
+
+- rom_pair's 951 image (format 23): every map's `map_bench` CRC (43 maps) and every task's
+  `map_task` CRC (16 tasks, up to 262,144 cases) DME-Sim's. The cycles, the board's less DME-Sim's:
+  the maps' least 0 to +1, mean -3 to +2, most -7 to +5 (more where core 1's reads of the image's
+  bank meet the lookup's; fewer at the SIO, whose loads take a cycle where DME-Sim counts 2); the
+  tasks' -17 to 0 (core 1 runs them with the ROM loop stopped).
+- coproc_maps' 951 image, the POG's run repeated: the same values; a lookup 159 cycles on average on
+  one axis, 178 at most, 268 and 316 on two (the POG's build: 127, 147, 238, 287; DME-Sim's core
+  gives this build's within 5 cycles: the factor form's lookup now behind the format's dispatch).
+  The bus bench, 200,000 lookups with USB quiet and as many busy: none wrong, late or lost; the
+  read's end to the answer 1.10, 1.70 and 1.25 us on average, 6.46 us at most; the interrupt itself
+  0.86, 1.48 and 1.04 us. No read the benches didn't make (6,250 starts, theirs).
+- The log: a session in mode `log` while `map_probe` made an 8051's page-0 fetches at rest (its
+  start, the pins' and the stop's marks, 48 pings): 12 frames over USB, byte for byte those of
+  DME-Sim's core given the same reads; `pair_tick` 48 ticks, the longest 30 us from its ping;
+  `pair_events` 3 jobs, 47 us; `map_stack` 732 of 1,536 bytes never used.
+- A commit with the unit on (rom_pair's, no answer pending in its page): after the restart the
+  board served the image as written.
+
 ## Open
 
 - Run it on a P28 in the DME.
-- The log's packets (format 11) on a board: the comms session in mode `log` hasn't been run.
-- The tasks on a P28 in a DME (run on a POG's benches only).
-- A commit with the unit on (the shadow to flash) hasn't been tried on a board.
+- The log's packets from a running 8051 (over USB so far with `map_probe`'s pings only).
+- The tasks on a P28 in a DME (run on the benches only).
+- A commit with an answer pending in the window's page (the shadow to flash).
+- `map_bench` and `map_lookup` take inputs 0-255, so the P28's own 16-bit axes are benched at their
+  low ends; `bench_map` loops 256 x 256 for any index byte over 1 (the 40h of a word map too).
+- `bench_task` clears its places with the SDK's memset, in flash (DME-Sim's BoardCheck maps one of
+  its own there). `map_unit` counts the maps before the first task, so format 15's map 58 shows as
+  a task.
 - The bus bench leaves the ROM's bank unread; in a car core 1 reads it every 7 cycles (with the bus
   priority), slowing the unit's fills and copies of the page a little. map_bench runs with core 1
   serving, so its times are a car's.
