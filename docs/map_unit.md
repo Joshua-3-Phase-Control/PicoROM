@@ -11,9 +11,10 @@ too (`docs/snoop.md`): what the board learns of the 8051 from the socket alone.
 | Build               | Board                   | Serves  | Note                         |
 |---------------------|-------------------------|---------|------------------------------|
 | P28_27C512_70ns_MAP | P28, in the DME socket  | 64 KiB  | Run on a P28 by USB alone    |
-| POG_27C020_70ns_MAP | POG, 32 pins            | 192 KiB | To try it on a 32-pin board  |
+| POG_27C020_70ns_MAP | POG, 32 pins            | 128 KiB | To try it on a 32-pin board  |
 
-The unit's code and data live in the last 64 KiB SRAM bank, so the POG build serves three. Both
+The unit's code and data live in the last 64 KiB SRAM bank, and what the store will keep in the one
+before it (format 24: the knock retard's maps), so the POG build serves two (three before). Both
 keep the image where the stock builds keep it in flash: a board keeps its image and settings when
 its build changes. `firmware/load_uf2.ps1` loads a build on Windows with no driver to install: it
 sends the board to its boot mode through its reset interface, as picotool does, and copies the UF2
@@ -266,7 +267,8 @@ of the firings' way:
 - **Counts for the PC** (parameters): `pair_events` gives L1's jobs, those lost to a full queue, the
   most waiting at once, the longest from a push to its end (us) and those over 65 us; `pair_tick`
   gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and
-  those over 1 ms.
+  those over 1 ms. Format 24 adds `pair_knock`: L2's knock work's ticks, the knocks told, those
+  learnt, the give-backs, the merges and the line's faulty flag.
 
 Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse onto the board:
 - **The MAP job.** The snoop's interrupt tells the board each slot's read (format 5's table); at the
@@ -465,6 +467,29 @@ Format 23 (the owner, 2026-11-12) goes with the 8051's Map_On testing TF1 in its
 overflow waiting there (TH0's handler held off by Map_Apply) is the handler's first, then the take
 again, so a lengthening by any low byte loses no overflow. `map_lengthen` gives the pulse less the
 stop's 5 cycles, exactly (format 22's low byte of none or 32 at least goes).
+
+Format 24 (DME-Sim's docs/Paired_Knock_Retard.md, the owner's of 2026-11-15) learns a knock
+retard at each firing place:
+- **The places** are lettered by crank angle: A, C, D, B in firing order (A and D share one, as B
+  and C do); format 16's counts are kept by these letters.
+- **The maps** (bank 2, `.store` in STORE_RAM at 0x21020000: nothing loaded, zeroed by pair_start;
+  later the store's): a word naming the layout, then four maps of 8 x 8 points on the P28's own
+  speed and air (the table's axes), each point 32 bits in 1/65536 of 1/64 tooth.
+- **L2, once a tick** after the tick's job and before its frame: the knocks since the last tick;
+  after a return to step (a sync) each pair's maps their lower; a knock under Cal_KnockRpmMin or
+  after the idle switch has been closed Cal_KnockIdleTicks ticks marks the line faulty till the
+  board starts again (a flag bit in the unit's copy, the log's); where it learns (in step, not
+  faulty, the idle switch open, at or above both axes' first points) a knock adds Cal_KnockStep to
+  the four points around the operating point by their interpolation weights (to Cal_KnockMost), a
+  tick without one gives Cal_KnockBack back by the same weights (to 0); the four retards applied
+  (none at the idle switch) are own values 8Ch-8Fh, which L1 doesn't copy (MAP_UNIT_USED stays 12).
+- **L0's plan** takes the planned firing's retard off the plans' advance, held at 0 at least: one
+  load.
+- **The table** adds the map's axes (0: none, the 944's), its constants' address and the faulty bit
+  at u+141 to u+145; the image's stream list may name 98h-9Fh (the retards). The log's ring is
+  1 KiB.
+- **Its counts:** `pair_knock`. **Its time** (DME-Sim's core): L2 58.1 us at most with it, a tick's
+  knock work with a merge 11.0 us; L0's runs 6.1 us at most running. The bank 62.4 KB.
 
 ## How it works
 

@@ -26,7 +26,9 @@ MEMORY
     FLASH(rx) : ORIGIN = 0x10000000, LENGTH = 2048k
     RAM(rwx) : ORIGIN = 0x20040000, LENGTH = 8k
     BLOCK_RAM(rwx) : ORIGIN =  0x21000000, LENGTH = 256k
-    /* The map unit's (FEATURE_MAP_UNIT): the last of BLOCK_RAM's four banks, which its builds don't serve */
+    /* The map unit's (FEATURE_MAP_UNIT): the last two of BLOCK_RAM's four banks, which its builds don't
+       serve: what the store will keep (format 24: the knock retard's maps), then the unit's code and data */
+    STORE_RAM(rw) : ORIGIN = 0x21020000, LENGTH = 64k
     UNIT_RAM(rwx) : ORIGIN = 0x21030000, LENGTH = 64k
 }
 
@@ -182,6 +184,15 @@ SECTIONS
         __unit_ram_end__ = .;
     } > UNIT_RAM AT> FLASH
     __unit_ram_source__ = LOADADDR(.unit_ram);
+
+    /* What the store will keep (FEATURE_MAP_UNIT, format 24: pair.cpp's knock retard maps), in a bank of
+       its own: nothing loaded, zeroed as the unit starts (pair_start); later filled by the store */
+    .store (NOLOAD) : {
+        __store_start__ = .;
+        *(.store*)
+        . = ALIGN(4);
+        __store_end__ = .;
+    } > STORE_RAM
 
     .uninitialized_data (NOLOAD): {
         . = ALIGN(4);

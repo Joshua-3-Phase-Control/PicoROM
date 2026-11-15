@@ -81,6 +81,17 @@
 // the unit counts the knock at the place of the firing before slot 10's in the 720 degrees it counts
 // itself (A to D: the turn's half, then its firing), a byte of its copy of the RAM each, wrapping at
 // 256, for its log. Log only: nothing acts on the counts. A car without a KLR has no mark (0).
+//
+// Format 24 (DME-Sim's docs/Paired_Knock_Retard.md): a knock retard learnt at each firing place. The places
+// are lettered by their crank angle, A and D sharing one as B and C do, so that in firing order they read A,
+// C, D, B; the counts are kept by these letters. Once a tick (L2, after the tick's job, before its frame) the
+// knocks since the last tick move their place's map (8 x 8 points, speed by the air of a firing, in bank 2:
+// what the store will keep) at the four points around the operating point, by the interpolation weights; a
+// tick there without one gives the retard back slowly; each return to step leaves each pair of places the
+// lower of its two maps; a knock where the KLR tells none marks the line faulty till the board starts again.
+// The four retards applied (own values 8Ch-8Fh: none while the idle switch is closed) come off each spark's
+// planned advance (L0), which they take no lower than 0. The table names the map's axes (0: none, the
+// 944's: the work off), its constants and the faulty flag's bit.
 
 #include "pair.h"
 
@@ -109,6 +120,7 @@ static constexpr uint32_t FUEL = 21;     // the format with the fuel in 16 bits 
                                          //   unit_tasks.cpp's alone; 23, Map_On's stop tests an overflow
                                          //   waiting, map_lengthen's)
 static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
+static constexpr uint32_t RETARD = 24;   // the format with the knock retard learnt at each place (its map)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -233,6 +245,8 @@ struct Pair
     // unit's copy (A's, the others after it); the turn's half in the 720 degrees the counts' places
     // take (the unit's own, 0 or 1: the other at each turn's end, kept through a loss of the count).
     uint32_t knock_mark, knock_at, half;
+    // Format 24: the counts by the places' letters (A, C, D, B in firing order), not in firing order.
+    bool lettered;
 };
 
 static Pair pair UNIT_DATA = {};
@@ -708,16 +722,25 @@ static void UNIT_CODE(at_counted)()
         map_unit_ram_write(pair.inj_at, count + 1);
 }
 
+// Format 24: a firing place's letter (0 to 3: A to D) from its place in firing order (0 to 3): A, C, D, B,
+// so that A and D share a crank angle, as B and C do (four nibbles: a table would be the compiler's, in
+// flash).
+static __force_inline uint32_t letter_of(uint32_t place)
+{
+    return 0x1320u >> (4 * place) & 3;
+}
+
 // Format 16: a knock, the 8051 at the knock mark from slot 10 (the KLR's line high there). The KLR
 // judged the firing before this slot 10's: one more at that firing's place (2 x firings places, A
 // first: the turn's half, then its firing), wrapping at 256. Not in step: no place, none counted.
+// Format 24: the count at the place's letter.
 static void UNIT_CODE(at_knock)()
 {
     if (!pair.synced)
         return;
     uint32_t place = pair.half * pair.firings + pair.firing;    // this firing's
     place = (place == 0 ? 2 * pair.firings : place) - 1;        // the one before it
-    uint32_t at = pair.knock_at + place;
+    uint32_t at = pair.knock_at + (pair.lettered ? letter_of(place) : place);
     map_unit_ram_write(at, (map_unit_ram(at) + 1) & 0xFF);
 }
 
@@ -1348,8 +1371,9 @@ static void UNIT_CODE(run_firing)(const Job &job)
 }
 
 // The log (format 11): each frame's bytes into a ring, which the board's USB sends from while the PC
-// has a log session open (comms.cpp), and DME-Sim reads in the car; written counts every byte put.
-static constexpr uint32_t LOG_RING = 256;
+// has a log session open (comms.cpp), and DME-Sim reads in the car; written counts every byte put. Format
+// 24: 1 KiB, about 1.1 s of the 951's frames (256 bytes held about 0.33 s).
+static constexpr uint32_t LOG_RING = 1024;
 
 struct Log
 {
@@ -1417,6 +1441,278 @@ static void UNIT_CODE(make_frame)(uint32_t tick)
         sum += b;
     }
     log_put(sum & 0xFF);
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The knock retard (format 24; DME-Sim's docs/Paired_Knock_Retard.md): a map for each firing place, A to D,
+// on speed x the air of a firing (the table's axes, the P28's own inputs 80h and 81h: 8 x 8 points), each
+// point a 32-bit word in 1/65536 of the spark's unit (1/64 tooth), in bank 2 (memmap_firmware.ld's
+// STORE_RAM: what the store will keep; zeroed as the board starts until there is one). Once a tick, after
+// the tick's job and before its frame (L2), from the unit's copy as the tick's commit left it:
+//   the knocks since the last tick, each count's change (they wrap at 256; from 0 after the 8051's start);
+//   after each return to step (a sync: the count taken at a latch, after a loss or a fault, the first
+//   too) each pair's maps their lower, point by point, A and D, B and C: a place may come back a turn on
+//   (A as D), so what is kept is what both cylinders of a pair needed;
+//   a knock after the idle switch has been closed Cal_KnockIdleTicks ticks, or under Cal_KnockRpmMin,
+//   where the KLR tells none, marks the line faulty till the board starts again (a missing wire or a
+//   floating pin reads as a knock at every firing), its flag in the copy for the log;
+//   where the map learns (in step, the line not faulty, the idle switch open, at or above both axes' first
+//   points: where the KLR listens), each knock told at a place adds Cal_KnockStep to the four points of its
+//   map around the operating point, each its interpolation weight's share, none past Cal_KnockMost; a place
+//   told none gives back Cal_KnockBack, each point its weight's share, none below 0;
+//   the four retards applied: each map's weighted sum at the operating point (1/64 tooth), none while the
+//   idle switch is closed, as own values 8Ch-8Fh (A to D), which each spark's plan takes off its advance.
+
+static constexpr uint32_t PLACES = 4;             // the firing places in 720 degrees (two firings a turn)
+static constexpr uint32_t POINTS = 8;             // the knock map's points on each axis
+static constexpr uint32_t WHOLE_SHARE = 0x10000;  // a weight of 1, a fraction's whole
+
+// Bank 2: a word naming its layout (the store's to check), then the maps.
+static constexpr uint32_t KNOCK_LAYOUT = RETARD << 24 | PLACES << 16 | POINTS << 8 | POINTS;
+
+struct KnockStore
+{
+    uint32_t layout;                        // KNOCK_LAYOUT
+    uint32_t maps[PLACES][POINTS * POINTS]; // A to D, a speed's air points after another's, 1/65536 of 1/64 tooth
+};
+
+static KnockStore knock_store __attribute__((section(".store")));
+
+struct Knock
+{
+    // Read by DME-Sim (its tests take these offsets): the counts, then the line's state.
+    volatile uint32_t runs;     // 0: ticks worked
+    volatile uint32_t knocks;   // 4: knocks told, all places
+    volatile uint32_t steps;    // 8: knocks learnt (a place's map moved up)
+    volatile uint32_t backs;    // 12: give-backs (a place's map moved down at a tick)
+    volatile uint32_t merges;   // 16: returns to step merged
+    volatile uint32_t faulty;   // 20: the line faulty (1), till the board starts again
+    volatile uint32_t starts;   // 24: the 8051's starts (the bus level's: its counts from 0 then)
+    uint32_t idle;              // 28: ticks the idle switch has been closed, to 255
+    // The table's and the calibration's.
+    bool on;                                      // format 24, the knock line and the map: the work on
+    uint32_t speed_axis, air_axis;                // the axes (format 17's: the input, the count, the points)
+    uint32_t step, most, back, rpm_min, idle_min; // Cal_KnockStep on
+    uint32_t faulty_bit;                          // the faulty flag's bit in the unit's copy (the log's)
+    // L2's own: the 8051's starts and the counts at the last tick, the syncs at the last merge; the retards
+    // applied (as own values 8Ch-8Fh, the log's), which the plans read here (one load at the bus level).
+    uint32_t seen_starts, seen[PLACES], merged;
+    volatile int32_t applied[PLACES];
+};
+
+static Knock knock UNIT_DATA = {};
+
+// The place on an axis of the knock map: its cell's first point (0 to POINTS - 2) and the fraction to the
+// next point (1/65536), the maps' own search finding it (below the first point the first, at the last or
+// past it the last).
+struct Share
+{
+    uint32_t index, fraction;
+};
+
+static __force_inline Share knock_place(uint32_t axis, uint32_t input)
+{
+    uint32_t distance, width, index = map_unit_own_place(axis, input, &distance, &width);
+    if (index >= POINTS - 1)
+        return {POINTS - 2, WHOLE_SHARE};
+    return {index, width == 0 ? 0 : map_unit_divide32(distance << 16, width)};
+}
+
+// x times y over 65536, each at most 65536 (a weight of 1).
+static __force_inline uint32_t share(uint32_t x, uint32_t y)
+{
+    return x == WHOLE_SHARE ? y : x * y >> 16;
+}
+
+// The four points around the operating point (a map's indices: the speed's and the air's, the air's next,
+// the speed's next, both next) and their weights, the fractions' products.
+struct Cell
+{
+    uint32_t at[4], weight[4];
+};
+
+static void UNIT_CODE(knock_cell)(uint32_t speed, uint32_t air, Cell *cell)
+{
+    Share s = knock_place(knock.speed_axis, speed), a = knock_place(knock.air_axis, air);
+    uint32_t first = s.index * POINTS + a.index, s0 = WHOLE_SHARE - s.fraction, a0 = WHOLE_SHARE - a.fraction;
+    cell->at[0] = first;
+    cell->at[1] = first + 1;
+    cell->at[2] = first + POINTS;
+    cell->at[3] = first + POINTS + 1;
+    cell->weight[0] = share(s0, a0);
+    cell->weight[1] = share(s0, a.fraction);
+    cell->weight[2] = share(s.fraction, a0);
+    cell->weight[3] = share(s.fraction, a.fraction);
+}
+
+// A map's retard at the cell (1/64 tooth): its four points' weighted sum, rounded. The points are taken in
+// 1/256 of the unit, so that the sum stays within 32 bits (the weights sum to 1 at most).
+static __force_inline uint32_t knock_applied(const uint32_t *map, const Cell &cell)
+{
+    uint32_t sum = 0;
+    for (uint32_t k = 0; k < 4; k++)
+        sum += cell.weight[k] * (map[cell.at[k]] >> 8);
+    return ((sum >> 23) + 1) >> 1;
+}
+
+// The cell's points up by their weights' shares of knocks x Cal_KnockStep (1/256 of the unit), none past
+// Cal_KnockMost.
+static void UNIT_CODE(knock_step)(uint32_t *map, const Cell &cell, uint32_t knocks)
+{
+    uint32_t most = knock.most << 8;
+    for (uint32_t k = 0; k < 4; k++)
+    {
+        uint32_t &point = map[cell.at[k]], up = knocks * (cell.weight[k] * knock.step >> 8);
+        point = point + up > most || point + up < point ? most : point + up;
+    }
+}
+
+// The cell's points down by their weights' shares of Cal_KnockBack (1/65536 of the unit), none below 0.
+static void UNIT_CODE(knock_back)(uint32_t *map, const Cell &cell)
+{
+    for (uint32_t k = 0; k < 4; k++)
+    {
+        uint32_t &point = map[cell.at[k]], down = cell.weight[k] * knock.back >> 16;
+        point = point > down ? point - down : 0;
+    }
+}
+
+// A return to step: each pair's two maps their lower, point by point (A and D, B and C: the letters 0 and
+// 3, 1 and 2).
+static void UNIT_CODE(knock_merge)()
+{
+    for (uint32_t one = 0; one < PLACES / 2; one++)
+    {
+        uint32_t *a = knock_store.maps[one], *b = knock_store.maps[PLACES - 1 - one];
+        for (uint32_t i = 0; i < POINTS * POINTS; i++)
+        {
+            uint32_t lower = a[i] < b[i] ? a[i] : b[i];
+            a[i] = b[i] = lower;
+        }
+    }
+    knock.merges = knock.merges + 1;
+}
+
+// An axis's first point (a word, high byte first).
+static __force_inline uint32_t first_point(uint32_t axis)
+{
+    return word(axis + 2);
+}
+
+// L2's knock work, once a tick: after the tick's job, before its frame (pair_tick, tick_at_once).
+static void UNIT_CODE(knock_tick)()
+{
+    if (!knock.on)
+        return;
+    uint32_t counts[PLACES];
+    __asm volatile("cpsid i" ::: "memory");                     // the counts and what the bus level keeps
+    uint32_t starts = knock.starts, syncs = pair.syncs;         //   beside them, as one
+    bool synced = pair.synced != 0;
+    for (uint32_t i = 0; i < PLACES; i++)
+        counts[i] = map_unit_ram(pair.knock_at + i);
+    __asm volatile("cpsie i" ::: "memory");
+    if (starts != knock.seen_starts)                            // the 8051 started: its counts from 0
+    {
+        knock.seen_starts = starts;
+        for (uint32_t i = 0; i < PLACES; i++)
+            knock.seen[i] = 0;
+    }
+    uint32_t told[PLACES], all = 0;
+    for (uint32_t i = 0; i < PLACES; i++)
+    {
+        told[i] = (counts[i] - knock.seen[i]) & 0xFF;
+        knock.seen[i] = counts[i];
+        all += told[i];
+    }
+    knock.knocks = knock.knocks + all;
+    if (syncs != knock.merged)                                  // back in step
+    {
+        knock.merged = syncs;
+        knock_merge();
+    }
+    bool idle = ram_bit(control.idle_bit);
+    knock.idle = idle ? (knock.idle < 0xFF ? knock.idle + 1 : 0xFF) : 0;
+    uint32_t speed = map_unit_own(MAP_UNIT_SPEED), air = map_unit_own(MAP_UNIT_LOAD) & 0xFFFF;
+    if (all != 0 && (knock.idle >= knock.idle_min || speed < knock.rpm_min))
+        knock.faulty = 1;                                       // where the KLR tells none: a faulty line
+    if (knock.faulty && !ram_bit(knock.faulty_bit))             // its flag, as the 8051's start cleared it
+    {
+        __asm volatile("cpsid i" ::: "memory");                 // (the bus level writes the byte's other bits)
+        own_bit(knock.faulty_bit, true);
+        __asm volatile("cpsie i" ::: "memory");
+    }
+    Cell cell;
+    knock_cell(speed, air, &cell);
+    bool learns = synced && !knock.faulty && !idle && speed >= first_point(knock.speed_axis)
+                  && air >= first_point(knock.air_axis);
+    for (uint32_t i = 0; i < PLACES; i++)
+    {
+        uint32_t *map = knock_store.maps[i];
+        if (learns && told[i] != 0)
+        {
+            knock_step(map, cell, told[i]);
+            knock.steps = knock.steps + told[i];
+        }
+        else if (learns)
+        {
+            knock_back(map, cell);
+            knock.backs = knock.backs + 1;
+        }
+        uint32_t retard = idle ? 0 : knock_applied(map, cell);
+        knock.applied[i] = (int32_t)retard;
+        map_unit_set_own(MAP_UNIT_RETARD + i, retard);
+    }
+    knock.runs = knock.runs + 1;
+}
+
+// As the board starts: bank 2 zeroed (the store will fill it), its layout named; the line not faulty; the
+// work on with format 24's table, the knock line, the map's axes on the P28's own speed and air (8 points
+// each) and the P28's own advance (u: the table's place after its events). Once: made small (cold).
+static void __attribute__((cold)) UNIT_CODE(knock_start)(uint32_t u)
+{
+    knock_store.layout = KNOCK_LAYOUT;
+    for (uint32_t i = 0; i < PLACES; i++)                       // (a loop: no memset in the bank)
+        for (uint32_t k = 0; k < POINTS * POINTS; k++)
+            knock_store.maps[i][k] = 0;
+    knock.on = false;
+    knock.faulty = 0;
+    knock.idle = 0;
+    knock.seen_starts = knock.starts;
+    for (uint32_t i = 0; i < PLACES; i++)
+    {
+        knock.seen[i] = 0;
+        knock.applied[i] = 0;
+    }
+    knock.merged = pair.syncs;
+    pair.lettered = at(MARK + 4) >= RETARD;
+    if (!pair.lettered || pair.knock_mark == 0 || !control.spark || 2 * pair.firings != PLACES)
+        return;
+    uint32_t axes = word(u + 141), constants = word(u + 143);
+    knock.faulty_bit = at(u + 145);
+    if (axes == 0 || constants == 0)
+        return;                                                 // no map: the 944's (no KLR)
+    knock.speed_axis = axes;
+    knock.air_axis = axes + 2 + 2 * at(axes + 1);
+    knock.step = word(constants);                               // Cal_KnockStep, Cal_KnockMost,
+    knock.most = word(constants + 2);                           //   Cal_KnockBack, Cal_KnockRpmMin,
+    knock.back = word(constants + 4);                           //   Cal_KnockIdleTicks
+    knock.rpm_min = word(constants + 6);
+    knock.idle_min = at(constants + 8);
+    knock.on = at(axes) == MAP_UNIT_SPEED && at(axes + 1) == POINTS && at(knock.air_axis) == MAP_UNIT_LOAD
+               && at(knock.air_axis + 1) == POINTS;
+}
+
+// Format 24: the knock retard of the firing whose fall 1 has count base (its place's, by its letter) off the
+// plans' advance (1/64 tooth), which it takes no lower than 0 (an advance at 0 or below is left as it is).
+static __force_inline int32_t retarded(int32_t advance, int32_t base)
+{
+    if (advance <= 0)
+        return advance;
+    uint32_t place = pair.half * pair.firings + pair.firing;    // the latest tooth's firing, or the next
+    if (base != (int32_t)pair.count - (int32_t)pair.tif + 1)
+        place++;
+    int32_t retard = knock.applied[letter_of(place & (PLACES - 1))];
+    return advance > retard ? advance - retard : 0;
 }
 
 // Format 11 (DME-Sim's docs/Paired_Lambda_Idle.md, docs/Paired_Levels.md): L2's tick on its own copy,
@@ -1528,7 +1824,7 @@ void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
-// the pulse made again), then its frame.
+// the pulse made again), then (format 24) the knock work and its frame.
 static void UNIT_CODE(tick_at_once)(const Ping &ping)
 {
     uint32_t tick;
@@ -1536,10 +1832,12 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
         return;
     while (control.stop_due || control.out != control.in)
         pair_control();
+    knock_tick();
     make_frame(tick);
 }
 
-// L2's interrupt: the next ping's tick, then its frame; the next one pended again.
+// L2's interrupt: the next ping's tick, then (format 24) the knock work once, then its frame; the next one
+// pended again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
@@ -1550,6 +1848,7 @@ void UNIT_CODE(pair_tick)()
         levels.tick_dropped++;
     else if (tick_job(ping, &tick))
     {
+        knock_tick();
         make_frame(tick);
         uint32_t span = now_us() - ping.at;
         if (span > levels.tick_us)
@@ -2047,6 +2346,8 @@ static void UNIT_CODE(plan)(int32_t base)
     uint32_t late;
     pair.plan_adv = control.spark ? (int32_t)(int16_t)map_unit_own(MAP_UNIT_ADV_PLAN)   // format 19
                                   : of_byte(map_unit_ram(pair.adv_at));
+    if (knock.on)                                               // format 24: its place's knock retard
+        pair.plan_adv = retarded(pair.plan_adv, base);
     Load load = arm_plan(pair.plan_adv, &arm, &late_tooth, &late);
     pair.sload = load.start;
     pair.shi = load.overflows;
@@ -2178,6 +2479,7 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
     if (address == 0)                                           // the 8051's start
     {
         pair.fault = false;
+        knock.starts = knock.starts + 1;                        // (format 24: the counts from 0, L2's to see)
         unsync();
         if (pair.inject)
             loads_as_built();
@@ -2510,6 +2812,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         pair.knock_mark = fits ? at(u + 135) : 0;
         reach = reach && fits;
     }
+    knock_start(u);                                             // format 24: the knock retard (u + 141 on)
     pair.on = reach;
 }
 
@@ -2537,6 +2840,12 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
     if (streq(name, "pair_slow"))
     {
         snprintf(value, value_size, "%u", (unsigned)levels.slow_jobs);
+        return true;
+    }
+    if (streq(name, "pair_knock"))                              // format 24: ticks worked, knocks told and
+    {                                                           //   learnt, give-backs, merges, the line
+        snprintf(value, value_size, "%u %u %u %u %u %u", (unsigned)knock.runs, (unsigned)knock.knocks,
+                 (unsigned)knock.steps, (unsigned)knock.backs, (unsigned)knock.merges, (unsigned)knock.faulty);
         return true;
     }
     return false;
@@ -2749,6 +3058,16 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     {                                                           //   its byte) queued for L1 and pended, as the
         push(JOB_SLOW, in[0] & 7, in[1] & 0xFF, 0);             //   snoop's interrupt does
         out[0] = levels.slow_jobs;
+    }
+    else if (routine == 35)                                     // format 24: L2's knock work at once, on the
+    {                                                           //   unit's copy and own values as they stand
+        knock_tick();
+        out[0] = knock.runs;
+        out[1] = knock.knocks;
+        out[2] = knock.steps;
+        out[3] = knock.backs;
+        out[4] = knock.merges;
+        out[5] = knock.faulty;
     }
     else
         return 0;

@@ -57,7 +57,7 @@ extern "C"
     extern uint32_t __StackBottom[];
 }
 
-static_assert(ROM_SIZE <= 0x30000, "the map unit's bank is the last one");
+static_assert(ROM_SIZE <= 0x20000, "the store's bank and the map unit's are the last two");
 
 static constexpr uint32_t MARK = 0x2000;          // the unit's own memory, after the 8051's 8 KiB
 static constexpr uint32_t EIGHT_KIB = 0x1FFF;     // the address mask the unit works with
@@ -268,6 +268,7 @@ static constexpr uint32_t AIR = 20;           // the format with the load in g a
 static constexpr uint32_t FUEL = 21;          // the format with the fuel in 16 bits (step D)
 static constexpr uint32_t CYCLES = 22;        // the MAP pulse, its cut and the dead time in cycles (step E)
 static constexpr uint32_t TESTED = 23;        // Map_On's stop tests an overflow waiting (step E's fix)
+static constexpr uint32_t RETARD = 24;        // the knock retard learnt at each place (pair.cpp's: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -356,6 +357,14 @@ static __force_inline Wide own_place(uint32_t axis, uint32_t input)
         return {count - 1, 0, 0};                                       // at the last or past it
     uint32_t point = own_point(rom, axis, low);
     return {low - 1, input - point, own_point(rom, axis, low + 1) - point};
+}
+
+uint32_t UNIT_CODE(map_unit_own_place)(uint32_t axis, uint32_t input, uint32_t *distance, uint32_t *width)
+{
+    Wide place = own_place(axis, input);
+    *distance = place.distance;
+    *width = place.width;
+    return place.index;
 }
 
 // The input's place on the axis at axis: on an 8051 byte, searched from the top as format 17's (on any
@@ -879,7 +888,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > TESTED)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > RETARD)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

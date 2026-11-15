@@ -52,10 +52,11 @@ static constexpr uint32_t ROM_FLASH_SIZE = 0x10000;
 #endif
 
 // The image the board serves, from 0x21000000. The map unit (FEATURE_MAP_UNIT) keeps its code and
-// data in the last 64 KiB SRAM bank (memmap_firmware.ld's UNIT_RAM), so a board whose image filled
-// all four banks serves three. The image keeps its place in flash (ROM_FLASH_SIZE) either way.
+// data in the last 64 KiB SRAM bank (memmap_firmware.ld's UNIT_RAM) and what the store will keep in the
+// one before it (STORE_RAM, format 24: the knock retard's maps), so a board whose image filled all four
+// banks serves two. The image keeps its place in flash (ROM_FLASH_SIZE) either way.
 #if defined(FEATURE_MAP_UNIT)
-static constexpr uint32_t ROM_SIZE = ROM_FLASH_SIZE > 0x30000 ? 0x30000 : ROM_FLASH_SIZE;
+static constexpr uint32_t ROM_SIZE = ROM_FLASH_SIZE > 0x20000 ? 0x20000 : ROM_FLASH_SIZE;
 #else
 static constexpr uint32_t ROM_SIZE = ROM_FLASH_SIZE;
 #endif
