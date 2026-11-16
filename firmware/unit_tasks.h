@@ -110,9 +110,10 @@ bool unit_task_part(uint32_t task, uint32_t part, uint32_t description, const ui
 
 // Format 12: task 18 for one MAP read (slot 0 the first MAP read's, 1 the second's; read its byte) on
 // ram: its slot's filter stepped; true if a pulse is due, its loads then in *load: TH0's start for a
-// pulse of its own (bits 0-7) and its overflows (8-15), the pulse on lengthened by (16-31).
+// pulse of its own (bits 0-7) and its overflows (8-15), the pulse on lengthened by (16-31); and (format
+// 25) its fuel in *fuel: the cycles it adds to an injection, the dead time aside.
 bool unit_map_pulse(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
-                    uint32_t *load);
+                    uint32_t *load, uint32_t *fuel);
 
 // From the map unit (map_unit.cpp): map id's value, its inputs as ram and own (format 18: the own values
 // that go with ram, map_unit_owns_on's) hold them.

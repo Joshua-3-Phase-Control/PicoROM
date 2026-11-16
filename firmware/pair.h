@@ -25,8 +25,9 @@ void pair_advance(uint32_t advance);
 
 // Tasks 9 and 10 (format 7): TH0's load for the next pulse, its start and its overflows, written
 // into the copies of the 8051's loads not in use, then the switches turned to them. False for a pulse
-// made again (again) after its reference came: none written.
-bool pair_pulse(uint32_t start, uint32_t overflows, bool again);
+// made again (again) after its reference came: none written. Format 25: fuel, the pulse's fuel (its
+// cycles less the dead time), which the port films take as it is injected.
+bool pair_pulse(uint32_t start, uint32_t overflows, bool again, uint32_t fuel);
 
 // Task 12 (format 8): start mode over, as the tick found it: the next reference injects (rom_lean's
 // Main_Tick_Over cleared Inj720Odd).

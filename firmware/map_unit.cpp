@@ -268,7 +268,8 @@ static constexpr uint32_t AIR = 20;           // the format with the load in g a
 static constexpr uint32_t FUEL = 21;          // the format with the fuel in 16 bits (step D)
 static constexpr uint32_t CYCLES = 22;        // the MAP pulse, its cut and the dead time in cycles (step E)
 static constexpr uint32_t TESTED = 23;        // Map_On's stop tests an overflow waiting (step E's fix)
-static constexpr uint32_t RETARD = 24;        // the knock retard learnt at each place (pair.cpp's: the newest)
+static constexpr uint32_t RETARD = 24;        // the knock retard learnt at each place (pair.cpp's)
+static constexpr uint32_t FILM = 25;          // the port films kept at each place (pair.cpp's: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -888,7 +889,7 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > RETARD)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > FILM)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

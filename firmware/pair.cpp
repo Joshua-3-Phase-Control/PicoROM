@@ -92,6 +92,16 @@
 // The four retards applied (own values 8Ch-8Fh: none while the idle switch is closed) come off each spark's
 // planned advance (L0), which they take no lower than 0. The table names the map's axes (0: none, the
 // 944's: the work off), its constants and the faulty flag's bit.
+//
+// Format 25 (DME-Sim's docs/Paired_Wall_Film.md, step 1): the port films kept, a tau-X film at each place
+// (one pulse reaches all four ports, batch fire), logged; no pulse changes. The bus level notes each
+// injection (the turn's pulse at its reference, each starting one at slot 0's tooth) and each intake's end
+// (the table's tooth in each firing); L1 notes each MAP pulse given. Once a tick (L2, after the knock work,
+// before the frame) the notes since the last tick are kept in order: an injection's fuel waits at each
+// place; an intake takes (1 - X) of what waited and beta of its film, and leaves X of what waited in it. X
+// is the open place's (the first whose intake ends after the turn's injection) or the rest's, beta the
+// strip a intake and the evaporation by the time a cycle takes, each a map on coolant by the air of a firing
+// at the tick's operating point. The films are own values 90h-93h (A to D, injector cycles).
 
 #include "pair.h"
 
@@ -121,6 +131,7 @@ static constexpr uint32_t FUEL = 21;     // the format with the fuel in 16 bits 
                                          //   waiting, map_lengthen's)
 static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
 static constexpr uint32_t RETARD = 24;   // the format with the knock retard learnt at each place (its map)
+static constexpr uint32_t FILM = 25;     // the format with the port films kept at each place (step 1)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -259,6 +270,76 @@ struct Case
 };
 
 static Case pair_case UNIT_DATA = {};
+
+// Format 25 (DME-Sim's docs/Paired_Wall_Film.md, step 1): the port films. The bus level and L1 note each
+// injection and each intake's end in a ring, in the order they come; L2 keeps them once a tick (film_tick).
+static constexpr uint32_t FILM_PLACES = 4; // the firing places in 720 degrees (two firings a turn)
+static constexpr uint32_t FILM_NOTES = 32; // the ring (a power of 2): at 7,000 rpm ten ticks' notes, four
+                                           //   with a MAP pulse at every read
+static constexpr uint32_t FILM_WAITS = 0xFFFFF; // the fuel a place's intake waits for, at most (cycles)
+
+enum : uint32_t
+{
+    FILM_INTAKE = 0x100, // an intake's end, its place's letter in the low byte
+    FILM_TURN = 0x200,   // the turn's pulse at its reference (its first intake after it: the open place)
+    FILM_EXTRA = 0x300,  // another pulse: a starting injection, a MAP pulse
+};
+
+struct FilmNote
+{
+    uint32_t kind, fuel; // the kind (an intake's with its place's letter), an injection's fuel (cycles)
+};
+
+struct Film
+{
+    // Read by DME-Sim (its tests take these offsets): the counts, then the films.
+    volatile uint32_t runs;         // 0: ticks worked
+    volatile uint32_t intakes;      // 4: intakes kept
+    volatile uint32_t injections;   // 8: injections kept (the turn's, the starting ones, the MAP pulses)
+    volatile uint32_t lost;         // 12: notes lost to a full ring (the films from 0 then)
+    volatile uint32_t resets;       // 16: the 8051's starts and the engine's stops (the bus level's)
+    uint32_t film[FILM_PLACES];     // 20: each place's film by its letter, injector cycles x 256
+    uint32_t waits[FILM_PLACES];    // 36: the fuel injected since each place's last intake (cycles)
+    uint32_t open;                  // 52: the open place's letter (FILM_PLACES: none yet)
+    uint32_t x_open, x_rest, beta;  // 56, 60, 64: the parameters at the last tick (1/65536)
+    // The ring: the bus level's notes and L1's (with the interrupts held off), L2's reads.
+    FilmNote notes[FILM_NOTES];
+    volatile uint32_t in;           // notes written
+    uint32_t out;                   // notes kept (L2's)
+    volatile uint32_t reset_in;     // notes written at the last reset: those before it are stale
+    volatile uint32_t waiting;      // the waiting pulse's fuel (pair_pulse's), which its reference notes
+    // The table's.
+    bool on;
+    uint32_t x_open_id, x_rest_id, strip_id, evap_id, intake_tooth;
+    // L2's own.
+    uint32_t seen_resets, seen_lost, seen_syncs;
+    bool after_turn;                // the turn's injection kept: its first intake's place is the open one
+};
+
+static Film film UNIT_DATA = {};
+
+// A note into the ring (the bus level's; L1's with the interrupts held off); none past a full ring.
+static __force_inline void film_note(uint32_t kind, uint32_t fuel)
+{
+    uint32_t in = film.in;
+    if (in - film.out >= FILM_NOTES)
+    {
+        film.lost = film.lost + 1;
+        return;
+    }
+    FilmNote &note = film.notes[in & (FILM_NOTES - 1)];
+    note.kind = kind;
+    note.fuel = fuel;
+    __asm volatile("" ::: "memory");
+    film.in = in + 1;
+}
+
+// The 8051's start or the engine's stop (the bus level's): the films from 0, the notes before it stale.
+static __force_inline void film_reset()
+{
+    film.reset_in = film.in;
+    film.resets = film.resets + 1;
+}
 
 static __force_inline uint32_t at(uint32_t address)
 {
@@ -638,6 +719,8 @@ static void UNIT_CODE(write_phase)()
 // and its copy.
 static void UNIT_CODE(phase_at_reference)()
 {
+    if (film.on && !pair.next_skips)                            // format 25: this reference injects the turn's
+        film_note(FILM_TURN, film.waiting);                     //   pulse, for the port films
     pair.next_skips = ram_bit(pair.start_bit) ? 1 : pair.next_skips ^ 1;
     write_reference();
     write_phase();
@@ -761,7 +844,7 @@ static void UNIT_CODE(phase_as_built)()
         write(pair.turn_at + 1, (pair.turn_due - pair.turn_at - 2) & 0xFF);
 }
 
-bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
+bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again, uint32_t fuel)
 {
     if (!pair.inject)
         return true;
@@ -773,6 +856,7 @@ bool UNIT_CODE(pair_pulse)(uint32_t start, uint32_t overflows, bool again)
     if (!again)
         pair.pulse_reference = pair.references;
     load_pulse((start & 0xFF) | (overflows & 0xFF) << 8);
+    film.waiting = fuel;                                        // format 25: its fuel, for its reference
     pair.pulses++;
     return true;
 }
@@ -1702,6 +1786,131 @@ static void __attribute__((cold)) UNIT_CODE(knock_start)(uint32_t u)
                && at(knock.air_axis + 1) == POINTS;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The port films (format 25; DME-Sim's docs/Paired_Wall_Film.md, step 1): a discrete tau-X film for each
+// firing place, kept once a tick (L2, after the knock work, before the frame) from the notes since the last
+// tick, in the order the bus level and L1 made them:
+//   an injection (the turn's pulse at its reference, a starting injection, a MAP pulse): its fuel waits for
+//   each place's next intake;
+//   an intake's end at a place: it takes (1 - X) of the fuel that waited and beta of the film, and leaves X
+//   of the fuel that waited in the film: film = film - beta x film + X x waited. X is the open place's (the
+//   first whose intake ends after the turn's injection: its valve was open then) or the rest's;
+//   beta = the strip a intake + the evaporation a ms x the ms a cycle (720 degrees) takes, at most 1.
+// The four parameters are maps on the coolant by the air of a firing, looked up at the tick's operating
+// point on the tick's copy (`bytes`: the snoop's coolant over the 8051's RAM, as the tick's job had it;
+// the unit's own copy holds no coolant on the paired core); the films (injector cycles x 256) are own values 90h-93h (A to D, cycles, at most FFFFh) for the
+// log. After a reset (the 8051's start, the engine's stop) or a lost note the films are from 0; after a
+// return to step each pair's two films (A and D, B and C) their mean, as a place may come back a turn on.
+
+// x times a fraction f (1/65536, under 65536) over 65536, rounded down, for any 32-bit x: two 16 x 16
+// products (the bank calls no library for 64 bits).
+static __force_inline uint32_t film_mul(uint32_t x, uint32_t f)
+{
+    return (x >> 16) * f + ((x & 0xFFFF) * f >> 16);
+}
+
+static void UNIT_CODE(film_tick)(const uint8_t *bytes)
+{
+    if (!film.on)
+        return;
+    __asm volatile("cpsid i" ::: "memory");                     // what the bus level and L1 keep, as one
+    uint32_t in = film.in, resets = film.resets, from = film.reset_in, lost = film.lost, syncs = pair.syncs;
+    __asm volatile("cpsie i" ::: "memory");
+    if (resets != film.seen_resets || lost != film.seen_lost)   // a reset or a lost note: from 0
+    {
+        film.out = lost != film.seen_lost ? in : from;          //   (a reset: the notes after it kept)
+        film.seen_resets = resets;
+        film.seen_lost = lost;
+        for (uint32_t p = 0; p < FILM_PLACES; p++)
+            film.film[p] = film.waits[p] = 0;
+        film.open = FILM_PLACES;
+        film.after_turn = false;
+    }
+    if (syncs != film.seen_syncs)                               // back in step: each pair's mean
+    {
+        film.seen_syncs = syncs;
+        for (uint32_t one = 0; one < FILM_PLACES / 2; one++)
+        {
+            uint32_t other = FILM_PLACES - 1 - one;
+            uint32_t m = (film.film[one] >> 1) + (film.film[other] >> 1), w = (film.waits[one] + film.waits[other]) >> 1;
+            film.film[one] = film.film[other] = m;
+            film.waits[one] = film.waits[other] = w;
+        }
+    }
+    const uint32_t *own = map_unit_owns.own;
+    film.x_open = unit_map_value(film.x_open_id, bytes, own) & 0xFFFF;
+    film.x_rest = unit_map_value(film.x_rest_id, bytes, own) & 0xFFFF;
+    uint32_t strip = unit_map_value(film.strip_id, bytes, own) & 0xFFFF;
+    uint32_t evap = unit_map_value(film.evap_id, bytes, own) & 0xFFFF;
+    uint32_t rpm = map_unit_own(MAP_UNIT_SPEED);                // 720 degrees in 1/256 ms, at most FFFFh
+    uint32_t cycle = rpm < 470 ? 0xFFFF : map_unit_divide32(30720000, rpm);
+    uint32_t beta = strip + (evap * cycle >> 8);
+    film.beta = beta > 0xFFFF ? 0xFFFF : beta;
+    for (; film.out != in; film.out = film.out + 1)
+    {
+        const FilmNote &note = film.notes[film.out & (FILM_NOTES - 1)];
+        uint32_t kind = note.kind & 0xF00;
+        if (kind == FILM_INTAKE)
+        {
+            uint32_t p = note.kind & (FILM_PLACES - 1);
+            if (film.after_turn)                                // the turn's pulse's first intake: open then
+            {
+                film.open = p;
+                film.after_turn = false;
+            }
+            uint32_t x = p == film.open ? film.x_open : film.x_rest, m = film.film[p];
+            film.film[p] = m - film_mul(m, film.beta) + film_mul(film.waits[p] << 8, x);
+            film.waits[p] = 0;
+            film.intakes = film.intakes + 1;
+        }
+        else
+        {
+            for (uint32_t p = 0; p < FILM_PLACES; p++)
+            {
+                uint32_t w = film.waits[p] + note.fuel;
+                film.waits[p] = w > FILM_WAITS ? FILM_WAITS : w;
+            }
+            if (kind == FILM_TURN)
+                film.after_turn = true;
+            film.injections = film.injections + 1;
+        }
+    }
+    for (uint32_t p = 0; p < FILM_PLACES; p++)
+    {
+        uint32_t cycles = film.film[p] >> 8;
+        map_unit_set_own(MAP_UNIT_FILM + p, cycles > 0xFFFF ? 0xFFFF : cycles);
+    }
+    film.runs = film.runs + 1;
+}
+
+// As the board starts: the films from 0, the ring empty; the work on with format 25's table (u + 146 on: the
+// four maps' ids, the open place's X, the rest's, the strip a intake, the evaporation a ms; the intake's tooth
+// in each firing), four places in 720 degrees and the MAP pulse and the slow work on the unit. Once: made
+// small (cold).
+static void __attribute__((cold)) UNIT_CODE(film_start)(uint32_t u)
+{
+    film.on = false;
+    film.in = film.out = film.reset_in = 0;
+    film.seen_resets = film.resets;
+    film.seen_lost = film.lost;
+    film.seen_syncs = pair.syncs;
+    film.open = FILM_PLACES;
+    film.after_turn = false;
+    film.waiting = 0;
+    for (uint32_t p = 0; p < FILM_PLACES; p++)
+        film.film[p] = film.waits[p] = 0;
+    if (at(MARK + 4) < FILM || !control.mapped || !control.slowed || 2 * pair.firings != FILM_PLACES)
+        return;
+    uint32_t maps = at(MARK + 6);                               // the maps and tasks the index lists
+    film.x_open_id = at(u + 146);
+    film.x_rest_id = at(u + 147);
+    film.strip_id = at(u + 148);
+    film.evap_id = at(u + 149);
+    film.intake_tooth = at(u + 150);
+    film.on = film.x_open_id < maps && film.x_rest_id < maps && film.strip_id < maps && film.evap_id < maps
+              && film.intake_tooth != 0 && film.intake_tooth <= pair.teeth;
+}
+
 // Format 24: the knock retard of the firing whose fall 1 has count base (its place's, by its letter) off the
 // plans' advance (1/64 tooth), which it takes no lower than 0 (an advance at 0 or below is left as it is).
 static __force_inline int32_t retarded(int32_t advance, int32_t base)
@@ -1824,7 +2033,7 @@ void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
-// the pulse made again), then (format 24) the knock work and its frame.
+// the pulse made again), then (format 24) the knock work, (format 25) the films, and its frame.
 static void UNIT_CODE(tick_at_once)(const Ping &ping)
 {
     uint32_t tick;
@@ -1833,11 +2042,12 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
     while (control.stop_due || control.out != control.in)
         pair_control();
     knock_tick();
+    film_tick(tick_work);
     make_frame(tick);
 }
 
-// L2's interrupt: the next ping's tick, then (format 24) the knock work once, then its frame; the next one
-// pended again.
+// L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films, then
+// its frame; the next one pended again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
@@ -1849,6 +2059,7 @@ void UNIT_CODE(pair_tick)()
     else if (tick_job(ping, &tick))
     {
         knock_tick();
+        film_tick(tick_work);
         make_frame(tick);
         uint32_t span = now_us() - ping.at;
         if (span > levels.tick_us)
@@ -2003,10 +2214,10 @@ static void UNIT_CODE(run_tickwork)(const Job &job)
 // filters settle from FFh.
 static void UNIT_CODE(run_map)(const Job &job)
 {
-    uint32_t load;
+    uint32_t load, fuel = 0;
     levels.map_jobs = levels.map_jobs + 1;
     if (!unit_map_pulse(control.map_task, (const uint8_t *)pair.rom, (uint8_t *)map_unit_ram_words(), job.length,
-                        job.first, &load))
+                        job.first, &load, &fuel))
         return;
     uint32_t side = control.map_side ^ 1, copy = control.map_copy[side], count = (control.map_count + 1) & 0xFF;
     write(copy + 2, count);
@@ -2022,6 +2233,8 @@ static void UNIT_CODE(run_map)(const Job &job)
         control.map_side = side;
         control.map_count = count;
         levels.map_pulses = levels.map_pulses + 1;
+        if (film.on && !ram_bit(pair.hold_bit))                 // format 25: its fuel, for the port films
+            film_note(FILM_EXTRA, fuel);                        //   (none with the injectors held open)
     }
     __asm volatile("cpsie i" ::: "memory");
 }
@@ -2277,12 +2490,19 @@ static void UNIT_CODE(tooth)(uint32_t now)
             pair.half ^= 1;                                     // format 16: the 720 degrees' other half
         }
     }
+    if (film.on && pair.tif == film.intake_tooth)               // format 25: the intake that ends in this
+    {                                                           //   firing, the next place's
+        uint32_t place = (pair.half * pair.firings + pair.firing + 1) & (FILM_PLACES - 1);
+        film_note(FILM_INTAKE | letter_of(place), 0);
+    }
     if (pair.tif == pair.event_tooth[0])
     {
         uint32_t length = slot_zero(now), decision = TURN_PULSE;
         if (pair.firing == 0 && pair.phased)
             decision = turn();                                  // the turn's first firing
         bool starting = ram_bit(pair.start_bit);
+        if (film.on && starting)                                // format 25: a starting injection, the last
+            film_note(FILM_EXTRA, film.waiting);                //   pulse made's fuel
         if (pair.whole)                                         // format 11: the starting injection's branch,
         {                                                       //   before the 8051's main level reaches it;
             uint32_t to = starting ? pair.inject_to : pair.skip_to;   //   at the turn's first firing the
@@ -2480,6 +2700,7 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
     {
         pair.fault = false;
         knock.starts = knock.starts + 1;                        // (format 24: the counts from 0, L2's to see)
+        film_reset();                                           // (format 25: the films from 0)
         unsync();
         if (pair.inject)
             loads_as_built();
@@ -2535,6 +2756,7 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
     else if (previous == pair.stop_mark)
     {
         unsync();
+        film_reset();                                           // format 25: the engine stopped, the films from 0
         if (control.pipelined)
             stop_pipeline();                                    // the counts and the stages: the pipeline's
         else
@@ -2813,6 +3035,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
         reach = reach && fits;
     }
     knock_start(u);                                             // format 24: the knock retard (u + 141 on)
+    film_start(u);                                              // format 25: the port films (u + 146 on)
     pair.on = reach;
 }
 
@@ -2846,6 +3069,12 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
     {                                                           //   learnt, give-backs, merges, the line
         snprintf(value, value_size, "%u %u %u %u %u %u", (unsigned)knock.runs, (unsigned)knock.knocks,
                  (unsigned)knock.steps, (unsigned)knock.backs, (unsigned)knock.merges, (unsigned)knock.faulty);
+        return true;
+    }
+    if (streq(name, "pair_film"))                               // format 25: ticks worked, intakes and
+    {                                                           //   injections kept, notes lost, resets
+        snprintf(value, value_size, "%u %u %u %u %u", (unsigned)film.runs, (unsigned)film.intakes,
+                 (unsigned)film.injections, (unsigned)film.lost, (unsigned)film.resets);
         return true;
     }
     return false;
@@ -3068,6 +3297,26 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[3] = knock.backs;
         out[4] = knock.merges;
         out[5] = knock.faulty;
+    }
+    else if (routine == 36)                                     // format 25: L2's film work at once, on the
+    {                                                           //   tick's copy and own values as they stand
+        film_tick(tick_work);
+        out[0] = film.runs;
+        out[1] = film.intakes;
+        out[2] = film.injections;
+        out[3] = film.lost;
+        out[4] = film.open;
+        out[5] = film.beta;
+    }
+    else if (routine == 37)                                     // format 25: a note as the bus level makes it
+    {                                                           //   (its kind, an injection's fuel)
+        film_note(in[0], in[1]);
+        out[0] = film.in;
+    }
+    else if (routine == 38)                                     // format 25: a reset as the bus level makes it
+    {
+        film_reset();
+        out[0] = film.resets;
     }
     else
         return 0;

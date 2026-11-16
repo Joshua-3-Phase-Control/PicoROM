@@ -268,7 +268,8 @@ of the firings' way:
   most waiting at once, the longest from a push to its end (us) and those over 65 us; `pair_tick`
   gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and
   those over 1 ms. Format 24 adds `pair_knock`: L2's knock work's ticks, the knocks told, those
-  learnt, the give-backs, the merges and the line's faulty flag.
+  learnt, the give-backs, the merges and the line's faulty flag; format 25 `pair_film`: L2's film
+  work's ticks, the intakes and injections kept, the notes lost and the resets.
 
 Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse onto the board:
 - **The MAP job.** The snoop's interrupt tells the board each slot's read (format 5's table); at the
@@ -490,6 +491,26 @@ retard at each firing place:
   1 KiB.
 - **Its counts:** `pair_knock`. **Its time** (DME-Sim's core): L2 58.1 us at most with it, a tick's
   knock work with a merge 11.0 us; L0's runs 6.1 us at most running. The bank 62.4 KB.
+
+Format 25 (DME-Sim's docs/Paired_Wall_Film.md, step 1, the owner's of 2026-11-15) keeps a port film
+at each firing place, logged; no pulse changes:
+- **The notes,** in a ring of 32 (`film_note`): L0's at the reference that injects (the waiting
+  pulse's fuel, the pulse less the dead time, which the pulse task now gives pair_pulse), at the
+  table's intake tooth in each firing (the next place's intake ended, by its letter) and at slot 0
+  for each starting injection; L1's MAP job's for each MAP pulse (none with the injectors held
+  open), the interrupts held off. The 8051's start and the engine's stop reset the films
+  (`film_reset`); a full ring loses its notes, counted, and the films start from 0.
+- **L2, once a tick** after the knock work (`film_tick`): the four maps by coolant and the air of a
+  firing, looked up on the tick's copy (the unit's own holds no coolant on the paired core: the
+  snoop's byte goes over each job's copy), beta the strip + the evaporation x the cycle's time;
+  each note in order, an intake's film = film - beta x film + X x the fuel since its last, X the
+  open place's (the first intake after the turn's injection) or the rest's; after a return to step
+  each pair's mean. The films (injector cycles x 256, 32 bits) are own values 90h-93h in cycles:
+  MAP_UNIT_OWNS 32, the log's list may name A0h-A7h.
+- **The table** adds the four maps' ids and the intake's tooth at u+146 to u+150.
+- **Its checks:** pair_test 36 (the tick's film work), 37 (a note) and 38 (a reset), against
+  DME-Sim's twin. **Its time** (DME-Sim's core): L2 56.1 us at most, 9.1 us more than without it;
+  a tick's film work 17 us with 12 notes; L1 and L0 as before. The bank 64.8 KB: 724 bytes free.
 
 ## How it works
 

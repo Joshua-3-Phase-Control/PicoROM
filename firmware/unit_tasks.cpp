@@ -728,10 +728,11 @@ static void UNIT_CODE(injection_time)(const Task &t)
 namespace
 {
 
-// TH0's load: its start and its overflows (InjHi).
+// TH0's load: its start and its overflows (InjHi); format 25, the pulse's fuel (its cycles less the dead
+// time, for the port films).
 struct Pulse
 {
-    uint32_t start, overflows;
+    uint32_t start, overflows, fuel;
 };
 
 __force_inline uint32_t rotate(uint32_t a)
@@ -859,11 +860,12 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
         shift_left(&wide, 1);                                           // twice that
         pulse = wide >> 8 & 0xFFFF;
     }
-    uint32_t ofs = get(t, 23);
+    uint32_t ofs = get(t, 23), dead_cycles = cycles ? dead : dead * 5;
+    uint32_t fuel = pulse > dead_cycles ? pulse - dead_cycles : 0;     // format 25: the port films'
     uint32_t overflows = (pulse >> 8) + (((pulse & 0xFF) + 255 - ofs) >> 8); // ADD A,#(255 - INJ_OFS); ADDC A,R7
     if (overflows > 0xFF)
-        return {0, 0xFF};                                               // the longest: 255 from 0
-    return {(ofs - pulse) & 0xFF, overflows};                           // MOV A,#INJ_OFS; SUBB A,R6
+        return {0, 0xFF, fuel};                                         // the longest: 255 from 0
+    return {(ofs - pulse) & 0xFF, overflows, fuel};                     // MOV A,#INJ_OFS; SUBB A,R6
 }
 
 // Format 21: the cranking fuel's word as Fuel_Crank decides it (its decay begun as there), Crank_Fuel (2^-11
@@ -928,7 +930,7 @@ static void UNIT_CODE(pulse)(const Task &t, bool again)
     uint32_t dead = cycles ? ram_word(t, t.outputs[2]) : value(t, get(t, 6));   // Inj_DeadTime (format 22:
     uint32_t count = byte_of(t, 24);                                    //   task 3's, DeadNow)                                    // InjCount (0 if the decay began)
     Pulse load = fuel_mode(t, &time, dead, again, &count, &flags);
-    if (!pair_pulse(load.start, load.overflows, again))
+    if (!pair_pulse(load.start, load.overflows, again, load.fuel))
         flags |= PULSE_LATE;
     own(t, 24, count);                                                  // the unit's own (format 8)
     if (flags & PULSE_RAMP_END)
@@ -2493,8 +2495,9 @@ __force_inline uint32_t map_lengthen(uint32_t longer, uint32_t format)
 // pays the deadband (format 12's). Format 15: a fall owes the pulse cut (owe). Format 22: the pulse in
 // cycles, the rise past the deadband x MapGainNow (1/32 cycle a count), from 32 cycles on (where format
 // 21's rounding made a unit) and at most MAP_LONGEST, the dead time a word; a pulse on lengthened by it
-// as map_lengthen gives it.
-__force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint32_t *load)
+// as map_lengthen gives it. Format 25: *fuel the cycles the pulse adds, the dead time aside (a pulse of
+// its own's past its dead time, a lengthening's with its stop's), for the port films.
+__force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint32_t *load, uint32_t *fuel)
 {
     uint8_t &filter = t.ram[get(t, MP_PREV + slot) & 0x7F];
     uint32_t rise = read >= filter ? read - filter : 0;                 // SUBB A,MapPrev0; JC: none falling
@@ -2531,6 +2534,7 @@ __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint3
             longer = MAP_LONGEST;
         whole = ram_word(t, get(t, MP_DEAD)) + longer;
         lengthen = map_lengthen(longer, format);
+        *fuel = longer;
     }
     else
     {
@@ -2541,6 +2545,7 @@ __force_inline bool map_pulse(const Task &t, uint32_t slot, uint32_t read, uint3
             return false;
         lengthen = units * 64;                                          // Accel_Pulse: R7:R6 = A x 64
         whole = byte_of(t, MP_DEAD) * 5 + lengthen;                     // R3:R2: the dead time x 5 and it
+        *fuel = lengthen;
     }
     uint32_t ofs = get(t, MP_OFS), low = whole & 0xFF;
     uint32_t start = (ofs - low) & 0xFF;                                // MOV A,#INJ_OFS; CLR C; SUBB A,R2
@@ -2591,9 +2596,9 @@ uint32_t UNIT_CODE(unit_map_gain_k)(const uint32_t *in)
 }
 
 bool UNIT_CODE(unit_map_pulse)(uint32_t description, const uint8_t *rom, uint8_t *ram, uint32_t slot, uint32_t read,
-                               uint32_t *load)
+                               uint32_t *load, uint32_t *fuel)
 {
-    return map_pulse(task_of(rom, ram, description), slot & 1, read & 0xFF, load);
+    return map_pulse(task_of(rom, ram, description), slot & 1, read & 0xFF, load, fuel);
 }
 
 bool UNIT_CODE(unit_task_part)(uint32_t task, uint32_t part, uint32_t description, const uint8_t *rom, uint8_t *ram,

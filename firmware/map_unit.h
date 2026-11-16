@@ -56,12 +56,13 @@ uint32_t map_unit_task_at(uint32_t task);
 
 // Format 18: the P28's own 16-bit values, which axes from 80h on read: set by the code that makes them,
 // read by any. Format 19 (step B) adds the spark's, in 1/64 tooth, signed; format 21 (step D) the fuel's
-// enrichments, 8000h a whole fuel; format 24 the knock retard's four (pair.cpp's, in 1/64 tooth). MAP_UNIT_OWNS
-// (a power of 2) words each, the first MAP_UNIT_USED copied by the levels; the knock retards after them,
-// which L2 alone writes (no copy: the plans at the bus level and the log's frame read them as they are).
+// enrichments, 8000h a whole fuel; format 24 the knock retard's four (pair.cpp's, in 1/64 tooth); format 25 the
+// port films' four (pair.cpp's, injector cycles). MAP_UNIT_OWNS (a power of 2) words each, the first
+// MAP_UNIT_USED copied by the levels; the knock retards and the films after them, which L2 alone writes (no
+// copy: the plans at the bus level and the log's frame read them as they are).
 void map_unit_set_own(uint32_t input, uint32_t value);
 uint32_t map_unit_own(uint32_t input);
-static constexpr uint32_t MAP_UNIT_OWNS = 16;
+static constexpr uint32_t MAP_UNIT_OWNS = 32;
 static constexpr uint32_t MAP_UNIT_USED = 12;
 static constexpr uint32_t MAP_UNIT_SPEED = 0x80;       // the speed in rpm
 static constexpr uint32_t MAP_UNIT_LOAD = 0x81;        // format 20: the air of a firing, 0.1 mg (its filter's
@@ -78,6 +79,8 @@ static constexpr uint32_t MAP_UNIT_AFTER_START = 0x8A; // the after-start enrich
 static constexpr uint32_t MAP_UNIT_ACCEL = 0x8B;       // the acceleration enrichment (the tick's)
 static constexpr uint32_t MAP_UNIT_RETARD = 0x8C;      // format 24: the knock retard applied at places A to D,
                                                        //   8Ch to 8Fh (L2's, 1/64 tooth)
+static constexpr uint32_t MAP_UNIT_FILM = 0x90;        // format 25: the port film at places A to D, 90h to 93h
+                                                       //   (L2's, injector cycles, at most FFFFh)
 
 // The own values, and L2's and L1's copies of them (pair.cpp's: taken with a level's copy of the RAM,
 // given back at its commit), so that a task reads them as fast as its RAM's bytes.
