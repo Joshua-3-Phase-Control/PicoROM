@@ -14,10 +14,12 @@ too (`docs/snoop.md`): what the board learns of the 8051 from the socket alone.
 | POG_27C020_70ns_MAP | POG, 32 pins            | 128 KiB | To try it on a 32-pin board  |
 
 The unit's code and data live in the last 64 KiB SRAM bank, and what the store keeps, with the
-store's code, in the one before it (format 24's knock retard maps), so the POG build serves two
-(three before). Both keep the image where the stock builds keep it in flash: a board keeps its image
-and settings when its build changes. The store's eight sectors lie just below the image (the P28's
-at 1E7000h, the POG's at 1B7000h); a UF2 load keeps them too. `firmware/load_uf2.ps1` loads a build on Windows with no driver to install: it
+store's code and the benches' 8051 part, in the one before it (format 24's knock retard maps), so
+the POG build serves two (three before). Both keep the image where the stock builds keep it in
+flash: a board keeps its image and settings when its build changes. The store's eight sectors lie
+just below the image (the P28's at 1E7000h, the POG's at 1B7000h), and store_bench's sector below
+them (1E6000h, 1B6000h); a UF2 load keeps them too. `firmware/load_uf2.ps1` loads a build on
+Windows with no driver to install: it
 sends the board to its boot mode through its reset interface, as picotool does, and copies the UF2
 to the RPI-RP2 drive.
 
@@ -550,6 +552,24 @@ at each firing place, logged; no pulse changes:
   each kind's newest committed record whose CRC holds and whose key matches the image (the knock
   maps' axes and layout); a torn one is skipped, so the one before it stands. The board's start
   reads the flash's JEDEC ID.
+- An erase or a program takes the flash off the bus, so nothing may run flash code meanwhile.
+  Core 1's ROM loop is in RAM; each start of core 1 (the ROM loop, a bench) waits 10 us for it to
+  leave the SDK's start, which is in flash; the store's writes wait while map_task's bench (from
+  flash) runs. The bus bench's 8051 part is in bank 2 (`.board_code`, copied by map_unit_init), so
+  that it runs on through an erase. store_bench times the flash's erase and program on the sector
+  below the store's (1E6000h on the P28: nothing else uses it), with the bus bench or a log session
+  running (DME-Sim's BoardCheck `--store-bench`); store_irqs lists core 0's enabled interrupts
+  whose handler is in flash, all of which the store's writes must hold off.
+- The store's erase and program are its own (`.board_code`): the SDK's sequence on the RP2040 (the
+  boot ROM's connect, exit XIP, erase or program, then boot2 back to XIP, the QSPI pads kept)
+  without the XIP cache's flush at the end. After a flush the cache is cold, and the flash code
+  that runs next with the interrupts off (the SDK's and TinyUSB's critical sections in the main
+  loop) held the unit's interrupt off for up to ~10 us: beside the bus bench, the SDK's functions
+  made 84 of 200,000 answers late, and a flush alone (store_flush, three ways) 89 to 145 in 1,000
+  flushes. The store reads its sectors past the cache (13000000h on) once its start's scan is
+  done, so nothing it reads is stale; the cache is enabled and the chip select's forcing cleared,
+  as the ROM's flush would. With them, 20 cycles beside the bus bench: none wrong, late or lost;
+  an erase 17.1 ms, a page 1.6 ms (the owner's Puya P25Q16SH).
 
 ## Parameters
 
@@ -568,9 +588,16 @@ at each firing place, logged; no pulse changes:
 | store          |                   | records, erases, faults, the next sequence, kinds loaded  |
 | store_flash    |                   | the flash's JEDEC ID, the longest program and erase (us)  |
 | store_clear    | knock (or all)    | the kinds asked to clear and not yet cleared (or none)    |
+| store_bench    | n (1 to 1000)     | running, then cycles, faults, erase most, mean, program's |
+| store_flush    | n,way (0 to 2)    | flushes done, the way, cycles most and mean               |
+| store_irqs     |                   | enabled interrupts, those with flash handlers, SysTick's  |
 
 store_clear's knock maps are cleared by L2 once the engine has stopped (the P28 out of step), and a
-neutral record written at once.
+neutral record written at once. store_bench erases the sector below the store's (and checks it
+blank), then programs its 16 pages (each read back), n times, an operation a pass of the main loop
+after the store's own work, then erases it once more; its times are in us. store_flush, a
+diagnostic, flushes the XIP cache alone: way 0 as the ROM's flush (FLUSH read back), 1 with STAT
+polled, 2 with the XIP block left untouched for 10 us (and the flushes not done by then counted).
 
 The kinds: a pick or a send before the last; the last send (the lookup); the page as written again
 (the value's read, or a start). The bus bench and the probe make reads on the board itself, through

@@ -56,6 +56,7 @@ extern "C"
 {
     extern uint8_t __unit_ram_start__[], __unit_ram_end__[], __unit_ram_source__[];
     extern uint8_t __store_code_start__[], __store_code_end__[], __store_code_source__[];
+    extern uint8_t __board_code_start__[], __board_code_end__[], __board_code_source__[];
     extern uint32_t __StackBottom[];
 }
 
@@ -964,6 +965,7 @@ void map_unit_init(uint8_t *rom, uint32_t addr_mask)
     paint_stack();
     memcpy(__unit_ram_start__, __unit_ram_source__, __unit_ram_end__ - __unit_ram_start__);
     memcpy(__store_code_start__, __store_code_source__, __store_code_end__ - __store_code_start__); // bank 2's
+    memcpy(__board_code_start__, __board_code_source__, __board_code_end__ - __board_code_start__); // and these
     store_board_start();                               // the flash's JEDEC ID, before the 8051 is served
     unit.rom = rom;
     unit.mask = addr_mask & 0xFFFF;
@@ -1252,8 +1254,8 @@ static void UNIT_CODE(bench_task)(uint32_t task, uint32_t description, uint32_t 
 // A read wait after the one that started at after: checked against what the 8051 should read, then
 // the unit's answer timed from the read's end, late if not in place due after the read's start (the
 // next read's). Returns when the read started.
-static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32_t expect, uint32_t kind,
-                         uint32_t due)
+static uint32_t BOARD_CODE(bus_step)(uint32_t after, uint32_t wait, uint32_t address, uint32_t expect,
+                                     uint32_t kind, uint32_t due)
 {
     while (since(after) < wait)
     {
@@ -1283,7 +1285,8 @@ static uint32_t bus_step(uint32_t after, uint32_t wait, uint32_t address, uint32
 // A task as coproc_slow's Co_Task asks for it, its inputs at random: each output checked against the
 // task worked out here (core 1's own RAM bytes). The first output read 6 machine cycles after the last
 // send, the rest 4 or more apart. Returns when the last read started.
-static uint32_t bus_task(uint32_t t, uint32_t window, uint32_t id, uint32_t task, uint32_t description, uint32_t *seed)
+static uint32_t BOARD_CODE(bus_task)(uint32_t t, uint32_t window, uint32_t id, uint32_t task, uint32_t description,
+                                     uint32_t *seed)
 {
     uint32_t n = at(description), outputs = description + 1 + n, sent[INPUTS];
     if (n > INPUTS)
@@ -1312,8 +1315,9 @@ static uint32_t bus_task(uint32_t t, uint32_t window, uint32_t id, uint32_t task
 
 // Core 1: each map and task in turn at random inputs, as coproc_maps' Map_Lookup and coproc_slow's
 // Co_Task read them. One lookup in 64 is broken off after its pick (and, one time in two, an input) by
-// a read of 0000h, as the 8051's start after a reset would; the lookup after it must be right.
-static void bus_run()
+// a read of 0000h, as the 8051's start after a reset would; the lookup after it must be right. In bank
+// 2 with what it calls, so that it runs on through the store's erases (bus_bench.h).
+static void BOARD_CODE(bus_run)()
 {
     systick_start();
     uint32_t count = at(MARK + 6), index = at(MARK + 7) << 8 | at(MARK + 8), window = unit.window;
@@ -1372,7 +1376,7 @@ static bool task_start(uint32_t id)
     task_bench.task = kind & ~TASK;
     task_bench.description = at(entry) << 8 | at(entry + 1);
     task_bench.state = BUS_RUNNING;
-    if (bench_launch(task_run))
+    if (bench_launch(task_run, false)) // from flash: the store's writes wait for it
         return true;
     task_bench.state = BUS_IDLE;
     return false;
@@ -1386,7 +1390,7 @@ static bool bus_start(uint32_t want)
     memset(&bus, 0, sizeof(bus));
     bus.want = want;
     bus.state = BUS_RUNNING;
-    if (bench_launch(bus_run))
+    if (bench_launch(bus_run, true))
         return true;
     bus.state = BUS_IDLE;
     return false;
@@ -1395,7 +1399,10 @@ static bool bus_start(uint32_t want)
 void map_unit_update()
 {
     bench_update();
+    if (!bench_lets_flash())
+        return;     // map_task's bench runs flash code on core 1: the store's erases and programs wait
     store_update(); // a record L2 posted, or the next sector erased ahead (docs/Paired_Fuel_Learning.md)
+    store_bench_update(); // store_bench's next erase or program, after the store's own
 }
 
 // map_probe: one read made from core 0, as the bus bench makes them: what the pins read during it,

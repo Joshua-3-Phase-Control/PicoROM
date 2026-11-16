@@ -7,6 +7,7 @@
 #include "hardware/gpio.h"
 #include "hardware/structs/io_bank0.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
 #include "pico/multicore.h"
 
 #include "rom.h"
@@ -27,6 +28,7 @@ enum : uint32_t
 };
 
 static volatile uint32_t state UNIT_DATA = IDLE;
+static volatile bool from_ram UNIT_DATA = false; // the bench's core 1 code in RAM alone (not map_task's)
 static uint32_t core1_stack[128] UNIT_DATA = {};
 static uint32_t ctrl[PINS] UNIT_DATA = {};  // the pins' CTRL with no input override
 static uint32_t saved[PINS] UNIT_DATA = {}; // as they were (addr_mask's overrides, the data pins')
@@ -109,14 +111,16 @@ void bench_give()
     gpio_set_outover(BUF_OE_PIN, GPIO_OVERRIDE_NORMAL);
 }
 
-bool bench_launch(void (*run)())
+bool bench_launch(void (*run)(), bool in_ram)
 {
     if (state != IDLE)
         return false;
     rom_service_stop();
     bench_take();
+    from_ram = in_ram;
     state = RUNNING;
     multicore_launch_core1_with_stack(run, core1_stack, sizeof(core1_stack));
+    busy_wait_us_32(CORE1_STARTED_US); // core 1 through the SDK's start, which runs from flash
     return true;
 }
 
@@ -125,7 +129,12 @@ bool bench_running()
     return state != IDLE;
 }
 
-void bench_finished()
+bool bench_lets_flash()
+{
+    return state == IDLE || from_ram;
+}
+
+void BOARD_CODE(bench_finished)()
 {
     state = FINISHED;
     while (true)

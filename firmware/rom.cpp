@@ -1,6 +1,7 @@
 #include "hardware/structs/bus_ctrl.h"
 #include "hardware/structs/syscfg.h"
 #include "hardware/gpio.h"
+#include "hardware/timer.h"
 #include "pico/multicore.h"
 
 #include "pio_programs.h"
@@ -189,6 +190,7 @@ void rom_service_start()
 
     multicore_reset_core1();
     multicore_launch_core1_with_stack(rom_loop, core1_stack, sizeof(core1_stack));
+    busy_wait_us_32(CORE1_STARTED_US);
 }
 
 void rom_service_stop()

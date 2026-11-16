@@ -70,7 +70,7 @@ static const char *parameter_names[] = {"name",          "rom_name",   "addr_mas
                                         "snoop_last",    "snoop_irq",  "snoop_vectors", "snoop_window",
                                         "snoop_bench",   "snoop_bench_data", "pair_events", "pair_tick",
                                         "pair_map",      "pair_slow",  "pair_knock", "pair_film",   "store",
-                                        "store_flash",   "store_clear",
+                                        "store_flash",   "store_clear", "store_bench", "store_flush", "store_irqs",
 #endif
                                         nullptr};
 

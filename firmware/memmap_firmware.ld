@@ -205,6 +205,17 @@ SECTIONS
     } > STORE_RAM AT> FLASH
     __store_code_source__ = LOADADDR(.store_code);
 
+    /* Bank 2's code the board alone runs (unit_ram.h's BOARD_CODE: the store's flash operations and the
+       benches' 8051 part), beside the store: never in flash, which the store's erases take off the bus;
+       copied from flash by map_unit_init */
+    .board_code : {
+        __board_code_start__ = .;
+        *(.board_code*)
+        . = ALIGN(4);
+        __board_code_end__ = .;
+    } > STORE_RAM AT> FLASH
+    __board_code_source__ = LOADADDR(.board_code);
+
     .uninitialized_data (NOLOAD): {
         . = ALIGN(4);
         *(.uninitialized_data*)

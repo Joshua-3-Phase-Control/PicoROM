@@ -30,6 +30,10 @@ void store_tick();
 // Thread mode (map_unit_update): a posted record programmed, or the next sector erased ahead.
 void store_update();
 
+// Thread mode, after store_update (flash code: the board's alone): store_bench's next operation on the
+// sector below the store's, erased and programmed n times, each timed (store.cpp).
+void store_bench_update();
+
 // The CRC-32 (reflected, polynomial EDB88320h) of one more byte.
 uint32_t store_crc(uint32_t crc, uint32_t byte);
 
@@ -38,6 +42,9 @@ uint32_t store_crc(uint32_t crc, uint32_t byte);
 void store_ask_clear(uint32_t kinds);
 uint32_t store_clears_pending();
 
+// store, store_flash, store_clear, store_bench (its counts: cycles, faults, the erase's longest and mean,
+// the program's, us) and store_irqs (core 0's enabled interrupts, those whose handler is in flash,
+// SysTick's own); store_clear and store_bench set.
 bool store_get_parameter(const char *name, char *value, size_t value_size);
 bool store_set_parameter(const char *name, const char *value);
 

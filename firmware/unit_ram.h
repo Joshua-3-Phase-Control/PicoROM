@@ -13,6 +13,11 @@
 #define UNIT_CODE(name) __attribute__((section(".unit_ram.text." #name), noinline)) name
 #define UNIT_DATA __attribute__((section(".unit_ram.data")))
 
+// Bank 2's code that the board alone runs (memmap_firmware.ld's .board_code, copied there by map_unit_init;
+// DME-Sim loads none of it): the store's flash operations, which DME-Sim stands in for, and the benches'
+// 8051 part, which runs on through them. From RAM: an erase or a program takes the flash off the bus.
+#define BOARD_CODE(name) __attribute__((section(".board_code.text." #name), noinline)) name
+
 // Each core's own SysTick, on the processor's clock: times in cycles.
 static __force_inline void systick_start()
 {

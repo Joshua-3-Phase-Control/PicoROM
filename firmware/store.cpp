@@ -16,18 +16,27 @@
 // record is there. The board's start (store_start) loads each kind's newest whole record whose key
 // matches the image.
 //
-// Flash is read through XIP, a word at a time (DME-Sim's model of it takes words only); the SDK's
-// flash_range_erase and flash_range_program, which run from RAM, are reached through the store's
-// pointers to them, which DME-Sim reads to stand its model in for them.
+// Flash is read through XIP, a word at a time (DME-Sim's model of it takes words only): through the
+// cache for the start's scan, past it from then on. The store's own erase and program (the SDK's
+// flash_range_erase and flash_range_program but for the cache's flush: store_flash_erase, below) run
+// from RAM and are reached through the store's pointers to them, which DME-Sim reads to stand its model
+// in for them.
 
 #if defined(FEATURE_MAP_UNIT)
 
 #include <stdio.h>
 
 #include "hardware/flash.h"
+#include "hardware/structs/io_qspi.h"
 #include "hardware/structs/nvic.h"
+#include "hardware/structs/pads_qspi.h"
+#include "hardware/structs/scb.h"
+#include "hardware/structs/systick.h"
+#include "hardware/structs/xip_ctrl.h"
 #include "hardware/sync.h"
+#include "pico/bootrom.h"
 
+#include "bus_bench.h"
 #include "pair.h"
 #include "store.h"
 #include "str_util.h"
@@ -44,8 +53,12 @@ static constexpr uint32_t AHEAD_PAGES = 4;       // pages left when the next sec
 static constexpr uint32_t MINUTE_US = 60000000, SECOND_US = 1000000;
 static constexpr uint32_t FLASH_IRQS = 1u << 3 | 1u << 5 | 1u << 7; // TIMER_IRQ_3, USBCTRL_IRQ, PIO0_IRQ_0
 static constexpr uint32_t XIP = 0x10000000;      // the flash as the core reads it (XIP_BASE)
+static constexpr uint32_t PAST_CACHE = 0x13000000; // the same past the cache (XIP_NOCACHE_NOALLOC_BASE)
 
 static_assert(OFFSET % SECTOR == 0, "the store's sectors are the flash's");
+
+static void BOARD_CODE(store_flash_erase)(uint32_t flash_offs, size_t count);
+static void BOARD_CODE(store_flash_program)(uint32_t flash_offs, const uint8_t *data, size_t count);
 
 // Each kind's layout (a record's second byte) and data's length: 1, the knock maps (format 24).
 static constexpr uint32_t KNOCK_RECORD = 1, KNOCK_BYTES = 128;
@@ -63,8 +76,8 @@ struct Store
     volatile uint32_t loaded;                            // 20: the kinds loaded at the start (bit k)
     uint32_t offset;                                     // 24: the store's first sector in the flash
     uint32_t sectors;                                    // 28: its sectors, 4 KiB each
-    void (*erase)(uint32_t, size_t);                     // 32: the SDK's flash_range_erase (in RAM)
-    void (*program)(uint32_t, const uint8_t *, size_t);  // 36: flash_range_program
+    void (*erase)(uint32_t, size_t);                     // 32: store_flash_erase (in RAM; the SDK's but the flush)
+    void (*program)(uint32_t, const uint8_t *, size_t);  // 36: store_flash_program
     uint32_t jedec;                                      // 40: the flash's JEDEC ID (the board's start)
     uint32_t program_us, erase_us;                       // 44, 48: the longest program and erase, timed here
     volatile uint8_t asked[KINDS + 1];                   // 52: clears the PC asked for, a count a kind
@@ -82,8 +95,13 @@ struct Store
     uint32_t kind, length;                               // the record posted: its kind, its data's length
 };
 
-Store store_state STORE_DATA = {0, 0, {0, 0}, 0, 0, 0, 1, 0, OFFSET, SECTORS, flash_range_erase, flash_range_program,
+Store store_state STORE_DATA = {0, 0, {0, 0}, 0, 0, 0, 1, 0, OFFSET, SECTORS, store_flash_erase, store_flash_program,
                                 0, 0, 0, {}, {}, {}, 0, NONE, {}, {}, {}, {}, 0, 0, 0, 0, 0};
+
+// Where the store reads its sectors: through the cache for the start's scan, which comes before any
+// write, then past it, so that no line of them is ever read stale (the store's writes leave the cache
+// as it is).
+static uint32_t read_base STORE_DATA = PAST_CACHE;
 
 // The post's page (L2's, then thread mode's), thread mode's own (a copy forward), the commit's (FFh but
 // its last word, 0), and each kind as last stored: in bank 2 beside what the store keeps (not loaded:
@@ -113,7 +131,7 @@ static __force_inline uint32_t now_us()
 // A word of the store's flash, at a byte offset from its first sector.
 static __force_inline uint32_t flash_word(uint32_t at)
 {
-    return *(volatile const uint32_t *)(XIP + store_state.offset + at);
+    return *(volatile const uint32_t *)(read_base + store_state.offset + at);
 }
 
 static bool STORE_CODE(page_blank)(uint32_t p)
@@ -179,19 +197,88 @@ static uint32_t STORE_CODE(kind_parts)(uint32_t kind)
     return kind == STORE_KNOCK ? 2 : 1;
 }
 
+// ---- The flash's erase and program (bank 2's .board_code: the board's alone; DME-Sim stands in) ----
+
+// The SDK's flash_range_erase and flash_range_program as on the RP2040, but for the cache's flush at
+// their end. A flush leaves the XIP cache cold, and the flash code that runs next with the interrupts
+// off (the SDK's and TinyUSB's critical sections in the main loop) then held L0 off for up to ~10 us:
+// beside the bus bench, store_bench made 84 of 200,000 answers late, and store_flush alone 89 to 145
+// in 1,000 flushes, however the flush was waited for. The flush only keeps the cache coherent: the
+// store reads its sectors past the cache once its start's scan is done (read_base), and nothing else
+// in the flash changes. The ROM's flush's other duties stay: the cache enabled and the chip select's IO
+// forcing cleared. Then boot2 (a copy made before the first operation, as the SDK makes its own) takes
+// the flash back to XIP, and the QSPI pads are put back as they were.
+static constexpr uint32_t BLOCK_ERASE = 0xD8;            // the SDK's FLASH_BLOCK_ERASE_CMD
+static constexpr uint32_t BOOT2_WORDS = 64;              // boot2's 256 bytes at the flash's start
+static uint32_t boot2_copy[BOOT2_WORDS] __attribute__((section(".store")));
+static bool boot2_copied STORE_DATA = false;
+
+static __force_inline void flash_sequence(uint32_t flash_offs, const uint8_t *data, size_t count)
+{
+    auto connect = (rom_connect_internal_flash_fn)rom_func_lookup_inline(ROM_FUNC_CONNECT_INTERNAL_FLASH);
+    auto exit_xip = (rom_flash_exit_xip_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_EXIT_XIP);
+    auto erase = (rom_flash_range_erase_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_RANGE_ERASE);
+    auto program = (rom_flash_range_program_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_RANGE_PROGRAM);
+    if (!boot2_copied)
+    {
+        for (uint32_t i = 0; i < BOOT2_WORDS; i++)
+            boot2_copy[i] = ((const volatile uint32_t *)XIP)[i];
+        __compiler_memory_barrier();
+        boot2_copied = true;
+    }
+    uint32_t pads[count_of(pads_qspi_hw->io)];
+    for (uint32_t i = 0; i < count_of(pads_qspi_hw->io); i++)
+        pads[i] = pads_qspi_hw->io[i];
+    __compiler_memory_barrier();                                // no flash access from here on
+    connect();
+    exit_xip();
+    if (data != nullptr)
+        program(flash_offs, data, count);
+    else
+        erase(flash_offs, count, FLASH_BLOCK_SIZE, BLOCK_ERASE);
+    hw_set_bits(&xip_ctrl_hw->ctrl, XIP_CTRL_EN_BITS);          // the cache enabled, not flushed
+    hw_write_masked(&io_qspi_hw->io[1].ctrl,                    // the chip select's forcing cleared
+                    IO_QSPI_GPIO_QSPI_SS_CTRL_OUTOVER_VALUE_NORMAL << IO_QSPI_GPIO_QSPI_SS_CTRL_OUTOVER_LSB,
+                    IO_QSPI_GPIO_QSPI_SS_CTRL_OUTOVER_BITS);
+    ((void (*)(void))((uintptr_t)boot2_copy + 1))();            // XIP again
+    for (uint32_t i = 0; i < count_of(pads_qspi_hw->io); i++)
+        pads_qspi_hw->io[i] = pads[i];
+}
+
+static void BOARD_CODE(store_flash_erase)(uint32_t flash_offs, size_t count)
+{
+    flash_sequence(flash_offs, nullptr, count);
+}
+
+static void BOARD_CODE(store_flash_program)(uint32_t flash_offs, const uint8_t *data, size_t count)
+{
+    flash_sequence(flash_offs, data, count);
+}
+
 // ---- Thread mode: the flash's programs and erases ----
 
-// A page programmed (the SDK's, from RAM: the core waits in the boot ROM meanwhile), only the
-// interrupts whose code is in flash held off; timed.
-static void STORE_CODE(program)(uint32_t p, const uint8_t *page)
+// A page programmed at a flash offset (page), or the sector there erased (null), by the store's own
+// (from RAM: the core waits in the boot ROM meanwhile), only the interrupts whose code is in flash held
+// off. Returns its time (us).
+static uint32_t STORE_CODE(flash_op)(uint32_t at, const uint8_t *page)
 {
     Store &s = store_state;
     uint32_t held = nvic_hw->iser & FLASH_IRQS;
     nvic_hw->icer = held;
     uint32_t start = now_us();
-    s.program(s.offset + p * PAGE, page, PAGE);
+    if (page != nullptr)
+        s.program(at, page, PAGE);
+    else
+        s.erase(at, SECTOR);
     uint32_t took = now_us() - start;
     nvic_hw->iser = held;
+    return took;
+}
+
+static void STORE_CODE(program)(uint32_t p, const uint8_t *page)
+{
+    Store &s = store_state;
+    uint32_t took = flash_op(s.offset + p * PAGE, page);
     if (took > s.program_us)
         s.program_us = took;
 }
@@ -199,12 +286,7 @@ static void STORE_CODE(program)(uint32_t p, const uint8_t *page)
 static void STORE_CODE(erase)(uint32_t sector)
 {
     Store &s = store_state;
-    uint32_t held = nvic_hw->iser & FLASH_IRQS;
-    nvic_hw->icer = held;
-    uint32_t start = now_us();
-    s.erase(s.offset + sector * SECTOR, SECTOR);
-    uint32_t took = now_us() - start;
-    nvic_hw->iser = held;
+    uint32_t took = flash_op(s.offset + sector * SECTOR, nullptr);
     if (took > s.erase_us)
         s.erase_us = took;
     s.erases = s.erases + 1;
@@ -423,6 +505,7 @@ void STORE_CODE(store_start)()
     s.looked_at = now;
     s.copying = s.copied = 0;
     s.key[STORE_KNOCK] = knock_key();
+    read_base = s.records == 0 && s.erases == 0 && s.faults == 0 ? XIP : PAST_CACHE; // the cache: nothing written
     uint32_t best[KINDS + 1] = {}, top = 0, top_page = NONE;
     for (uint32_t kind = 0; kind <= KINDS; kind++)
     {
@@ -474,6 +557,7 @@ void STORE_CODE(store_start)()
             knock_restore(kept[kind]);
         s.loaded = s.loaded | 1u << kind;
     }
+    read_base = PAST_CACHE;                                     // from here on past the cache
     check_ahead();
 }
 
@@ -485,6 +569,143 @@ void store_board_start()
     flash_do_cmd(out, in, 4);
     restore_interrupts(ints);
     store_state.jedec = (uint32_t)in[1] << 16 | in[2] << 8 | in[3];
+}
+
+// ---- store_bench: the flash's erase and program timed (flash code, the board's alone) ----
+
+// The sector below the store's, which nothing else uses: erased (and found blank) and its 16 pages
+// programmed (each read back), n times, an operation a pass of the main loop after the store's own work,
+// then erased once more, each timed as the store's are (flash_op). The bus bench may run meanwhile
+// (BoardCheck --store-bench): with the flash off the bus, whatever runs must run from RAM.
+static constexpr uint32_t BENCH = OFFSET - SECTOR;
+
+struct Bench
+{
+    uint32_t want, cycles, op;                  // cycles asked and done; op 0 the erase, 1 to 16 a page's
+    uint32_t erases, erase_sum, erase_most;     // us
+    uint32_t programs, program_sum, program_most;
+    uint32_t faults;                            // a sector not blank after its erase, a page read back wrong
+    bool running, ran;
+};
+
+static Bench bench STORE_DATA = {};                                  // in bank 2: the main RAM is full
+alignas(4) static uint8_t bench_page[PAGE] __attribute__((section(".store")));
+
+static uint32_t bench_word(uint32_t at)
+{
+    return *(volatile const uint32_t *)(PAST_CACHE + BENCH + at);   // past the cache, as the store's
+}
+
+static void store_flush_update();
+
+void store_bench_update()
+{
+    store_flush_update();
+    Bench &b = bench;
+    if (!b.running || store_state.posted || store_state.ahead)
+        return;
+    if (b.op == 0)
+    {
+        uint32_t took = flash_op(BENCH, nullptr);
+        b.erases++;
+        b.erase_sum += took;
+        if (took > b.erase_most)
+            b.erase_most = took;
+        for (uint32_t at = 0; at < SECTOR; at += 4)
+            if (bench_word(at) != NONE)
+            {
+                b.faults++;
+                break;
+            }
+        if (b.cycles == b.want)
+            b.running = false;                  // the last erase: the sector left blank
+        else
+            b.op = 1;
+        return;
+    }
+    uint32_t page = b.op - 1, seed = b.cycles << 8 | page;
+    for (uint32_t at = 0; at < PAGE; at += 4)
+    {
+        seed = seed * 1664525u + 1013904223u;
+        put_word(bench_page + at, seed);
+    }
+    uint32_t took = flash_op(BENCH + page * PAGE, bench_page);
+    b.programs++;
+    b.program_sum += took;
+    if (took > b.program_most)
+        b.program_most = took;
+    for (uint32_t at = 0; at < PAGE; at += 4)
+        if (bench_word(page * PAGE + at) != *(const uint32_t *)(bench_page + at))
+        {
+            b.faults++;
+            break;
+        }
+    if (++b.op > SECTOR_PAGES)
+    {
+        b.op = 0;
+        b.cycles++;
+    }
+}
+
+// store_flush=n,way: the XIP cache flushed n times, a flush a pass of the main loop, each timed (cycles):
+// way 0 as the SDK's erase and program end (the boot ROM's flash_flush_cache reads FLUSH back, which
+// holds core 0's bus until the flush is done), way 1 with STAT polled (the bus free meanwhile). Nothing
+// in the flash changes. From RAM (bank 2's .board_code): from flash the fetches would wait for it too.
+struct Flushes
+{
+    uint32_t want, done, way, most, sum;        // cycles
+    uint32_t unfinished;                        // way 2: flushes not done by the wait's end
+    bool running, ran;
+};
+
+static Flushes flushes STORE_DATA = {};
+
+static constexpr uint32_t FLUSH_WAIT = 10 * (SYS_CLK_HZ / 1000000); // way 2: 10 us untouched
+
+static uint32_t BOARD_CODE(flush_once)(uint32_t way)
+{
+    uint32_t start = systick_hw->cvr;
+    xip_ctrl_hw->flush = 1;
+    if (way == 0)
+        (void)xip_ctrl_hw->flush;
+    else if (way == 1)
+        while ((xip_ctrl_hw->stat & XIP_STAT_FLUSH_READY_BITS) == 0)
+        {
+        }
+    else
+    {
+        while (((start - systick_hw->cvr) & 0xFFFFFF) < FLUSH_WAIT) // nothing of the XIP block touched
+        {
+        }
+        if ((xip_ctrl_hw->stat & XIP_STAT_FLUSH_READY_BITS) == 0)
+            flushes.unfinished++;                                // not done in the wait
+    }
+    return (start - systick_hw->cvr) & 0xFFFFFF;            // SysTick counts down, 24 bits
+}
+
+static void store_flush_update()
+{
+    Flushes &f = flushes;
+    if (!f.running)
+        return;
+    uint32_t took = flush_once(f.way);
+    f.sum += took;
+    if (took > f.most)
+        f.most = took;
+    if (++f.done == f.want)
+        f.running = false;
+}
+
+// The interrupts enabled on core 0 whose handler (the vector table's entry) is in flash: an operation
+// holds off FLASH_IRQS alone, so any other here would run flash code with the flash off the bus.
+static uint32_t flash_handlers()
+{
+    const uint32_t *table = (const uint32_t *)scb_hw->vtor;
+    uint32_t enabled = nvic_hw->iser, found = 0;
+    for (uint32_t irq = 0; irq < 32; irq++)
+        if ((enabled >> irq & 1) != 0 && table[16 + irq] >= XIP && table[16 + irq] < 0x20000000)
+            found |= 1u << irq;
+    return found;
 }
 
 // ---- The PC's requests (thread mode's: the parameters below; DME-Sim's board link calls these too) ----
@@ -527,13 +748,68 @@ bool store_get_parameter(const char *name, char *value, size_t value_size)
         strcpyz(value, value_size, store_clears_pending() & 1u << STORE_KNOCK ? "knock" : "none");
         return true;
     }
+    if (streq(name, "store_bench"))                     // cycles, faults, erase most, mean, program most, mean
+    {
+        const Bench &b = bench;
+        if (!b.ran)
+            strcpyz(value, value_size, "none");
+        else if (b.running)
+            snprintf(value, value_size, "running %u of %u", (unsigned)b.cycles, (unsigned)b.want);
+        else
+            snprintf(value, value_size, "%u %u %u %u %u %u", (unsigned)b.cycles, (unsigned)b.faults,
+                     (unsigned)b.erase_most, (unsigned)(b.erase_sum / b.erases), (unsigned)b.program_most,
+                     (unsigned)(b.program_sum / b.programs));
+        return true;
+    }
+    if (streq(name, "store_flush"))                     // flushes, the way, cycles most and mean
+    {
+        const Flushes &f = flushes;
+        if (!f.ran)
+            strcpyz(value, value_size, "none");
+        else if (f.running)
+            snprintf(value, value_size, "running %u of %u", (unsigned)f.done, (unsigned)f.want);
+        else
+            snprintf(value, value_size, "%u %u %u %u %u", (unsigned)f.done, (unsigned)f.way, (unsigned)f.most,
+                     (unsigned)(f.sum / f.done), (unsigned)f.unfinished);
+        return true;
+    }
+    if (streq(name, "store_irqs"))                      // enabled, those with flash handlers, SysTick's own
+    {
+        snprintf(value, value_size, "%08x %08x %u", (unsigned)nvic_hw->iser, (unsigned)flash_handlers(),
+                 (unsigned)(systick_hw->csr >> 1 & 1));
+        return true;
+    }
     return false;
 }
 
 // store_clear=knock (or all): the knock maps cleared once the engine has stopped, and a neutral record
-// written at once.
+// written at once. store_bench=n (1 to 1000): the bench, n cycles, unless one runs.
 bool store_set_parameter(const char *name, const char *value)
 {
+    if (streq(name, "store_flush"))
+    {
+        const char *comma = value;
+        while (*comma != '\0' && *comma != ',')
+            comma++;
+        uint32_t n = strtoul(value), way = *comma == ',' ? strtoul(comma + 1) : 0;
+        if (flushes.running || n < 1 || n > 100000 || way > 2)
+            return false;
+        flushes = {};
+        flushes.want = n;
+        flushes.way = way;
+        flushes.running = flushes.ran = true;
+        return true;
+    }
+    if (streq(name, "store_bench"))
+    {
+        uint32_t n = strtoul(value);
+        if (bench.running || n < 1 || n > 1000)
+            return false;
+        bench = {};
+        bench.want = n;
+        bench.running = bench.ran = true;
+        return true;
+    }
     if (!streq(name, "store_clear") || !(streq(value, "knock") || streq(value, "all")))
         return false;
     store_ask_clear(1u << STORE_KNOCK);

@@ -409,7 +409,7 @@ static bool bench_start(uint32_t want, uint32_t read_at, uint32_t write_at)
     bench.done = bench.wrong = bench.lost = bench.irq = bench.on_most = bench.off_most = 0;
     bench.on_least = bench.off_least = 0xFFFFFF;
     bench.state = BENCH_RUNNING;
-    if (bench_launch(bench_run))
+    if (bench_launch(bench_run, true)) // in the unit's bank
         return true;
     bench.state = BENCH_IDLE;
     return false;
