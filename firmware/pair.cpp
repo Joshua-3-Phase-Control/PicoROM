@@ -110,6 +110,7 @@
 #include <stdio.h>
 
 #include "map_unit.h"
+#include "store.h"
 #include "str_util.h"
 #include "unit_ram.h"
 #include "unit_tasks.h"
@@ -1786,6 +1787,75 @@ static void __attribute__((cold)) UNIT_CODE(knock_start)(uint32_t u)
                && at(knock.air_axis + 1) == POINTS;
 }
 
+// The store's knock kind (store.h; DME-Sim's docs/Paired_Fuel_Learning.md), in bank 2 with the store. Its
+// record, in two parts of 64 bytes: each pair's lower, point by point, a byte a point in 1/64 tooth (rounded,
+// at most 255), A and D's map, then B and C's. That is what a return to step makes of them, so power-up gives
+// both maps of a pair that. A part a tick at most, so that the store adds little to any one tick.
+static __force_inline uint32_t kept_byte(const uint32_t *a, const uint32_t *b, uint32_t i)
+{
+    uint32_t x = a[i], y = b[i], counts = (((x < y ? x : y) >> 15) + 1) >> 1;  // rounded (no constant to make)
+    return counts > 0xFF ? 0xFF : counts;
+}
+
+bool STORE_CODE(knock_differs)(uint32_t one, const uint8_t *kept)
+{
+    const uint32_t *a = knock_store.maps[one], *b = knock_store.maps[PLACES - 1 - one];
+    kept += one * POINTS * POINTS;
+    for (uint32_t i = 0; i < POINTS * POINTS; i++)
+        if (kept_byte(a, b, i) != kept[i])
+            return true;
+    return false;
+}
+
+void STORE_CODE(knock_copy)(uint32_t one, uint8_t *out)
+{
+    const uint32_t *a = knock_store.maps[one], *b = knock_store.maps[PLACES - 1 - one];
+    out += one * POINTS * POINTS;
+    for (uint32_t i = 0; i < POINTS * POINTS; i++)
+        out[i] = kept_byte(a, b, i);
+}
+
+void STORE_CODE(knock_restore)(const uint8_t *in)
+{
+    for (uint32_t one = 0; one < PLACES / 2; one++)
+    {
+        uint32_t *a = knock_store.maps[one], *b = knock_store.maps[PLACES - 1 - one];
+        for (uint32_t i = 0; i < POINTS * POINTS; i++)
+            a[i] = b[i] = (uint32_t)in[one * POINTS * POINTS + i] << 16;
+    }
+}
+
+// L2's (from the store's tick, as knock_tick writes them): the maps to 0; the retards applied follow at the
+// next tick.
+void STORE_CODE(knock_clear)()
+{
+    for (uint32_t i = 0; i < PLACES; i++)
+        for (uint32_t k = 0; k < POINTS * POINTS; k++)
+            knock_store.maps[i][k] = 0;
+}
+
+// What the maps mean: the CRC-32 of their layout word and both axes as the image has them (the input, the
+// count, the points); 0 with the work off (never a key: a CRC of 0 is taken as 1).
+uint32_t STORE_CODE(knock_key)()
+{
+    if (!knock.on)
+        return 0;
+    uint32_t crc = ~0u;
+    for (uint32_t i = 0; i < 4; i++)
+        crc = store_crc(crc, KNOCK_LAYOUT >> 8 * i);
+    for (uint32_t i = 0; i < 2 + 2 * at(knock.speed_axis + 1); i++)
+        crc = store_crc(crc, at(knock.speed_axis + i));
+    for (uint32_t i = 0; i < 2 + 2 * at(knock.air_axis + 1); i++)
+        crc = store_crc(crc, at(knock.air_axis + i));
+    crc = ~crc;
+    return crc == 0 ? 1 : crc;
+}
+
+bool STORE_CODE(knock_stopped)()
+{
+    return !pair.synced;
+}
+
 // ---------------------------------------------------------------------------------------------------
 // The port films (format 25; DME-Sim's docs/Paired_Wall_Film.md, step 1): a discrete tau-X film for each
 // firing place, kept once a tick (L2, after the knock work, before the frame) from the notes since the last
@@ -2033,7 +2103,8 @@ void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
-// the pulse made again), then (format 24) the knock work, (format 25) the films, and its frame.
+// the pulse made again), then (format 24) the knock work, (format 25) the films, its frame, and the
+// store's look for a changed kind.
 static void UNIT_CODE(tick_at_once)(const Ping &ping)
 {
     uint32_t tick;
@@ -2044,10 +2115,12 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
     knock_tick();
     film_tick(tick_work);
     make_frame(tick);
+    store_tick();
 }
 
-// L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films, then
-// its frame; the next one pended again.
+// L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films, its
+// frame, then the store's look for a changed kind (docs/Paired_Fuel_Learning.md); the next one pended
+// again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
@@ -2061,6 +2134,7 @@ void UNIT_CODE(pair_tick)()
         knock_tick();
         film_tick(tick_work);
         make_frame(tick);
+        store_tick();
         uint32_t span = now_us() - ping.at;
         if (span > levels.tick_us)
             levels.tick_us = span;

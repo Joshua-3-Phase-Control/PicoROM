@@ -34,6 +34,7 @@ function(picorom BUILD_CONFIG DEFINES)
         snoop.cpp
         crank.cpp
         pair.cpp
+        store.cpp
         bus_bench.cpp
         pio_programs.cpp
         str_util.cpp
@@ -136,11 +137,11 @@ picorom(P28_27C512_100ns BOARD_28P=1 FEATURE_STABLE_ADDRESS=1)
 picorom(P28_27C512_70ns_MAP "BOARD_28P=1;FEATURE_MAP_UNIT=1")
 picorom(POG_27C020_70ns_MAP "BOARD_32P_TCA=1;FEATURE_MAP_UNIT=1")
 
-# The unit's bank calls nothing outside it (the map unit's, its tasks', the snoop's and the bus
-# bench's code): no loop may become a memset call, nor a chain of tests a jump table (libgcc's case
-# helpers are in flash).
-set_source_files_properties(map_unit.cpp unit_tasks.cpp snoop.cpp crank.cpp pair.cpp bus_bench.cpp PROPERTIES COMPILE_OPTIONS
-    "-fno-tree-loop-distribute-patterns;-fno-jump-tables")
+# The unit's bank calls nothing outside it (the map unit's, its tasks', the snoop's, the store's and
+# the bus bench's code; the store but for the SDK's two flash functions, in RAM): no loop may become
+# a memset call, nor a chain of tests a jump table (libgcc's case helpers are in flash).
+set_source_files_properties(map_unit.cpp unit_tasks.cpp snoop.cpp crank.cpp pair.cpp store.cpp bus_bench.cpp
+    PROPERTIES COMPILE_OPTIONS "-fno-tree-loop-distribute-patterns;-fno-jump-tables")
 
 foreach(TARGET ${ALL_FIRMWARE_TARGETS})
     list(APPEND FIRMWARE_BIN_FILES "${TARGET}.bin")

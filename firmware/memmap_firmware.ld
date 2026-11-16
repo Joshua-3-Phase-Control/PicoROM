@@ -185,14 +185,25 @@ SECTIONS
     } > UNIT_RAM AT> FLASH
     __unit_ram_source__ = LOADADDR(.unit_ram);
 
-    /* What the store will keep (FEATURE_MAP_UNIT, format 24: pair.cpp's knock retard maps), in a bank of
-       its own: nothing loaded, zeroed as the unit starts (pair_start); later filled by the store */
+    /* What the store keeps (FEATURE_MAP_UNIT, format 24: pair.cpp's knock retard maps) and the store's
+       pages, in a bank of their own: nothing loaded, set as the unit starts (pair_start, store_start) */
     .store (NOLOAD) : {
         __store_start__ = .;
-        *(.store*)
+        *(.store)
+        *(.store.*)
         . = ALIGN(4);
         __store_end__ = .;
     } > STORE_RAM
+
+    /* The store's code and data (store.cpp, and pair.cpp's knock kind: bank 3 has no room left), copied from
+       flash by map_unit_init beside what it keeps */
+    .store_code : {
+        __store_code_start__ = .;
+        *(.store_code*)
+        . = ALIGN(4);
+        __store_code_end__ = .;
+    } > STORE_RAM AT> FLASH
+    __store_code_source__ = LOADADDR(.store_code);
 
     .uninitialized_data (NOLOAD): {
         . = ALIGN(4);

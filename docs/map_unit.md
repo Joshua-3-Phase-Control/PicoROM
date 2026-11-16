@@ -13,10 +13,11 @@ too (`docs/snoop.md`): what the board learns of the 8051 from the socket alone.
 | P28_27C512_70ns_MAP | P28, in the DME socket  | 64 KiB  | Run on a P28 by USB alone    |
 | POG_27C020_70ns_MAP | POG, 32 pins            | 128 KiB | To try it on a 32-pin board  |
 
-The unit's code and data live in the last 64 KiB SRAM bank, and what the store will keep in the one
-before it (format 24: the knock retard's maps), so the POG build serves two (three before). Both
-keep the image where the stock builds keep it in flash: a board keeps its image and settings when
-its build changes. `firmware/load_uf2.ps1` loads a build on Windows with no driver to install: it
+The unit's code and data live in the last 64 KiB SRAM bank, and what the store keeps, with the
+store's code, in the one before it (format 24's knock retard maps), so the POG build serves two
+(three before). Both keep the image where the stock builds keep it in flash: a board keeps its image
+and settings when its build changes. The store's eight sectors lie just below the image (the P28's
+at 1E7000h, the POG's at 1B7000h); a UF2 load keeps them too. `firmware/load_uf2.ps1` loads a build on Windows with no driver to install: it
 sends the board to its boot mode through its reset interface, as picotool does, and copies the UF2
 to the RPI-RP2 drive.
 
@@ -535,6 +536,20 @@ at each firing place, logged; no pulse changes:
   to make room. With 640, as in the stock builds, a parameter's answer in the USB callback with an
   interrupt on top ran past the stack into TinyUSB's state, and USB stopped; the deepest since has
   been 716 bytes.
+- The store (store.cpp; DME-Sim's docs/Paired_Fuel_Learning.md, step 1) keeps what the P28 learns
+  in its flash across power cycles: eight 4 KiB sectors just below the image (1E7000h on the P28), a
+  record a 256-byte page (kind, layout, length, sequence, key, CRC-32, the data; the page's last
+  word the commit, programmed to 0 once the record's program has ended). Its code and data are in
+  bank 2 beside what it keeps (`.store_code`, copied by map_unit_init; bank 3 has no room). Its
+  first kind is format 24's knock maps, each pair's lower, a byte a point. L2 looks once a second
+  for a part of a kind that changed since its record (a minute at least between records), copies
+  the kind a part a tick and posts it; thread mode (map_unit_update) programs it and reads it back,
+  then the commit, with only USB's, the comms window's and the SDK's timer's interrupts held off by
+  their enable bits: core 1 and the levels run on from RAM. With four pages left in a sector it
+  erases the next one (copying forward a kind's newest record there first). The unit's start loads
+  each kind's newest committed record whose CRC holds and whose key matches the image (the knock
+  maps' axes and layout); a torn one is skipped, so the one before it stands. The board's start
+  reads the flash's JEDEC ID.
 
 ## Parameters
 
@@ -550,6 +565,12 @@ at each firing place, logged; no pulse changes:
 | map_cycles     |                   | the interrupt's own times by kind since start             |
 | map_probe      | address           | one read: the pins, map_window's place, reads answered    |
 | map_stack      |                   | how much of the main stack has never been used            |
+| store          |                   | records, erases, faults, the next sequence, kinds loaded  |
+| store_flash    |                   | the flash's JEDEC ID, the longest program and erase (us)  |
+| store_clear    | knock (or all)    | the kinds asked to clear and not yet cleared (or none)    |
+
+store_clear's knock maps are cleared by L2 once the engine has stopped (the P28 out of step), and a
+neutral record written at once.
 
 The kinds: a pick or a send before the last; the last send (the lookup); the page as written again
 (the value's read, or a start). The bus bench and the probe make reads on the board itself, through

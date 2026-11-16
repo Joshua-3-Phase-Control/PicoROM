@@ -46,6 +46,7 @@
 #include "pio_programs.h"
 #include "rom.h"
 #include "snoop.h"
+#include "store.h"
 #include "str_util.h"
 #include "system.h"
 #include "unit_ram.h"
@@ -54,6 +55,7 @@
 extern "C"
 {
     extern uint8_t __unit_ram_start__[], __unit_ram_end__[], __unit_ram_source__[];
+    extern uint8_t __store_code_start__[], __store_code_end__[], __store_code_source__[];
     extern uint32_t __StackBottom[];
 }
 
@@ -954,12 +956,15 @@ void UNIT_CODE(map_unit_start)(uint8_t *rom, uint32_t addr_mask)
     if (page != 0)
         state_on(page);
     pair_start(page != 0 ? rom : nullptr);
+    store_start();                                     // what the store keeps, after the knock work's start
 }
 
 void map_unit_init(uint8_t *rom, uint32_t addr_mask)
 {
     paint_stack();
     memcpy(__unit_ram_start__, __unit_ram_source__, __unit_ram_end__ - __unit_ram_start__);
+    memcpy(__store_code_start__, __store_code_source__, __store_code_end__ - __store_code_start__); // bank 2's
+    store_board_start();                               // the flash's JEDEC ID, before the 8051 is served
     unit.rom = rom;
     unit.mask = addr_mask & 0xFFFF;
     systick_start(); // core 0's, for map_cycles
@@ -1390,6 +1395,7 @@ static bool bus_start(uint32_t want)
 void map_unit_update()
 {
     bench_update();
+    store_update(); // a record L2 posted, or the next sector erased ahead (docs/Paired_Fuel_Learning.md)
 }
 
 // map_probe: one read made from core 0, as the bus bench makes them: what the pins read during it,
@@ -1455,6 +1461,8 @@ static uint32_t mean(uint64_t sum, uint32_t count)
 
 bool map_unit_set_parameter(const char *name, const char *value)
 {
+    if (store_set_parameter(name, value))
+        return true;                                    // store_clear
     uint32_t args[3] = {}, map, axes;
     uint32_t n = numbers(value, args);
     if (streq(name, "map_lookup"))
@@ -1499,6 +1507,8 @@ bool map_unit_get_parameter(const char *name, char *value, size_t value_size)
 {
     if (pair_get_parameter(name, value, value_size))
         return true;                                    // the levels' counts (pair_events, pair_tick, pair_map, pair_slow)
+    if (store_get_parameter(name, value, value_size))
+        return true;                                    // store, store_flash, store_clear
     if (streq(name, "map_unit"))
     {
         if (!unit.on)
