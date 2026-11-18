@@ -201,6 +201,19 @@ __force_inline bool fine_map(const Task &t)
 // term L2 makes, pair.cpp's), and the MAP pulse's and the cut's gains L2's (the films' model), not task 2's.
 constexpr uint32_t INVERTED_FORMAT = 26;
 
+// Format 27 (step 4): the need's air, the air of a firing less the manifold's take on a rise of the MAP (L2's,
+// pair.cpp's), at least half of it; before format 27 the air of a firing.
+constexpr uint32_t FILL_FORMAT = 27;
+
+static uint32_t UNIT_CODE(need_air)(const Task &t)
+{
+    uint32_t a = air(t);
+    if (at(t.rom, 0x2004) < FILL_FORMAT)
+        return a;
+    uint32_t take = pair_fill_take(), half = a >> 1;
+    return take > half ? a - half : a - take;
+}
+
 // The RAM's word at address (its low byte) and the next (its high).
 __force_inline uint32_t ram_word(const Task &t, uint32_t address)
 {
@@ -789,7 +802,8 @@ static uint32_t UNIT_CODE(crank_fuel)(const Task &t, uint32_t *exponent, uint32_
 // INJ_OFS. The turn's pulse counted (InjCount, to 80h; not starting). Format 26 (DME-Sim's
 // docs/Paired_Wall_Film.md, step 2): running, the time twice a turn is the need, which the port films' term
 // makes the pulse, (the need - R) x F (pair_film_term, L2's), before the shortest time and the rest; the
-// need and its air of a firing left for the MAP pulse's gains.
+// need and its air of a firing left for the MAP pulse's gains. Format 27 (step 4): that air the need's (the
+// air of a firing less the manifold's take, need_air), as fuel_time made the need on.
 static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, bool again, uint32_t *count,
                                   uint32_t *flags)
 {
@@ -808,7 +822,7 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
             r = 0xF800;
         if (at(t.rom, 0x2004) >= INVERTED_FORMAT)                       // format 26: on the films, unless
         {                                                               //   the need's pulse is held open
-            pair_film_need(r, air(t));                                  //   (the injectors at their limit:
+            pair_film_need(r, need_air(t));                             //   (the injectors at their limit:
             uint32_t term = pair_film_term(), films = term & 0xFFFF;    //   the films change nothing there)
             uint32_t hold = (input(t, 4) << 8 | input(t, 3)) * get(t, 21);
             shift_left(&hold, 3);
@@ -914,7 +928,8 @@ static uint32_t UNIT_CODE(crank_word)(const Task &t, uint32_t *flags)
 // Format 21: the time a turn (cycles): the base, the air of a firing (starting Cal_StartAir), x the slow
 // factor (FuelFactorH:L, FuelShift), running x (1 + the warm-up's weight) x (1 + the after-start) x the
 // main map (Fuel_Idle at idle, Fuel_Main off it), starting x Cal_StartFactor x the cranking's factor (if
-// any); then x (1 + the acceleration's), held to 16 bits.
+// any); then x (1 + the acceleration's), held to 16 bits. Format 27: running, the need's air in place of the
+// air of a firing.
 static uint32_t UNIT_CODE(fuel_time)(const Task &t, uint32_t *flags)
 {
     F16 s = f16_word(input(t, 6) << 8 | input(t, 5));                  // (as Slow_Fuel leaves it, normalised)
@@ -926,8 +941,8 @@ static uint32_t UNIT_CODE(fuel_time)(const Task &t, uint32_t *flags)
         uint32_t crank = crank_word(t, flags);
         return fuel_starting(s, word_at(t, c + get(t, 29)), word_at(t, c + get(t, 30)), crank, accel);
     }
-    return fuel_running(s, air(t), own_word(t, MAP_UNIT_WARM_WEIGHT), own_word(t, MAP_UNIT_AFTER_START),
-                        value(t, get(t, bit(t, get(t, 17)) ? 1 : 0)), accel);
+    return fuel_running(s, need_air(t), own_word(t, MAP_UNIT_WARM_WEIGHT), own_word(t, MAP_UNIT_AFTER_START),
+                        value(t, get(t, bit(t, get(t, 17)) ? 1 : 0)), accel);   // (format 27: the need's air)
 }
 
 // The pulse: the cranking fuel's factor starting, else the main map (Fuel_Idle at idle, Fuel_Main

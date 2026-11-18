@@ -35,6 +35,10 @@ bool pair_pulse(uint32_t start, uint32_t overflows, bool again, uint32_t fuel);
 uint32_t pair_film_term();
 void pair_film_need(uint32_t need, uint32_t air);
 
+// Format 27 (step 4): the manifold's take of a firing (0.1 mg; 0: none), L2's, which the pulse task takes off
+// the air of a firing for the need.
+uint32_t pair_fill_take();
+
 // Task 12 (format 8): start mode over, as the tick found it: the next reference injects (rom_lean's
 // Main_Tick_Over cleared Inj720Odd).
 void pair_start_over();

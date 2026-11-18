@@ -22,6 +22,9 @@
 // DME-Sim loads it): bank 3 has no room left. Format 26 on: the port films' term and the model's gains.
 #define BANK2_CODE(name) __attribute__((section(".store_code.text." #name), noinline)) name
 
+// L2's data in bank 2, copied there with its code (format 27 on: the filling correction's).
+#define BANK2_DATA __attribute__((section(".store_code.data")))
+
 // Each core's own SysTick, on the processor's clock: times in cycles.
 static __force_inline void systick_start()
 {

@@ -102,6 +102,15 @@
 // is the open place's (the first whose intake ends after the turn's injection) or the rest's, beta the
 // strip a intake and the evaporation by the time a cycle takes, each a map on coolant by the air of a firing
 // at the tick's operating point. The films are own values 90h-93h (A to D, injector cycles).
+//
+// Format 27 (DME-Sim's docs/Paired_Wall_Film.md, step 4): the filling correction. The AFM reads the air that
+// fills the manifold on a rise of its pressure too, which the cylinders don't take: the need's air is the air
+// of a firing less the manifold's take. L1's MAP job keeps each slot's last read; once a tick (L2, after the
+// films) the change of their sum since the last tick, delayed and lagged as the AFM's path (its vane, the
+// volumes before the throttle: Cal_FillDelay ticks, Cal_FillLag a tick), is made a firing's take (Cal_MapPa x
+// Cal_FillMass, the manifold's air a kPa, x a firing's length over the tick's), filtered as the load is
+// (Load_Filter's coefficient) and kept at 0 or more: falls take nothing. The pulse task takes it off the air of
+// a firing for the need, at most half of it (own value 96h for the log, 0.1 mg).
 
 #include "pair.h"
 
@@ -134,6 +143,7 @@ static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 to
 static constexpr uint32_t RETARD = 24;   // the format with the knock retard learnt at each place (its map)
 static constexpr uint32_t FILM = 25;     // the format with the port films kept at each place (step 1)
 static constexpr uint32_t INVERTED = 26; // the format with the turn's pulse inverted on the films (step 2)
+static constexpr uint32_t FILL = 27;     // the format with the filling correction on the need's air (step 4)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -341,6 +351,30 @@ struct FilmPulse
 };
 
 static FilmPulse film_pulse UNIT_DATA = {};
+
+// Format 27 (DME-Sim's docs/Paired_Wall_Film.md, step 4): the filling correction. L1's MAP job keeps each
+// slot's last read; once a tick L2 makes the take (fill_tick); the pulse task takes it (pair_fill_take).
+static constexpr uint32_t FILL_RING = 4; // the changes kept (a power of 2): Cal_FillDelay ticks, at most 3
+
+struct FilmFill
+{
+    // Read by DME-Sim (its tests take these offsets).
+    volatile uint32_t take;      // 0: the manifold's take of a firing, 0.1 mg (the pulse task's)
+    volatile uint32_t reads[2];  // 4, 8: the MAP's last read at each slot (L1's)
+    int32_t ring[FILL_RING];     // 12: the reads' sum's change at each of the last ticks (counts)
+    int32_t lagged;              // 28: the change delayed and lagged (counts x 256)
+    int32_t filtered;            // 32: the take filtered as the load is (0.1 mg x 16, signed)
+    uint32_t level;              // 36: the reads' sum at the last tick (counts)
+    uint32_t last_at;            // 40: the last tick's ping (us)
+    uint32_t ticks;              // 44: ticks worked since the last restart (the ring's index)
+    uint32_t runs;               // 48: ticks a take was made
+    uint32_t seen_resets;        // 52: the films' resets at the last restart
+    // The table's.
+    bool on;
+    uint32_t filter_id, mass_at, pa_at;
+};
+
+static FilmFill fill BANK2_DATA = {};
 
 // A note into the ring (the bus level's; L1's with the interrupts held off); none past a full ring.
 static __force_inline void film_note(uint32_t kind, uint32_t fuel)
@@ -1983,7 +2017,67 @@ void BANK2_CODE(film_pulse_tick)(const uint8_t *bytes, bool waits, bool starting
     __asm volatile("cpsie i" ::: "memory");
 }
 
-static void UNIT_CODE(film_tick)(const uint8_t *bytes)
+// Format 27 (step 4), L2 after the films: the manifold's take of a firing, on the tick's copy (`bytes`), at the
+// tick's ping (`now`, us). The MAP's level is the sum of the two slots' last reads (each slot at its own crank
+// angle every firing, so its pulsation is the same at each read and a change of the sum is the manifold's);
+// its change since the last tick waits Cal_FillDelay ticks and is lagged by Cal_FillLag (its share a tick,
+// 1/256; 0: none), as the AFM's air follows the filling through its vane and the volumes before the
+// throttle. A firing's take: the lagged change x Cal_MapPa (Pa a count) / 1000 x Cal_FillMass (the manifold's
+// air, 0.1 mg a kPa) / 2 (the two reads) x a firing's length (30,000,000 us / the speed: four places in 720
+// degrees) / the tick's (since the last ping), filtered by Load_Filter's coefficient at the speed (1/256) as
+// the air of a firing is; at 0 or more (a fall takes nothing), at most FFFFh (0.1 mg). None while starting or at
+// the first tick after the board's start, the 8051's or the engine's stop (the films' resets), from which the
+// level is the reads' again. The take is own value 96h for the log.
+void BANK2_CODE(fill_tick)(const uint8_t *bytes, uint32_t now, bool starting)
+{
+    uint32_t level = fill.reads[0] + fill.reads[1], dt = now - fill.last_at;
+    fill.last_at = now;
+    if (starting || film.resets != fill.seen_resets || fill.ticks == 0)
+    {
+        fill.seen_resets = film.resets;
+        for (uint32_t k = 0; k < FILL_RING; k++)
+            fill.ring[k] = 0;
+        fill.lagged = fill.filtered = 0;
+        fill.level = level;
+        fill.ticks = 1;
+        fill.take = 0;
+        map_unit_set_own(MAP_UNIT_FILL, 0);
+        return;
+    }
+    uint32_t n = fill.ticks;
+    fill.ring[n & (FILL_RING - 1)] = (int32_t)level - (int32_t)fill.level;
+    fill.level = level;
+    fill.ticks = n + 1;
+    uint32_t delay = at(fill.mass_at + 2) & (FILL_RING - 1), share = at(fill.mass_at + 3);
+    int32_t y = fill.ring[(n - delay) & (FILL_RING - 1)] * 256;
+    int32_t lagged = share == 0 ? y : fill.lagged + ((y - fill.lagged) * (int32_t)share >> 8);
+    fill.lagged = lagged;
+    uint32_t mass = at(fill.mass_at) << 8 | at(fill.mass_at + 1), pa = at(fill.pa_at) << 8 | at(fill.pa_at + 1);
+    uint32_t rpm = map_unit_own(MAP_UNIT_SPEED);
+    int32_t take = 0;
+    if (mass != 0 && rpm >= 470 && dt != 0 && lagged != 0)
+    {
+        uint32_t firing = map_unit_divide32(30000000, rpm);             // us, under 65536 from 470 rpm
+        uint32_t ratio = map_unit_divide32(firing << 13, dt);           // a firing over the tick, 1/8192
+        uint32_t m = (uint32_t)(lagged < 0 ? -lagged : lagged);         // 2 counts x 256 a tick
+        uint32_t p = (m > 0xFFFF ? 0xFFFF : m) * pa;                    // 2 Pa x 256 a tick
+        uint32_t f = film_mul(p, ratio > 0xFFFF ? 0xFFFF : ratio);      // a firing's, / 8
+        uint32_t kpa = map_unit_divide32(f, 125);                       // 2 kPa x 256 a firing
+        uint32_t t = (kpa > 0xFFFF ? 0xFFFF : kpa) * mass >> 5;         // 0.1 mg x 16 a firing
+        if (t > 0xFFFFF)
+            t = 0xFFFFF;
+        take = lagged < 0 ? -(int32_t)t : (int32_t)t;
+    }
+    uint32_t k = unit_map_value(fill.filter_id, bytes, map_unit_owns.own) & 0xFF;
+    int32_t filtered = fill.filtered + ((take - fill.filtered) * (int32_t)k >> 8);
+    fill.filtered = filtered;
+    uint32_t applied = filtered > 0 ? (uint32_t)filtered >> 4 : 0;
+    fill.take = applied > 0xFFFF ? 0xFFFF : applied;
+    fill.runs = fill.runs + 1;
+    map_unit_set_own(MAP_UNIT_FILL, fill.take);
+}
+
+static void UNIT_CODE(film_tick)(const uint8_t *bytes, uint32_t now)
 {
     if (!film.on)
         return;
@@ -2054,9 +2148,11 @@ static void UNIT_CODE(film_tick)(const uint8_t *bytes)
             film.injections = film.injections + 1;
         }
     }
+    bool starting = ram_bit(pair.start_bit);
     if (film_pulse.on)                                          // format 26: the term and the gains
-        film_pulse_tick(bytes, control.pulse_made && pair.references == pair.pulse_reference,
-                        ram_bit(pair.start_bit));
+        film_pulse_tick(bytes, control.pulse_made && pair.references == pair.pulse_reference, starting);
+    if (fill.on)                                                // format 27: the manifold's take, at the
+        fill_tick(bytes, now, starting);                        //   tick's ping
     for (uint32_t p = 0; p < FILM_PLACES; p++)
     {
         uint32_t cycles = film.film[p] >> 8;
@@ -2081,6 +2177,8 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
     film.waiting = 0;
     for (uint32_t p = 0; p < FILM_PLACES; p++)
         film.film[p] = film.waits[p] = 0;
+    fill.on = false;                                            // format 27: none taken, no tick yet
+    fill.take = fill.ticks = fill.reads[0] = fill.reads[1] = 0;
     if (at(MARK + 4) < FILM || !control.mapped || !control.slowed || 2 * pair.firings != FILM_PLACES)
         return;
     uint32_t maps = at(MARK + 6);                               // the maps and tasks the index lists
@@ -2103,6 +2201,12 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
     film_pulse.decel_at = at(u + 157) & 0x7F;
     film_pulse.on = film_pulse.air_id < maps && film_pulse.rise_id < maps && film_pulse.fall_id < maps
                     && film_pulse.pa_at != 0;
+    if (!film_pulse.on || at(MARK + 4) < FILL)                  // format 27 (u + 158 on): Load_Filter's id,
+        return;                                                 //   Cal_FillMass's address (Cal_FillDelay,
+    fill.filter_id = at(u + 158);                               //   Cal_FillLag after it)
+    fill.mass_at = word(u + 159);
+    fill.pa_at = film_pulse.pa_at;
+    fill.on = fill.filter_id < maps && fill.mass_at != 0;
 }
 
 // Format 26: the term for the pulse task (0: none) and its need.
@@ -2114,6 +2218,12 @@ uint32_t UNIT_CODE(pair_film_term)()
 void UNIT_CODE(pair_film_need)(uint32_t need, uint32_t air)
 {
     film_pulse.need = (need & 0xFFFF) | (air > 0xFFFF ? 0xFFFF : air) << 16;
+}
+
+// Format 27: the manifold's take of a firing (0.1 mg; 0: none), for the pulse task's need.
+uint32_t UNIT_CODE(pair_fill_take)()
+{
+    return fill.on ? fill.take : 0;
 }
 
 // Format 24: the knock retard of the firing whose fall 1 has count base (its place's, by its letter) off the
@@ -2238,8 +2348,8 @@ void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
-// the pulse made again), then (format 24) the knock work, (format 25) the films, its frame, and the
-// store's look for a changed kind.
+// the pulse made again), then (format 24) the knock work, (format 25) the films, (format 27) the
+// manifold's take, its frame, and the store's look for a changed kind.
 static void UNIT_CODE(tick_at_once)(const Ping &ping)
 {
     uint32_t tick;
@@ -2248,14 +2358,14 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
     while (control.stop_due || control.out != control.in)
         pair_control();
     knock_tick();
-    film_tick(tick_work);
+    film_tick(tick_work, ping.at);
     make_frame(tick);
     store_tick();
 }
 
-// L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films, its
-// frame, then the store's look for a changed kind (docs/Paired_Fuel_Learning.md); the next one pended
-// again.
+// L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films,
+// (format 27) the manifold's take, its frame, then the store's look for a changed kind
+// (docs/Paired_Fuel_Learning.md); the next one pended again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
@@ -2267,7 +2377,7 @@ void UNIT_CODE(pair_tick)()
     else if (tick_job(ping, &tick))
     {
         knock_tick();
-        film_tick(tick_work);
+        film_tick(tick_work, ping.at);
         make_frame(tick);
         store_tick();
         uint32_t span = now_us() - ping.at;
@@ -2425,6 +2535,7 @@ static void UNIT_CODE(run_map)(const Job &job)
 {
     uint32_t load, fuel = 0;
     levels.map_jobs = levels.map_jobs + 1;
+    fill.reads[job.length & 1] = job.first & 0xFF;                      // format 27: the slot's last read
     if (!unit_map_pulse(control.map_task, (const uint8_t *)pair.rom, (uint8_t *)map_unit_ram_words(), job.length,
                         job.first, &load, &fuel))
         return;
@@ -3293,6 +3404,12 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
                  (unsigned)film_pulse.terms);
         return true;
     }
+    if (streq(name, "pair_fill"))                               // format 27: the take (0.1 mg), ticks a take
+    {                                                           //   was made, the two reads, the take filtered
+        snprintf(value, value_size, "%u %u %u %u %d", (unsigned)fill.take, (unsigned)fill.runs,
+                 (unsigned)fill.reads[0], (unsigned)fill.reads[1], (int)fill.filtered);
+        return true;
+    }
     return false;
 }
 
@@ -3516,7 +3633,7 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     }
     else if (routine == 36)                                     // format 25: L2's film work at once, on the
     {                                                           //   tick's copy and own values as they stand
-        film_tick(tick_work);
+        film_tick(tick_work, now_us());
         out[0] = film.runs;
         out[1] = film.intakes;
         out[2] = film.injections;
@@ -3541,6 +3658,14 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[1] = film_pulse.rise;
         out[2] = film_pulse.fall;
         out[3] = film_pulse.terms;
+    }
+    else if (routine == 40)                                     // format 27: the manifold's take at once, on
+    {                                                           //   the tick's copy (in: the ping's time,
+        fill_tick(tick_work, in[0], in[1] != 0);                //   starting)
+        out[0] = fill.take;
+        out[1] = fill.runs;
+        out[2] = (uint32_t)fill.lagged;
+        out[3] = (uint32_t)fill.filtered;
     }
     else
         return 0;

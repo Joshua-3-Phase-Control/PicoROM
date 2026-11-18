@@ -273,7 +273,9 @@ of the firings' way:
   those over 1 ms. Format 24 adds `pair_knock`: L2's knock work's ticks, the knocks told, those
   learnt, the give-backs, the merges and the line's faulty flag; format 25 `pair_film`: L2's film
   work's ticks, the intakes and injections kept, the notes lost and the resets; format 26
-  `pair_term`: the term's R and F, the gains for a rise and a fall, the ticks a term was made.
+  `pair_term`: the term's R and F, the gains for a rise and a fall, the ticks a term was made;
+  format 27 `pair_fill`: the manifold's take (0.1 mg), the ticks a take was made, the two MAP
+  reads and the take filtered (signed, 1/16 of 0.1 mg).
 
 Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse onto the board:
 - **The MAP job.** The snoop's interrupt tells the board each slot's read (format 5's table); at the
@@ -540,6 +542,28 @@ pulse on the films:
 - **Its checks:** pair_test 39 (the term and the gains at once), `pair_term` for the PC. **Its time**
   (DME-Sim's core): L2 62.3 us at most, 15.1 us more than with no film work; L1 27.7 us, the
   unit's interrupt 6.0 us. Bank 3 63.5 KB (552 bytes free), bank 2's `.store_code` 5.0 KB.
+
+Format 27 (DME-Sim's docs/Paired_Wall_Film.md, step 4, the owner's of 2026-11-17) takes the
+manifold's filling off the need's air: on a rise of the MAP the AFM reads the air that fills the
+manifold too, which the cylinders don't take.
+- **L1's MAP job** keeps each slot's last read (`fill.reads`).
+- **L2, after the films** (`fill_tick`, in bank 2 with its state: unit_ram.h's BANK2_DATA, in
+  `.store_code`): the change of the two reads' sum since the last tick (each slot at its own crank
+  angle every firing, so a change of the sum is the manifold's, not its pulsation's) waits
+  Cal_FillDelay ticks and is lagged by Cal_FillLag (a share a tick), as the AFM's air follows the
+  filling through its vane and the volumes before the throttle; then a firing's take, 0.1 mg: x
+  Cal_MapPa x Cal_FillMass (the manifold's air a kPa) / 2 x a firing's length (30,000,000 us / the
+  speed) over the tick's (from the pings' times), filtered by Load_Filter's coefficient as the air of
+  a firing is, kept at 0 or more (a fall takes nothing). None while starting or at the first tick
+  after the board's start, the 8051's or the engine's stop (the films' resets). Own value 96h.
+- **L1's pulse task** (`need_air`): running, the need on the air of a firing less the take, at most
+  half of it; that air left with the need for the gains (`pair_film_need`).
+- **The table** adds Load_Filter's id and Cal_FillMass's address at u+158 to u+160 (Cal_FillDelay
+  and Cal_FillLag follow Cal_FillMass in the image).
+- **Its checks:** pair_test 40 (the take at once), `pair_fill` for the PC. **Its time** (DME-Sim's
+  core, the levels' run): L2 76.2 us at most, 2.0 us more than with no take; L1 28.3 us (0.4 more), the
+  unit's interrupt 6.0 us. Bank 3 63.6 KB (368 bytes free: the take's state and code are bank 2's),
+  bank 2's `.store_code` 5.5 KB.
 
 ## How it works
 
