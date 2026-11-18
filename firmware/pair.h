@@ -39,6 +39,10 @@ void pair_film_need(uint32_t need, uint32_t air);
 // the air of a firing for the need.
 uint32_t pair_fill_take();
 
+// Format 29 (step 6): the warm-up enrichment (a word, 8000h a whole fuel) blended toward the share of it a hot
+// chamber keeps (Fuel_WarmUpKept by coolant, on ram and own) by the chamber's estimate; the tick's (in bank 2).
+uint32_t pair_chamber_warm_up(uint32_t warm, const uint8_t *ram, const uint32_t *own);
+
 // Task 12 (format 8): start mode over, as the tick found it: the next reference injects (rom_lean's
 // Main_Tick_Over cleared Inj720Odd).
 void pair_start_over();

@@ -2010,14 +2010,16 @@ static void UNIT_CODE(load_byte)(const Task &t)
 }
 
 // Load_Weight: the warm-up x its weight / 256 (off idle by speed and load, at idle by speed; the
-// warm-up 0: none). Format 21: words, the product / 65,536, the own value 89h.
+// warm-up 0: none). Format 21: words, the product / 65,536, the own value 89h. Format 29: the warm-up
+// blended toward the share a hot chamber keeps first (pair_chamber_warm_up).
 static void UNIT_CODE(load_weight)(const Task &t)
 {
     if (fine_fuel(t))
     {
         uint32_t warm = own_word(t, MAP_UNIT_WARM_UP), weight = 0;
         if (warm != 0)
-            weight = value(t, get(t, bit(t, get(t, TW_IDLE)) ? TW_WEIGHT_IDLE : TW_WEIGHT)) * warm >> 16;
+            weight = value(t, get(t, bit(t, get(t, TW_IDLE)) ? TW_WEIGHT_IDLE : TW_WEIGHT))
+                     * pair_chamber_warm_up(warm, t.ram, t.own) >> 16;
         set_enrichment(t, MAP_UNIT_WARM_WEIGHT, TW_WARM_WEIGHT, weight);
         return;
     }

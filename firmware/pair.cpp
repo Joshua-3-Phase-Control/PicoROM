@@ -120,6 +120,11 @@
 // starts and moves Cal_ChamberShare of the way a tick toward hot (1) while the engine is in step past start
 // mode and its injections aren't cut, toward 0 otherwise; each of the films' four parameters is the soaked
 // chamber's map blended toward the hot chamber's by it (own value 97h for the log, 1/65536).
+//
+// Format 29 (step 6): the cut's trim and the warm-up enrichment by the chamber's warm-up too. The cut's trim
+// (Film_TrimFall) is blended toward the hot chamber's (Film_TrimFall_Hot) as the films' maps are; the
+// warm-up enrichment toward the share of it a hot chamber keeps (Fuel_WarmUpKept by coolant), its walls
+// taking less of the fuel.
 
 #include "pair.h"
 
@@ -154,6 +159,7 @@ static constexpr uint32_t FILM = 25;     // the format with the port films kept 
 static constexpr uint32_t INVERTED = 26; // the format with the turn's pulse inverted on the films (step 2)
 static constexpr uint32_t FILL = 27;     // the format with the filling correction on the need's air (step 4)
 static constexpr uint32_t CHAMBER = 28;  // the format with the chamber's warm-up in the films' maps (step 5)
+static constexpr uint32_t HOT_TRIMS = 29; // the format with the cut's trim and the warm-up by it too (step 6)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -394,10 +400,12 @@ struct FilmChamber
     volatile uint32_t warm;  // 0: the estimate, 1/2^24 (0 the chamber soaked, 1 hot)
     uint32_t runs;           // 4: ticks it moved
     uint32_t fired;          // 8: 1 if the last tick took it toward hot
+    uint32_t weight;         // 12: the blend's weight at the last tick (1/16384)
     // The table's.
-    bool on;
+    bool on, trims;          // format 28's blend; format 29's (the cut's trim, the warm-up)
     uint32_t hot_ids[4];     // the hot chamber's maps: X open, X rest, the strip, the evaporation
     uint32_t share_at;       // Cal_ChamberShare's address
+    uint32_t fall_id, kept_id; // format 29: Film_TrimFall_Hot's id, Fuel_WarmUpKept's
 };
 
 static FilmChamber chamber BANK2_DATA = {};
@@ -2029,7 +2037,10 @@ void BANK2_CODE(film_pulse_tick)(const uint8_t *bytes, bool waits, bool starting
     if (g > 0xFFFF)
         g = 0xFFFF;
     uint32_t rise = g * (unit_map_value(film_pulse.rise_id, bytes, own) & 0xFFFF) >> 15;
-    uint32_t fall = g * (unit_map_value(film_pulse.fall_id, bytes, own) & 0xFFFF) >> 15;
+    uint32_t trim = chamber.trims                               // (format 29: by the chamber's warm-up)
+                        ? map_unit_blend(film_pulse.fall_id, chamber.fall_id, (int32_t)chamber.weight, bytes, own)
+                        : unit_map_value(film_pulse.fall_id, bytes, own);
+    uint32_t fall = g * (trim & 0xFFFF) >> 15;
     rise = rise > 0xFFFF ? 0xFFFF : rise;
     fall = fall > 0xFFFF ? 0xFFFF : fall;
     film_pulse.rise = rise;
@@ -2115,7 +2126,19 @@ uint32_t BANK2_CODE(chamber_move)(bool fired)
     chamber.fired = fired;
     chamber.runs = chamber.runs + 1;
     map_unit_set_own(MAP_UNIT_CHAMBER, warm >> 8 > 0xFFFF ? 0xFFFF : warm >> 8);
-    return warm >> 10 > 16384 ? 16384 : warm >> 10;
+    chamber.weight = warm >> 10 > 16384 ? 16384 : warm >> 10;
+    return chamber.weight;
+}
+
+// Format 29: the warm-up enrichment blended toward the share of it a hot chamber keeps by the last tick's
+// weight: warm + (warm x kept - warm) x the weight; as it is with format 28's blend alone or none.
+uint32_t BANK2_CODE(pair_chamber_warm_up)(uint32_t warm, const uint8_t *ram, const uint32_t *own)
+{
+    if (!chamber.trims || warm == 0)
+        return warm;
+    int32_t soaked = (int32_t)(warm & 0xFFFF);
+    int32_t hot = (int32_t)((uint32_t)soaked * (unit_map_value(chamber.kept_id, ram, own) & 0xFFFF) >> 16);
+    return (uint32_t)(soaked + ((hot - soaked) * (int32_t)chamber.weight >> 14));
 }
 
 // The films' four parameters at the tick's operating point (1/65536: the open place's X, the rest's, the strip
@@ -2245,8 +2268,8 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
         film.film[p] = film.waits[p] = 0;
     fill.on = false;                                            // format 27: none taken, no tick yet
     fill.take = fill.ticks = fill.reads[0] = fill.reads[1] = 0;
-    chamber.on = false;                                         // format 28: the chamber soaked
-    chamber.warm = chamber.runs = chamber.fired = 0;
+    chamber.on = chamber.trims = false;                         // format 28: the chamber soaked
+    chamber.warm = chamber.runs = chamber.fired = chamber.weight = 0;
     if (at(MARK + 4) < FILM || !control.mapped || !control.slowed || 2 * pair.firings != FILM_PLACES)
         return;
     uint32_t maps = at(MARK + 6);                               // the maps and tasks the index lists
@@ -2286,6 +2309,13 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
     }
     chamber.share_at = word(u + 165);
     chamber.on = alike && chamber.share_at != 0;
+    if (!chamber.on || at(MARK + 4) < HOT_TRIMS)                // format 29 (u + 167 on): Film_TrimFall_Hot's
+        return;                                                 //   id (on Film_TrimFall's axes) and
+    chamber.fall_id = at(u + 167);                              //   Fuel_WarmUpKept's (one axis, words)
+    chamber.kept_id = at(u + 168);
+    uint32_t kept = (at(MARK + 7) << 8 | at(MARK + 8)) + 3 * chamber.kept_id;
+    chamber.trims = map_unit_same_axes(film_pulse.fall_id, chamber.fall_id) && chamber.kept_id < maps
+                    && at(kept + 2) == 0x41;
 }
 
 // Format 26: the term for the pulse task (0: none) and its need.
@@ -3757,6 +3787,10 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[1] = chamber_move(in[0] != 0);
         out[0] = chamber.warm;
         out[2] = chamber.runs;
+    }
+    else if (routine == 42)                                     // format 29: the warm-up blended at once, on the
+    {                                                           //   tick's copy (in: the warm-up)
+        out[0] = pair_chamber_warm_up(in[0], tick_work, map_unit_owns.own);
     }
     else
         return 0;

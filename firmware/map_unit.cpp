@@ -275,7 +275,8 @@ static constexpr uint32_t RETARD = 24;        // the knock retard learnt at each
 static constexpr uint32_t FILM = 25;          // the port films kept at each place (pair.cpp's)
 static constexpr uint32_t INVERTED = 26;      // the turn's pulse inverted on the films (pair.cpp's)
 static constexpr uint32_t FILL = 27;          // the filling correction on the need's air (pair.cpp's)
-static constexpr uint32_t CHAMBER = 28;       // the chamber's warm-up in the films' maps (pair.cpp's: the newest)
+static constexpr uint32_t CHAMBER = 28;       // the chamber's warm-up in the films' maps (pair.cpp's)
+static constexpr uint32_t HOT_TRIMS = 29;     // the cut's trim and the warm-up by it too (pair.cpp's: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -950,7 +951,7 @@ static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
     if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2
-        || m[4] > CHAMBER)
+        || m[4] > HOT_TRIMS)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

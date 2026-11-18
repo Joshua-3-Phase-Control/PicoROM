@@ -591,6 +591,20 @@ doesn't (its heat.warmUpTime, 20 s, assumed).
   us at most (its run-again ticks set it: format 27's run 87.5), L1 28.3 us, the unit's interrupt 5.8 us.
   Bank 3 63.6 KB (376 bytes free: the film's four lookups moved to bank 2), bank 2's `.store_code` 8.5 KB.
 
+Format 29 (DME-Sim's docs/Paired_Wall_Film.md, step 6, the owner's of 2026-11-18) blends the cut's trim and
+the warm-up enrichment by the chamber's warm-up too: with the chamber hot, the cut swept with it cool took the
+warm tip-outs lean, and the warm-up enrichment, which DME-Sim's hot chamber's walls barely need, ran the cold
+tip-ins rich.
+- **The cut's trim** (`film_pulse_tick`): Film_TrimFall blended cell by cell toward Film_TrimFall_Hot (on its
+  axes) by the last tick's weight (`chamber.weight`), looked up once (`map_unit_blend`).
+- **The warm-up** (`pair_chamber_warm_up`, from the tick's `load_weight`): the warm-up (88h) blended toward
+  the share of it a hot chamber keeps (Fuel_WarmUpKept by coolant, 1/65536) by the weight, before its weight
+  by speed and load: warm + (warm x kept - warm) x the weight.
+- **The table** adds Film_TrimFall_Hot's and Fuel_WarmUpKept's ids at u+167 and u+168.
+- **Its checks:** pair_test 42 (the warm-up blended at once); the gains' blend through pair_test 39. **Its
+  time** (DME-Sim's core, the levels' run): L2 68.7 us at most (68.4 with format 28), L1 28.3 us. Bank 3
+  63.7 KB (344 bytes free), bank 2's `.store_code` 8.7 KB.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
