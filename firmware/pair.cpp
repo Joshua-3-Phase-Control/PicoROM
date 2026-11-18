@@ -112,6 +112,14 @@
 // (Load_Filter's coefficient) and kept at 0 or more: falls take nothing. The pulse task takes it off the air of
 // a firing for the need, at most half of it, none with the idle switch closed (own value 96h for the log, 0.1
 // mg).
+//
+// Format 28 (DME-Sim's docs/Paired_Wall_Film.md, step 5): the chamber's warm-up. How the films take and give
+// fuel depends on how far the chamber's surfaces (the valve's back, the cylinders' walls) have come toward
+// their running temperatures over the coolant, which they reach over the cycles that fire and lose over those
+// that don't (DME-Sim's heat.warmUpTime, 20 s, assumed). The P28's estimate starts soaked (0) as the board
+// starts and moves Cal_ChamberShare of the way a tick toward hot (1) while the engine is in step past start
+// mode and its injections aren't cut, toward 0 otherwise; each of the films' four parameters is the soaked
+// chamber's map blended toward the hot chamber's by it (own value 97h for the log, 1/65536).
 
 #include "pair.h"
 
@@ -145,6 +153,7 @@ static constexpr uint32_t RETARD = 24;   // the format with the knock retard lea
 static constexpr uint32_t FILM = 25;     // the format with the port films kept at each place (step 1)
 static constexpr uint32_t INVERTED = 26; // the format with the turn's pulse inverted on the films (step 2)
 static constexpr uint32_t FILL = 27;     // the format with the filling correction on the need's air (step 4)
+static constexpr uint32_t CHAMBER = 28;  // the format with the chamber's warm-up in the films' maps (step 5)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -376,6 +385,22 @@ struct FilmFill
 };
 
 static FilmFill fill BANK2_DATA = {};
+
+// Format 28 (DME-Sim's docs/Paired_Wall_Film.md, step 5): the chamber's warm-up. Once a tick L2 moves the
+// estimate (chamber_move) and blends the films' maps by it (film_values).
+struct FilmChamber
+{
+    // Read by DME-Sim (its tests take these offsets).
+    volatile uint32_t warm;  // 0: the estimate, 1/2^24 (0 the chamber soaked, 1 hot)
+    uint32_t runs;           // 4: ticks it moved
+    uint32_t fired;          // 8: 1 if the last tick took it toward hot
+    // The table's.
+    bool on;
+    uint32_t hot_ids[4];     // the hot chamber's maps: X open, X rest, the strip, the evaporation
+    uint32_t share_at;       // Cal_ChamberShare's address
+};
+
+static FilmChamber chamber BANK2_DATA = {};
 
 // A note into the ring (the bus level's; L1's with the interrupts held off); none past a full ring.
 static __force_inline void film_note(uint32_t kind, uint32_t fuel)
@@ -2078,6 +2103,46 @@ void BANK2_CODE(fill_tick)(const uint8_t *bytes, uint32_t now, bool starting)
     map_unit_set_own(MAP_UNIT_FILL, fill.take);
 }
 
+// Format 28: the chamber's estimate (1/2^24) Cal_ChamberShare (1/2^20 a tick) of the way toward hot (fired) or
+// soaked, rounded down, so never past either; own value 97h (1/65536). Its weight for the blend back (1/16384).
+uint32_t BANK2_CODE(chamber_move)(bool fired)
+{
+    uint32_t share = at(chamber.share_at) << 8 | at(chamber.share_at + 1), warm = chamber.warm;
+    uint32_t target = fired ? 1u << 24 : 0, away = target > warm ? target - warm : warm - target;
+    uint32_t step = (away >> 10) * share >> 10;                 // under away: share under 2^20
+    warm = target > warm ? warm + step : warm - step;
+    chamber.warm = warm;
+    chamber.fired = fired;
+    chamber.runs = chamber.runs + 1;
+    map_unit_set_own(MAP_UNIT_CHAMBER, warm >> 8 > 0xFFFF ? 0xFFFF : warm >> 8);
+    return warm >> 10 > 16384 ? 16384 : warm >> 10;
+}
+
+// The films' four parameters at the tick's operating point (1/65536: the open place's X, the rest's, the strip
+// a intake, the evaporation a ms), each its map's. Format 28: each the soaked chamber's map blended cell by
+// cell toward the hot chamber's by the estimate, moved first (toward hot while the engine is in step past start
+// mode, which fires little, and its injections aren't cut: the turn's cuts, over Cal_RevLimit, FuelCut,
+// BoostCut; toward soaked otherwise), and looked up once (map_unit_blend: the axes searched once).
+void BANK2_CODE(film_values)(const uint8_t *bytes, uint32_t *v)
+{
+    const uint32_t *own = map_unit_owns.own;
+    if (!chamber.on)
+    {
+        v[0] = unit_map_value(film.x_open_id, bytes, own) & 0xFFFF;
+        v[1] = unit_map_value(film.x_rest_id, bytes, own) & 0xFFFF;
+        v[2] = unit_map_value(film.strip_id, bytes, own) & 0xFFFF;
+        v[3] = unit_map_value(film.evap_id, bytes, own) & 0xFFFF;
+        return;
+    }
+    bool fired = pair.synced && !ram_bit(pair.start_bit) && !over_limit() && !ram_bit(pair.fuel_cut_bit)
+                 && !ram_bit(pair.boost_cut_bit);
+    int32_t w = (int32_t)chamber_move(fired);
+    v[0] = map_unit_blend(film.x_open_id, chamber.hot_ids[0], w, bytes, own) & 0xFFFF;
+    v[1] = map_unit_blend(film.x_rest_id, chamber.hot_ids[1], w, bytes, own) & 0xFFFF;
+    v[2] = map_unit_blend(film.strip_id, chamber.hot_ids[2], w, bytes, own) & 0xFFFF;
+    v[3] = map_unit_blend(film.evap_id, chamber.hot_ids[3], w, bytes, own) & 0xFFFF;
+}
+
 static void UNIT_CODE(film_tick)(const uint8_t *bytes, uint32_t now)
 {
     if (!film.on)
@@ -2107,11 +2172,11 @@ static void UNIT_CODE(film_tick)(const uint8_t *bytes, uint32_t now)
             film.waits[one] = film.waits[other] = w;
         }
     }
-    const uint32_t *own = map_unit_owns.own;
-    film.x_open = unit_map_value(film.x_open_id, bytes, own) & 0xFFFF;
-    film.x_rest = unit_map_value(film.x_rest_id, bytes, own) & 0xFFFF;
-    uint32_t strip = unit_map_value(film.strip_id, bytes, own) & 0xFFFF;
-    uint32_t evap = unit_map_value(film.evap_id, bytes, own) & 0xFFFF;
+    uint32_t v[4];
+    film_values(bytes, v);                                      // (format 28: blended by the chamber's warm-up)
+    film.x_open = v[0];
+    film.x_rest = v[1];
+    uint32_t strip = v[2], evap = v[3];
     uint32_t rpm = map_unit_own(MAP_UNIT_SPEED);                // 720 degrees in 1/256 ms, at most FFFFh
     uint32_t cycle = rpm < 470 ? 0xFFFF : map_unit_divide32(30720000, rpm);
     uint32_t beta = strip + (evap * cycle >> 8);
@@ -2180,6 +2245,8 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
         film.film[p] = film.waits[p] = 0;
     fill.on = false;                                            // format 27: none taken, no tick yet
     fill.take = fill.ticks = fill.reads[0] = fill.reads[1] = 0;
+    chamber.on = false;                                         // format 28: the chamber soaked
+    chamber.warm = chamber.runs = chamber.fired = 0;
     if (at(MARK + 4) < FILM || !control.mapped || !control.slowed || 2 * pair.firings != FILM_PLACES)
         return;
     uint32_t maps = at(MARK + 6);                               // the maps and tasks the index lists
@@ -2208,6 +2275,17 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
     fill.mass_at = word(u + 159);
     fill.pa_at = film_pulse.pa_at;
     fill.on = fill.filter_id < maps && fill.mass_at != 0;
+    if (!fill.on || at(MARK + 4) < CHAMBER)                     // format 28 (u + 161 on): the hot chamber's
+        return;                                                 //   four maps' ids (as format 25's, each on
+    uint32_t soaked[4] = {film.x_open_id, film.x_rest_id, film.strip_id, film.evap_id};
+    bool alike = true;                                          //   its soaked map's axes), and
+    for (uint32_t k = 0; k < 4; k++)                            //   Cal_ChamberShare's address
+    {
+        chamber.hot_ids[k] = at(u + 161 + k);
+        alike = alike && map_unit_same_axes(soaked[k], chamber.hot_ids[k]);
+    }
+    chamber.share_at = word(u + 165);
+    chamber.on = alike && chamber.share_at != 0;
 }
 
 // Format 26: the term for the pulse task (0: none) and its need.
@@ -3411,6 +3489,12 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
                  (unsigned)fill.reads[0], (unsigned)fill.reads[1], (int)fill.filtered);
         return true;
     }
+    if (streq(name, "pair_chamber"))                            // format 28: the estimate (1/65536), ticks it
+    {                                                           //   moved, the last tick's way (1 toward hot)
+        snprintf(value, value_size, "%u %u %u", (unsigned)(chamber.warm >> 8), (unsigned)chamber.runs,
+                 (unsigned)chamber.fired);
+        return true;
+    }
     return false;
 }
 
@@ -3667,6 +3751,12 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
         out[1] = fill.runs;
         out[2] = (uint32_t)fill.lagged;
         out[3] = (uint32_t)fill.filtered;
+    }
+    else if (routine == 41)                                     // format 28: the chamber's estimate moved at
+    {                                                           //   once (in: toward hot)
+        out[1] = chamber_move(in[0] != 0);
+        out[0] = chamber.warm;
+        out[2] = chamber.runs;
     }
     else
         return 0;

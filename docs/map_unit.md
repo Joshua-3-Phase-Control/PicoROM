@@ -275,7 +275,8 @@ of the firings' way:
   work's ticks, the intakes and injections kept, the notes lost and the resets; format 26
   `pair_term`: the term's R and F, the gains for a rise and a fall, the ticks a term was made;
   format 27 `pair_fill`: the manifold's take (0.1 mg), the ticks a take was made, the two MAP
-  reads and the take filtered (signed, 1/16 of 0.1 mg).
+  reads and the take filtered (signed, 1/16 of 0.1 mg); format 28 `pair_chamber`: the chamber's
+  warm-up (1/65536), the ticks it moved and the last tick's way (1 toward hot).
 
 Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse onto the board:
 - **The MAP job.** The snoop's interrupt tells the board each slot's read (format 5's table); at the
@@ -565,6 +566,30 @@ manifold too, which the cylinders don't take.
   core, the levels' run): L2 76.2 us at most, 2.0 us more than with no take; L1 28.3 us (0.4 more), the
   unit's interrupt 6.0 us. Bank 3 63.7 KB (352 bytes free: the take's state and code are bank 2's),
   bank 2's `.store_code` 5.5 KB.
+
+Format 28 (DME-Sim's docs/Paired_Wall_Film.md, step 5, the owner's decision 4 of 2026-11-15) blends the
+films' maps by the chamber's warm-up: how the films take and give fuel depends on how far the chamber's
+surfaces (the valve's back, the cylinders' walls) have come toward their running temperatures over the
+coolant, which DME-Sim's engine warms first order over each cycle that fires and cools over each that
+doesn't (its heat.warmUpTime, 20 s, assumed).
+- **The estimate** (`chamber`, in bank 2 with its code): soaked (0) as the board starts; once a tick, in
+  L2's film work before the films' lookups (`chamber_move`), Cal_ChamberShare (1/2^20 of the way a tick:
+  596, 20 s at the tick's 88.0 Hz) toward hot (1) while the engine is in step past start mode and its
+  injections aren't cut (the turn's own cuts: over Cal_RevLimit, FuelCut, BoostCut), toward soaked
+  otherwise. The step is made on the distance rounded down, so it never passes either end (an
+  arithmetic shift of a small negative distance overshot soaked at the largest shares). Own value 97h
+  (1/65536). From the sync, cranking counted, it led DME-Sim's chamber by 0.07 after a start; from start
+  mode's end within 0.013 through a start, a hold and an overrun's cut.
+- **The blend** (`film_values`, `map_unit_blend`): each of the films' four maps (format 25's, now the
+  soaked chamber's) and the hot chamber's, on the same axes (`map_unit_same_axes`, checked as the board
+  starts), cell by cell, the soaked word toward the hot by the estimate (1/16384), looked up once as
+  `wide_lookup` looks a map up: the axes searched once, the blended corners interpolated. Two lookups
+  and a blend of their values cost 12 us more on the film work; this 1 to 2 us.
+- **The table** adds the hot chamber's four maps' ids and Cal_ChamberShare's address at u+161 to u+166.
+- **Its checks:** pair_test 41 (the estimate moved at once), `pair_chamber` for the PC. **Its time**
+  (DME-Sim's core): the film work at most 17 to 18 us, 16 with one set of maps; the levels' run L2 68.4
+  us at most (its run-again ticks set it: format 27's run 87.5), L1 28.3 us, the unit's interrupt 5.8 us.
+  Bank 3 63.6 KB (376 bytes free: the film's four lookups moved to bank 2), bank 2's `.store_code` 8.5 KB.
 
 ## How it works
 

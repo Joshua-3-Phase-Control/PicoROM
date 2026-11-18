@@ -274,7 +274,8 @@ static constexpr uint32_t TESTED = 23;        // Map_On's stop tests an overflow
 static constexpr uint32_t RETARD = 24;        // the knock retard learnt at each place (pair.cpp's)
 static constexpr uint32_t FILM = 25;          // the port films kept at each place (pair.cpp's)
 static constexpr uint32_t INVERTED = 26;      // the turn's pulse inverted on the films (pair.cpp's)
-static constexpr uint32_t FILL = 27;          // the filling correction on the need's air (pair.cpp's: the newest)
+static constexpr uint32_t FILL = 27;          // the filling correction on the need's air (pair.cpp's)
+static constexpr uint32_t CHAMBER = 28;       // the chamber's warm-up in the films' maps (pair.cpp's: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -555,6 +556,60 @@ uint32_t UNIT_CODE(unit_map_value)(uint32_t id, const uint8_t *bytes, const uint
     uint32_t next = at(wide_after(map));
     uint32_t second = next & OWN ? own[(next - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[next & 0x7F];
     return wide_or_points(map, axes, first, second, (axes & WIDE_VALUES) || ((input | next) & OWN));
+}
+
+// Format 28: a cell of two maps blended, the first's word toward the second's by w (1/16384).
+static __force_inline uint32_t blend_cell(uint32_t cold, uint32_t hot, int32_t w)
+{
+    const uint8_t *rom = unit.rom;
+    int32_t from = rom[cold & 0xFFFF] << 8 | rom[(cold + 1) & 0xFFFF];
+    int32_t to = rom[hot & 0xFFFF] << 8 | rom[(hot + 1) & 0xFFFF];
+    return (uint32_t)(from + ((to - from) * w >> 14));
+}
+
+// A row of the blended cells at the column's place (wide_row's, unsigned words).
+static __force_inline uint32_t blend_row(uint32_t cold, uint32_t hot, Wide place, int32_t w)
+{
+    uint32_t a = 2 * place.index, from = blend_cell(cold + a, hot + a, w);
+    if (place.width == 0)
+        return from;
+    return wide_interpolate(from, blend_cell(cold + a + 2, hot + a + 2, w), place, 0xFFFF);
+}
+
+// Format 28: two maps on the same two axes with unsigned words (map_unit_same_axes), each cell the first's
+// blended toward the second's by w (1/16384), looked up as wide_lookup looks a map up: the places once, the
+// cells blended, then interpolated.
+uint32_t BANK2_CODE(map_unit_blend)(uint32_t id, uint32_t other, int32_t w, const uint8_t *bytes,
+                                    const uint32_t *own)
+{
+    uint32_t entry = entry_of(id), cold = at(entry) << 8 | at(entry + 1), input = at(cold);
+    uint32_t hot = at(entry_of(other)) << 8 | at(entry_of(other) + 1);
+    uint32_t first = input & OWN ? own[(input - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[input & 0x7F];
+    uint32_t after = wide_after(cold), next = at(after), columns = at(after + 1);
+    uint32_t second = next & OWN ? own[(next - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[next & 0x7F];
+    Wide row = wide_place(cold, first), column = wide_place(after, second);
+    uint32_t cells = (wide_after(after) - cold + 2 * row.index * columns) & 0xFFFF; // from each map's start
+    uint32_t here = blend_row(cold + cells, hot + cells, column, w);
+    if (row.width == 0)
+        return here;
+    return wide_interpolate(here, blend_row(cold + cells + 2 * columns, hot + cells + 2 * columns, column, w), row,
+                            0xFFFF);
+}
+
+// Format 28: whether maps id and other can be blended: both two axes and unsigned words, their axes' bytes alike.
+bool __attribute__((cold)) BANK2_CODE(map_unit_same_axes)(uint32_t id, uint32_t other)
+{
+    uint32_t count = at(MARK + 6);
+    if (at(MARK + 4) < WIDE || id >= count || other >= count)
+        return false;
+    uint32_t a = entry_of(id), b = entry_of(other), axes = at(a + 2);
+    if (axes != (WIDE_VALUES | 2) || at(b + 2) != axes)
+        return false;
+    uint32_t cold = at(a) << 8 | at(a + 1), hot = at(b) << 8 | at(b + 1);
+    for (uint32_t k = 0, n = wide_after(wide_after(cold)) - cold; k < n; k++)
+        if (at(cold + k) != at(hot + k))
+            return false;
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -894,7 +949,8 @@ static void window_stop()
 static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
-    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2 || m[4] > FILL)
+    if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2
+        || m[4] > CHAMBER)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }
