@@ -133,6 +133,7 @@ static constexpr uint32_t FUEL = 21;     // the format with the fuel in 16 bits 
 static constexpr uint32_t SPARK = 19;    // the format with the spark in 1/64 tooth (step B)
 static constexpr uint32_t RETARD = 24;   // the format with the knock retard learnt at each place (its map)
 static constexpr uint32_t FILM = 25;     // the format with the port films kept at each place (step 1)
+static constexpr uint32_t INVERTED = 26; // the format with the turn's pulse inverted on the films (step 2)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -318,6 +319,28 @@ struct Film
 };
 
 static Film film UNIT_DATA = {};
+
+// Format 26 (DME-Sim's docs/Paired_Wall_Film.md, step 2): the turn's pulse inverted on the films. Once a tick L2
+// makes the term for the pulse the pulse task makes or makes again next, and the MAP pulse's and the cut's
+// gains (film_pulse_tick); the pulse task takes the term (pair_film_term) and leaves its need
+// (pair_film_need).
+struct FilmPulse
+{
+    // Read by DME-Sim (its tests take these offsets).
+    volatile uint32_t term;  // 0: R, the films' share of the next pulse's intakes (cycles, the low half), and F,
+                             //   1 / (1 - the places' mean X) in 1/8192 (the high half): the pulse (the need -
+                             //   R) x F; 0: none (L2's)
+    volatile uint32_t need;  // 4: the last running pulse's need (cycles, the low half) and its air of a firing
+                             //   (0.1 mg, the high half): the pulse task's
+    uint32_t inducted;       // 8: the places whose intake ended since the turn's injection, a bit each by letter
+    uint32_t rise, fall;     // 12, 16: the gains last made (1/32 cycle a MAP count)
+    uint32_t terms;          // 20: ticks a term was made
+    // The table's.
+    bool on;
+    uint32_t air_id, rise_id, fall_id, pa_at, gain_at, decel_at;
+};
+
+static FilmPulse film_pulse UNIT_DATA = {};
 
 // A note into the ring (the bus level's; L1's with the interrupts held off); none past a full ring.
 static __force_inline void film_note(uint32_t kind, uint32_t fuel)
@@ -1868,15 +1891,96 @@ bool STORE_CODE(knock_stopped)()
 //   beta = the strip a intake + the evaporation a ms x the ms a cycle (720 degrees) takes, at most 1.
 // The four parameters are maps on the coolant by the air of a firing, looked up at the tick's operating
 // point on the tick's copy (`bytes`: the snoop's coolant over the 8051's RAM, as the tick's job had it;
-// the unit's own copy holds no coolant on the paired core); the films (injector cycles x 256) are own values 90h-93h (A to D, cycles, at most FFFFh) for the
-// log. After a reset (the 8051's start, the engine's stop) or a lost note the films are from 0; after a
-// return to step each pair's two films (A and D, B and C) their mean, as a place may come back a turn on.
+// the unit's own copy holds no coolant on the paired core); the films (injector cycles x 256) are own
+// values 90h-93h (A to D, cycles, at most FFFFh) for the log. After a reset (the 8051's start, the engine's
+// stop) or a lost note the films are from 0; after a return to step each pair's two films (A and D, B and
+// C) their mean, as a place may come back a turn on. Format 26 (step 2): then the term for the next pulse
+// and the model's gains (film_pulse_tick, in bank 2).
 
 // x times a fraction f (1/65536, under 65536) over 65536, rounded down, for any 32-bit x: two 16 x 16
 // products (the bank calls no library for 64 bits).
 static __force_inline uint32_t film_mul(uint32_t x, uint32_t f)
 {
     return (x >> 16) * f + ((x & 0xFFFF) * f >> 16);
+}
+
+// Format 26 (step 2), L2 after the films: the term for the pulse the pulse task makes or makes again next, and
+// the MAP pulse's and the cut's gains, on the tick's copy (`bytes`). A pulse waits for its reference
+// (`waits`) or none is made yet. The term is for the injection of the next pulse made: the waiting one's while
+// it may be made again (under the speed a pulse is made again under), else the one after it, the waiting
+// pulse's fuel counted. Each place's film and the fuel for it as they will stand at its first intake after that
+// injection: a place whose intake hasn't ended since the turn's injection has it first, with the fuel that
+// waits; the injection after the waiting pulse's adds that fuel, and each place's intake takes it. R is the
+// places' mean of beta x film + (1 - X) x fuel then, F = 4 / the sum of their (1 - X): the pulse task's pulse
+// (the need - R) x F, the same at a held point. None (0) while starting or before the open place is known.
+// R and F are own values 94h and 95h for the log.
+// The gains, 1/32 cycle a MAP count: the air a kPa by speed (Film_Air, 0.01 mg) x Cal_MapPa x the last running
+// pulse's need over its air of a firing x F x the trim by speed for a rise (Film_TrimRise) or a fall
+// (Film_TrimFall, 1/32768), into MapGainNow and DecelGainNow, which the MAP job reads (task 2 makes none
+// from format 26).
+void BANK2_CODE(film_pulse_tick)(const uint8_t *bytes, bool waits, bool starting)
+{
+    const uint32_t *own = map_unit_owns.own;
+    uint32_t rpm = map_unit_own(MAP_UNIT_SPEED), term = 0;
+    if (film.open < FILM_PLACES && !starting)
+    {
+        bool ahead = waits && rpm >= control.remake_rpm;        // the injection after the waiting pulse's
+        uint32_t beta = film.beta, sum = 0, share = 0;
+        for (uint32_t p = 0; p < FILM_PLACES; p++)
+        {
+            uint32_t x = p == film.open ? film.x_open : film.x_rest, m = film.film[p], u = film.waits[p];
+            if (!(film_pulse.inducted >> p & 1))                // its intake before the next injection
+            {
+                m = m - film_mul(m, beta) + film_mul(u << 8, x);
+                u = 0;
+            }
+            if (ahead)                                          // the waiting pulse injected, its intake after
+            {
+                u += film.waiting;
+                if (u > FILM_WAITS)
+                    u = FILM_WAITS;
+                m = m - film_mul(m, beta) + film_mul(u << 8, x);
+                u = 0;
+            }
+            sum += (film_mul(m, beta) + film_mul(u << 8, 0x10000 - x)) >> 2;
+            share += 0x10000 - x;
+        }
+        uint32_t r = sum >> 8, f = share < 0x4000 ? 0xFFFF : map_unit_divide32(0x80000000u, share);
+        term = (r > 0xFFFF ? 0xFFFF : r) | (f > 0xFFFF ? 0xFFFF : f) << 16;
+        film_pulse.terms = film_pulse.terms + 1;
+    }
+    film_pulse.term = term;
+    map_unit_set_own(MAP_UNIT_TERM, term & 0xFFFF);             // for the log
+    map_unit_set_own(MAP_UNIT_TERM + 1, term >> 16);
+    uint32_t need = film_pulse.need, m = need & 0xFFFF, air = need >> 16;
+    if (term == 0 || m == 0 || air == 0)
+        return;
+    uint32_t a = unit_map_value(film_pulse.air_id, bytes, own) & 0xFFFF;
+    uint32_t pa = at(film_pulse.pa_at) << 8 | at(film_pulse.pa_at + 1);
+    uint32_t q = map_unit_divide32(m << 12, air), ap = a * pa >> 6;        // cycles a 0.1 mg of air x 4096
+    if (q > 0xFFFF)
+        q = 0xFFFF;
+    if (ap > 0xFFFF)
+        ap = 0xFFFF;
+    uint32_t g = map_unit_divide32(ap * q, 20000);                          // A x Pa x need / (312.5 x air)
+    if (g > 0xFFFF)
+        g = 0xFFFF;
+    g = g * (term >> 16) >> 13;                                             // x F
+    if (g > 0xFFFF)
+        g = 0xFFFF;
+    uint32_t rise = g * (unit_map_value(film_pulse.rise_id, bytes, own) & 0xFFFF) >> 15;
+    uint32_t fall = g * (unit_map_value(film_pulse.fall_id, bytes, own) & 0xFFFF) >> 15;
+    rise = rise > 0xFFFF ? 0xFFFF : rise;
+    fall = fall > 0xFFFF ? 0xFFFF : fall;
+    film_pulse.rise = rise;
+    film_pulse.fall = fall;
+    uint8_t *ram = (uint8_t *)map_unit_ram_words();
+    __asm volatile("cpsid i" ::: "memory");                     // a word as one, for L1's copies
+    ram[film_pulse.gain_at] = rise & 0xFF;
+    ram[(film_pulse.gain_at + 1) & 0x7F] = rise >> 8;
+    ram[film_pulse.decel_at] = fall & 0xFF;
+    ram[(film_pulse.decel_at + 1) & 0x7F] = fall >> 8;
+    __asm volatile("cpsie i" ::: "memory");
 }
 
 static void UNIT_CODE(film_tick)(const uint8_t *bytes)
@@ -1895,6 +1999,7 @@ static void UNIT_CODE(film_tick)(const uint8_t *bytes)
             film.film[p] = film.waits[p] = 0;
         film.open = FILM_PLACES;
         film.after_turn = false;
+        film_pulse.inducted = 0;
     }
     if (syncs != film.seen_syncs)                               // back in step: each pair's mean
     {
@@ -1931,6 +2036,7 @@ static void UNIT_CODE(film_tick)(const uint8_t *bytes)
             uint32_t x = p == film.open ? film.x_open : film.x_rest, m = film.film[p];
             film.film[p] = m - film_mul(m, film.beta) + film_mul(film.waits[p] << 8, x);
             film.waits[p] = 0;
+            film_pulse.inducted |= 1u << p;
             film.intakes = film.intakes + 1;
         }
         else
@@ -1941,10 +2047,16 @@ static void UNIT_CODE(film_tick)(const uint8_t *bytes)
                 film.waits[p] = w > FILM_WAITS ? FILM_WAITS : w;
             }
             if (kind == FILM_TURN)
+            {
                 film.after_turn = true;
+                film_pulse.inducted = 0;
+            }
             film.injections = film.injections + 1;
         }
     }
+    if (film_pulse.on)                                          // format 26: the term and the gains
+        film_pulse_tick(bytes, control.pulse_made && pair.references == pair.pulse_reference,
+                        ram_bit(pair.start_bit));
     for (uint32_t p = 0; p < FILM_PLACES; p++)
     {
         uint32_t cycles = film.film[p] >> 8;
@@ -1957,7 +2069,7 @@ static void UNIT_CODE(film_tick)(const uint8_t *bytes)
 // four maps' ids, the open place's X, the rest's, the strip a intake, the evaporation a ms; the intake's tooth
 // in each firing), four places in 720 degrees and the MAP pulse and the slow work on the unit. Once: made
 // small (cold).
-static void __attribute__((cold)) UNIT_CODE(film_start)(uint32_t u)
+static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
 {
     film.on = false;
     film.in = film.out = film.reset_in = 0;
@@ -1979,6 +2091,29 @@ static void __attribute__((cold)) UNIT_CODE(film_start)(uint32_t u)
     film.intake_tooth = at(u + 150);
     film.on = film.x_open_id < maps && film.x_rest_id < maps && film.strip_id < maps && film.evap_id < maps
               && film.intake_tooth != 0 && film.intake_tooth <= pair.teeth;
+    film_pulse.on = false;                                      // format 26 (u + 151 on): Film_Air's id,
+    film_pulse.term = film_pulse.need = film_pulse.inducted = 0; //   Film_TrimRise's, Film_TrimFall's,
+    if (!film.on || at(MARK + 4) < INVERTED)                    //   Cal_MapPa's address, MapGainNow's and
+        return;                                                 //   DecelGainNow's
+    film_pulse.air_id = at(u + 151);
+    film_pulse.rise_id = at(u + 152);
+    film_pulse.fall_id = at(u + 153);
+    film_pulse.pa_at = word(u + 154);
+    film_pulse.gain_at = at(u + 156) & 0x7F;
+    film_pulse.decel_at = at(u + 157) & 0x7F;
+    film_pulse.on = film_pulse.air_id < maps && film_pulse.rise_id < maps && film_pulse.fall_id < maps
+                    && film_pulse.pa_at != 0;
+}
+
+// Format 26: the term for the pulse task (0: none) and its need.
+uint32_t UNIT_CODE(pair_film_term)()
+{
+    return film_pulse.term;
+}
+
+void UNIT_CODE(pair_film_need)(uint32_t need, uint32_t air)
+{
+    film_pulse.need = (need & 0xFFFF) | (air > 0xFFFF ? 0xFFFF : air) << 16;
 }
 
 // Format 24: the knock retard of the firing whose fall 1 has count base (its place's, by its letter) off the
@@ -3151,6 +3286,13 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
                  (unsigned)film.injections, (unsigned)film.lost, (unsigned)film.resets);
         return true;
     }
+    if (streq(name, "pair_term"))                               // format 26: the term (R, F), the gains,
+    {                                                           //   ticks a term was made
+        snprintf(value, value_size, "%u %u %u %u %u", (unsigned)(film_pulse.term & 0xFFFF),
+                 (unsigned)(film_pulse.term >> 16), (unsigned)film_pulse.rise, (unsigned)film_pulse.fall,
+                 (unsigned)film_pulse.terms);
+        return true;
+    }
     return false;
 }
 
@@ -3391,6 +3533,14 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     {
         film_reset();
         out[0] = film.resets;
+    }
+    else if (routine == 39)                                     // format 26: the term and the gains at once,
+    {                                                           //   on the tick's copy (in: a pulse waits,
+        film_pulse_tick(tick_work, in[0] != 0, in[1] != 0);    //   starting)
+        out[0] = film_pulse.term;
+        out[1] = film_pulse.rise;
+        out[2] = film_pulse.fall;
+        out[3] = film_pulse.terms;
     }
     else
         return 0;

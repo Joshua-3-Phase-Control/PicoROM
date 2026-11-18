@@ -195,8 +195,9 @@ SECTIONS
         __store_end__ = .;
     } > STORE_RAM
 
-    /* The store's code and data (store.cpp, and pair.cpp's knock kind: bank 3 has no room left), copied from
-       flash by map_unit_init beside what it keeps */
+    /* The store's code and data (store.cpp, and pair.cpp's knock kind), and L2's code in bank 2 (unit_ram.h's
+       BANK2_CODE: from format 26 the port films' term and gains): bank 3 has no room left. Copied from
+       flash by map_unit_init beside what the store keeps */
     .store_code : {
         __store_code_start__ = .;
         *(.store_code*)

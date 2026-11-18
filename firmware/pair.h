@@ -29,6 +29,12 @@ void pair_advance(uint32_t advance);
 // cycles less the dead time), which the port films take as it is injected.
 bool pair_pulse(uint32_t start, uint32_t overflows, bool again, uint32_t fuel);
 
+// Format 26 (DME-Sim's docs/Paired_Wall_Film.md, step 2): the films' term for the running pulse, R (cycles,
+// the low half) and F (1/8192, the high half), the pulse (the need - R) x F; 0: none. And the pulse task's
+// need (cycles) and its air of a firing (0.1 mg), for the MAP pulse's gains.
+uint32_t pair_film_term();
+void pair_film_need(uint32_t need, uint32_t air);
+
 // Task 12 (format 8): start mode over, as the tick found it: the next reference injects (rom_lean's
 // Main_Tick_Over cleared Inj720Odd).
 void pair_start_over();

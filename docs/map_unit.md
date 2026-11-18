@@ -272,7 +272,8 @@ of the firings' way:
   gives L2's ticks, those run again, late and lost, the longest from a ping to its end (us) and
   those over 1 ms. Format 24 adds `pair_knock`: L2's knock work's ticks, the knocks told, those
   learnt, the give-backs, the merges and the line's faulty flag; format 25 `pair_film`: L2's film
-  work's ticks, the intakes and injections kept, the notes lost and the resets.
+  work's ticks, the intakes and injections kept, the notes lost and the resets; format 26
+  `pair_term`: the term's R and F, the gains for a rise and a fall, the ticks a term was made.
 
 Format 12 (step 3.7, DME-Sim's docs/Paired_Map_Pulse.md) moves the MAP pulse onto the board:
 - **The MAP job.** The snoop's interrupt tells the board each slot's read (format 5's table); at the
@@ -514,6 +515,31 @@ at each firing place, logged; no pulse changes:
 - **Its checks:** pair_test 36 (the tick's film work), 37 (a note) and 38 (a reset), against
   DME-Sim's twin. **Its time** (DME-Sim's core): L2 56.1 us at most, 9.1 us more than without it;
   a tick's film work 17 us with 12 notes; L1 and L0 as before. The bank 64.8 KB: 724 bytes free.
+
+Format 26 (DME-Sim's docs/Paired_Wall_Film.md, step 2, the owner's of 2026-11-17) inverts the turn's
+pulse on the films:
+- **L2, after the films** (`film_pulse_tick`, in bank 2: unit_ram.h's BANK2_CODE, `.store_code`):
+  the term for the next pulse the pulse task makes or makes again, the waiting pulse's injection's
+  while it may be made again (under the speed a pulse is made again under), else the one after it,
+  the waiting pulse's fuel counted. Each place's film and its fuel as they will stand at its first
+  intake after that injection (a place whose intake hasn't ended since the turn's injection has it
+  first: `inducted`, a bit a place, cleared at the turn's note); R the places' mean of beta x film +
+  (1 - X) x fuel, F = 4 / the sum of their (1 - X), one word for the pulse task (R the low half in
+  cycles, F the high half in 1/8192; 0 while starting or before the open place is known), own values
+  94h and 95h for the log. Then the MAP pulse's and the cut's gains, 1/32 cycle a MAP count: Film_Air
+  (0.01 mg a kPa) x Cal_MapPa x the last running pulse's need over its air of a firing x F x
+  Film_TrimRise or Film_TrimFall (1/32768) by speed, into MapGainNow and DecelGainNow with the
+  interrupts held off; task 2 makes neither from format 26.
+- **L1's pulse task** (`fuel_mode`): running, the time twice a turn is the need, the pulse (the need -
+  R) x F before the shortest time, unless the need's pulse is held open (the injectors at their
+  limit: the films change nothing there); the need and its air left for L2 (`pair_film_need`). A held
+  pulse's fuel for the films is the injector open to the next pulse: 720 degrees running, a firing
+  starting (it was the held pulse's length).
+- **The table** adds Film_Air's, Film_TrimRise's and Film_TrimFall's ids, Cal_MapPa's address and
+  MapGainNow's and DecelGainNow's at u+151 to u+157; `film_start` is in bank 2 now.
+- **Its checks:** pair_test 39 (the term and the gains at once), `pair_term` for the PC. **Its time**
+  (DME-Sim's core): L2 62.3 us at most, 15.1 us more than with no film work; L1 27.7 us, the
+  unit's interrupt 6.0 us. Bank 3 63.5 KB (552 bytes free), bank 2's `.store_code` 5.0 KB.
 
 ## How it works
 

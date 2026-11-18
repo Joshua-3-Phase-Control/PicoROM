@@ -197,6 +197,10 @@ __force_inline bool fine_map(const Task &t)
     return at(t.rom, 0x2004) >= CYCLES_FORMAT;
 }
 
+// Format 26 (DME-Sim's docs/Paired_Wall_Film.md, step 2): the running pulse inverted on the port films (the
+// term L2 makes, pair.cpp's), and the MAP pulse's and the cut's gains L2's (the films' model), not task 2's.
+constexpr uint32_t INVERTED_FORMAT = 26;
+
 // The RAM's word at address (its low byte) and the next (its high).
 __force_inline uint32_t ram_word(const Task &t, uint32_t address)
 {
@@ -575,7 +579,7 @@ static void UNIT_CODE(fuel)(const Task &t)
 // bit; format 15, Decel_MapGain's id; format 22, MapK's address (task 1's factor). Out: IgnSlow,
 // MapGainNow; format 15, DecelGainNow (the pulse cut's gain by coolant, which task 18 takes, as it takes
 // MapGainNow). Format 22: the two gains words, 1/32 cycle a count of the MAP: the maps' fuel a kPa x MapK,
-// held to FFFFh.
+// held to FFFFh. Format 26: neither gain (L2 makes them from the films' model).
 static void UNIT_CODE(ign)(const Task &t)
 {
     if (fine_spark(t))                                                  // format 19: in 1/64 tooth, the
@@ -585,6 +589,8 @@ static void UNIT_CODE(ign)(const Task &t)
         uint32_t sum = sum_map(t, 0, get(t, bit(t, get(t, 4))));        // the cold map after a cold start
         put(t, 0, sum_map(t, sum, get(t, 2)));
     }
+    if (at(t.rom, 0x2004) >= INVERTED_FORMAT)
+        return;
     if (fine_map(t))
     {
         F16 k = map_k_at(t, get(t, 6));                                 // MapK
@@ -779,8 +785,11 @@ static uint32_t UNIT_CODE(crank_fuel)(const Task &t, uint32_t *exponent, uint32_
 // Fuel_Mode: the injection time (*time: the time a turn x lambda, twice it unless starting and at most
 // F800h, the shortest at least) and the pulse's TH0 load: the time ramped after an overrun cut (16
 // injections; made again at the step it was made at; format 15, less the cut a fall owes), the dead time
-// on (format 22: in cycles, and the cut too), held over 15/16 of its turns (then twice that), less INJ_OFS. The turn's pulse counted (InjCount,
-// to 80h; not starting).
+// on (format 22: in cycles, and the cut too), held over 15/16 of its turns (then twice that), less
+// INJ_OFS. The turn's pulse counted (InjCount, to 80h; not starting). Format 26 (DME-Sim's
+// docs/Paired_Wall_Film.md, step 2): running, the time twice a turn is the need, which the port films' term
+// makes the pulse, (the need - R) x F (pair_film_term, L2's), before the shortest time and the rest; the
+// need and its air of a firing left for the MAP pulse's gains.
 static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, bool again, uint32_t *count,
                                   uint32_t *flags)
 {
@@ -797,6 +806,19 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
         r *= 2;                                                         // ADD A,R6; ADDC A,R7
         if (r >= 0xF800)                                                // JC; CJNE A,#0F8h; JC
             r = 0xF800;
+        if (at(t.rom, 0x2004) >= INVERTED_FORMAT)                       // format 26: on the films, unless
+        {                                                               //   the need's pulse is held open
+            pair_film_need(r, air(t));                                  //   (the injectors at their limit:
+            uint32_t term = pair_film_term(), films = term & 0xFFFF;    //   the films change nothing there)
+            uint32_t hold = (input(t, 4) << 8 | input(t, 3)) * get(t, 21);
+            shift_left(&hold, 3);
+            if (term != 0 && (hold >> 8 & 0xFFFF) >= (fine_map(t) ? dead : dead * 5) + r)
+            {
+                r = r > films ? (r - films) * (term >> 16) >> 13 : 0;
+                if (r >= 0xF800)
+                    r = 0xF800;
+            }
+        }
     }
     uint32_t least = at(t.rom, word(t, 7) + get(t, 11)) * 4;            // Cal_InjMinTime; MOV B,#04h; MUL AB
     if (r < least)
@@ -861,7 +883,9 @@ static Pulse UNIT_CODE(fuel_mode)(const Task &t, uint32_t *time, uint32_t dead, 
         pulse = wide >> 8 & 0xFFFF;
     }
     uint32_t ofs = get(t, 23), dead_cycles = cycles ? dead : dead * 5;
-    uint32_t fuel = pulse > dead_cycles ? pulse - dead_cycles : 0;     // format 25: the port films'
+    uint32_t fuel = pulse > dead_cycles ? pulse - dead_cycles : 0;     // format 25: the port films'; held, the
+    if (*flags & PULSE_HELD)                                            //   injector open to the next pulse: a
+        fuel = (input(t, 4) << 8 | input(t, 3)) * (starting ? 1 : 4);  //   firing starting, else 720 degrees
     uint32_t overflows = (pulse >> 8) + (((pulse & 0xFF) + 255 - ofs) >> 8); // ADD A,#(255 - INJ_OFS); ADDC A,R7
     if (overflows > 0xFF)
         return {0, 0xFF, fuel};                                         // the longest: 255 from 0

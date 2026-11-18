@@ -18,6 +18,10 @@
 // 8051 part, which runs on through them. From RAM: an erase or a program takes the flash off the bus.
 #define BOARD_CODE(name) __attribute__((section(".board_code.text." #name), noinline)) name
 
+// L2's code in bank 2, beside the store's (memmap_firmware.ld's .store_code, copied there by map_unit_init;
+// DME-Sim loads it): bank 3 has no room left. Format 26 on: the port films' term and the model's gains.
+#define BANK2_CODE(name) __attribute__((section(".store_code.text." #name), noinline)) name
+
 // Each core's own SysTick, on the processor's clock: times in cycles.
 static __force_inline void systick_start()
 {
