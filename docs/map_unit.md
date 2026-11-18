@@ -557,12 +557,13 @@ manifold too, which the cylinders don't take.
   a firing is, kept at 0 or more (a fall takes nothing). None while starting or at the first tick
   after the board's start, the 8051's or the engine's stop (the films' resets). Own value 96h.
 - **L1's pulse task** (`need_air`): running, the need on the air of a firing less the take, at most
-  half of it; that air left with the need for the gains (`pair_film_need`).
+  half of it, none with the idle switch closed (the take there the reads' noise, as the MAP pulse
+  gives none); that air left with the need for the gains (`pair_film_need`).
 - **The table** adds Load_Filter's id and Cal_FillMass's address at u+158 to u+160 (Cal_FillDelay
   and Cal_FillLag follow Cal_FillMass in the image).
 - **Its checks:** pair_test 40 (the take at once), `pair_fill` for the PC. **Its time** (DME-Sim's
   core, the levels' run): L2 76.2 us at most, 2.0 us more than with no take; L1 28.3 us (0.4 more), the
-  unit's interrupt 6.0 us. Bank 3 63.6 KB (368 bytes free: the take's state and code are bank 2's),
+  unit's interrupt 6.0 us. Bank 3 63.7 KB (352 bytes free: the take's state and code are bank 2's),
   bank 2's `.store_code` 5.5 KB.
 
 ## How it works

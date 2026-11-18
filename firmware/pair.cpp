@@ -110,7 +110,8 @@
 // volumes before the throttle: Cal_FillDelay ticks, Cal_FillLag a tick), is made a firing's take (Cal_MapPa x
 // Cal_FillMass, the manifold's air a kPa, x a firing's length over the tick's), filtered as the load is
 // (Load_Filter's coefficient) and kept at 0 or more: falls take nothing. The pulse task takes it off the air of
-// a firing for the need, at most half of it (own value 96h for the log, 0.1 mg).
+// a firing for the need, at most half of it, none with the idle switch closed (own value 96h for the log, 0.1
+// mg).
 
 #include "pair.h"
 

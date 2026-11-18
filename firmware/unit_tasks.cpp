@@ -202,13 +202,14 @@ __force_inline bool fine_map(const Task &t)
 constexpr uint32_t INVERTED_FORMAT = 26;
 
 // Format 27 (step 4): the need's air, the air of a firing less the manifold's take on a rise of the MAP (L2's,
-// pair.cpp's), at least half of it; before format 27 the air of a firing.
+// pair.cpp's), at least half of it; the air of a firing with the idle switch closed (the pulse task's
+// IdleSwitch: the take there the MAP reads' noise, as the MAP pulse gives none) and before format 27.
 constexpr uint32_t FILL_FORMAT = 27;
 
 static uint32_t UNIT_CODE(need_air)(const Task &t)
 {
     uint32_t a = air(t);
-    if (at(t.rom, 0x2004) < FILL_FORMAT)
+    if (at(t.rom, 0x2004) < FILL_FORMAT || bit(t, get(t, 17)))
         return a;
     uint32_t take = pair_fill_take(), half = a >> 1;
     return take > half ? a - half : a - take;
