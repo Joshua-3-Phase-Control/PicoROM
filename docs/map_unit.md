@@ -627,8 +627,9 @@ trims from lambda and keeps them in the store:
 - **The store's second kind** (store.cpp, STORE_TRIMS): 130 bytes, each point's factor less 1 in 2^-15 (rounded, a
   signed word high byte first), the map's 64 then the idle factor, in two parts; its key the CRC-32 of the trims'
   layout word, their axes, Fuel_Main's, Fuel_Idle's, Fuel_AirTemp's and Inj_DeadTime's bytes (from the index),
-  Cal_FuelTrim's 16 bytes and K's 10 (Cal_Stoich on). L2 looks at one part of one kind a second, the kinds in turn,
-  and its store work waits for the next tick when the tick's job ran again (those are L2's longest ticks).
+  Cal_FuelTrim's 16 bytes and K's 10 (Cal_Stoich on). L2 looks at a part of each kind once a second, as at step 1,
+  the kinds in turn so that no tick looks twice, and its store work waits for the next tick when the tick's job ran
+  again (those are L2's longest ticks).
   `store_clear=trims` clears the trims at L2's next tick (the engine running or not), `all` both kinds.
 - **The live copy** (`pair_live`): each kind as stored, at the table's place in the image's P28 half (the trims'
   130 bytes, then the knock maps' 128 if the knock work is on), written by thread mode after each record it has
@@ -674,16 +675,16 @@ trims from lambda and keeps them in the store:
   last word the commit, programmed to 0 once the record's program has ended). Its code and data are
   in bank 2 beside what it keeps (`.store_code`, copied by map_unit_init; bank 3 has no room). Its
   kinds: format 24's knock maps, each pair's lower, a byte a point; format 30's fuel trims, a word a
-  point. L2 looks once a second at a part of a kind (the kinds and parts in turn) that changed since
-  its record (a minute at least between a kind's records), copies the kind a part a tick and posts
-  it; thread mode (map_unit_update) programs it and reads it back, then the commit, with only USB's,
-  the comms window's and the SDK's timer's interrupts held off by their enable bits (core 1 and the
-  levels run on from RAM), then writes the kind's live copy in the image (format 30). With four pages
-  left in a sector it erases the next one (copying forward a kind's newest record there first). The
-  unit's start loads each kind's newest committed record whose CRC holds and whose key matches the
-  image (the knock maps': their axes and layout; the trims': their axes and the steady fuel's maps and
-  constants); a torn one is skipped, so the one before it stands; and writes the live copy from what it
-  loaded. The board's start reads the flash's JEDEC ID.
+  point. L2 looks once a second at a part of each kind (its parts in turn, one look a tick) that
+  changed since its record (a minute at least between a kind's records), copies the kind a part a
+  tick and posts it; thread mode (map_unit_update) programs it and reads it back, then the commit,
+  with only USB's, the comms window's and the SDK's timer's interrupts held off by their enable bits
+  (core 1 and the levels run on from RAM), then writes the kind's live copy in the image (format
+  30). With four pages left in a sector it erases the next one (copying forward a kind's newest
+  record there first). The unit's start loads each kind's newest committed record whose CRC holds
+  and whose key matches the image (the knock maps': their axes and layout; the trims': their axes
+  and the steady fuel's maps and constants); a torn one is skipped, so the one before it stands; and
+  writes the live copy from what it loaded. The board's start reads the flash's JEDEC ID.
 - An erase or a program takes the flash off the bus, so nothing may run flash code meanwhile.
   Core 1's ROM loop is in RAM; each start of core 1 (the ROM loop, a bench) waits 10 us for it to
   leave the SDK's start, which is in flash; the store's writes wait while map_task's bench (from

@@ -6,9 +6,10 @@
 // programmed to 0 once the record's program has ended. A page without its commit or with a bad CRC is
 // skipped, so a record torn by the power going leaves the one before it standing.
 //
-// L2 (store_tick, once a tick; each kind's only writer) looks once a second for a part of a kind that
-// has changed since its last record, at most once a minute, then copies the kind into the post's page a
-// part a tick (the knock maps: a pair's 64 bytes each), so that no tick gets much more, and posts it.
+// L2 (store_tick, once a tick; each kind's only writer) looks once a second at a part of each kind, for
+// one that has changed since its last record, at most once a minute (the kinds in turn: one look a tick
+// at most), then copies the kind into the post's page a part a tick (the knock maps: a pair's 64 bytes
+// each), so that no tick gets much more, and posts it.
 // Thread mode (store_update, from map_unit_update) programs a posted record and reads it back, then
 // commits it, with only the interrupts whose code is in flash held off: USB's, the comms window's, the
 // SDK's timer. Core 1 and the levels run from RAM throughout. When the sector being written has
@@ -96,14 +97,14 @@ struct Store
     uint32_t key[KINDS + 1];                             // each kind's key in this image (0: the kind off)
     uint32_t posted_at[KINDS + 1];                       // each kind's last post (us)
     uint8_t look[KINDS + 1];                             // each kind's part L2 looks at next
-    uint32_t looked_at;                                  // L2's last look for a change (us)
+    uint32_t looked_at[KINDS + 1];                       // each kind's last look for a change (us)
     uint32_t copying, copied;                            // the kind L2 copies for its record, its parts so far
     uint32_t kind, length;                               // the record posted: its kind, its data's length
     uint32_t turn;                                       // the kinds looked at in turn: the next after this (0 on)
 };
 
 Store store_state STORE_DATA = {0, 0, {0, 0}, 0, 0, 0, 1, 0, OFFSET, SECTORS, store_flash_erase, store_flash_program,
-                                0, 0, 0, {}, {}, {}, 0, NONE, {}, {}, {}, {}, 0, 0, 0, 0, 0};
+                                0, 0, 0, {}, {}, {}, 0, NONE, {}, {}, {}, {}, {}, 0, 0, 0, 0, 0};
 
 // Where the store reads its sectors: through the cache for the start's scan, which comes before any
 // write, then past it, so that no line of them is ever read stale (the store's writes leave the cache
@@ -463,10 +464,10 @@ static void STORE_CODE(kind_copy)(uint32_t kind, uint32_t part)
         trims_copy(part, post_page + HEADER);
 }
 
-// Once a tick: a clear the PC asked for; a kind being copied, a part a tick, then posted; else, once a
-// second, a part of a kind whose minute has passed looked at (the kinds and their parts in turn: one part
-// a tick at most), and copied from the next tick on if it differs from what is kept (a forced kind at
-// once: a clear's neutral record).
+// Once a tick: a clear the PC asked for; a kind being copied, a part a tick, then posted; else a part of
+// a kind whose minute has passed looked at, once a second for each kind (the kinds in turn, each kind's
+// parts in turn: one look a tick at most), and copied from the next tick on if it differs from what is
+// kept (a forced kind at once: a clear's neutral record).
 void STORE_CODE(store_tick)()
 {
     Store &s = store_state;
@@ -501,24 +502,20 @@ void STORE_CODE(store_tick)()
         s.posted = 1;
         return;
     }
-    bool forced = false;
-    for (uint32_t kind = 1; kind <= KINDS; kind++)
-        forced = forced || s.force[kind];
-    if (!forced && now - s.looked_at < SECOND_US)
-        return;
-    s.looked_at = now;
     for (uint32_t n = 0; n < KINDS; n++)                        // the kinds in turn, from the one after the last
     {                                                           //   looked at: a part of one a tick at most
         uint32_t kind = (s.turn + n) % KINDS + 1;
-        if (s.key[kind] == 0 || (!s.force[kind] && now - s.posted_at[kind] < MINUTE_US))
-            continue;
+        if (s.key[kind] == 0 || (!s.force[kind] && (now - s.posted_at[kind] < MINUTE_US
+                                                    || now - s.looked_at[kind] < SECOND_US)))
+            continue;                                           // (off, its minute or its second not passed)
         s.turn = kind % KINDS;
         if (!s.force[kind])
         {
+            s.looked_at[kind] = now;
             uint32_t part = s.look[kind];
             s.look[kind] = part + 1 < kind_parts(kind) ? part + 1 : 0;
             if (!kind_differs(kind, part))
-                return;                                         // (the next look a second on, at the next kind)
+                return;                                         // (the next kind's look at a later tick)
         }
         s.copying = kind;                                       // copied from the next tick on
         s.copied = 0;
@@ -536,7 +533,6 @@ void STORE_CODE(store_start)()
         commit_page[i] = i < COMMIT ? 0xFF : 0;
     s.posted = s.ahead = 0;
     s.loaded = 0;
-    s.looked_at = now;
     s.copying = s.copied = s.turn = 0;
     s.key[STORE_KNOCK] = knock_key();
     s.key[STORE_TRIMS] = trims_key();
@@ -548,6 +544,7 @@ void STORE_CODE(store_start)()
         s.newest[kind] = NONE;
         s.force[kind] = 0;
         s.look[kind] = 0;
+        s.looked_at[kind] = now;
         s.done[kind] = s.asked[kind];
         s.posted_at[kind] = now;
         for (uint32_t i = 0; i < MOST; i++)
