@@ -642,7 +642,7 @@ trims from lambda and keeps them in the store:
   copy's at u+169 to u+193. The log's list may name B0h and B1h (own value 98h).
 - **Its checks:** pair_test 43 (the trims' tick at once), `pair_trims` for the PC (ticks worked, ticks learnt, the
   factor in use, the idle factor's 2^-15 off 1.0). **Its time** (DME-Sim's core): a tick's trims work 2.3 us at
-  idle, 3.8 to 4.4 us off it; the levels' run L2 71.7 us at most (69.4 with the trims off), L1 28.3 us; four minutes
+  idle, 3.8 to 4.4 us off it; the levels' run L2 71.9 us at most (69.5 with the trims off), L1 28.3 us; four minutes
   of learning at idle and part load, records written: L2 93.6 us at most (89.7 off). Bank 3 63.8 KB (232 bytes
   free), bank 2's `.store_code` 13.7 KB.
 
