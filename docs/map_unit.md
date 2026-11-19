@@ -725,14 +725,14 @@ trims from lambda and keeps them in the store:
 | store_flush    | n,way (0 to 2)    | flushes done, the way, cycles most and mean               |
 | store_irqs     |                   | enabled interrupts, those with flash handlers, SysTick's  |
 
-store_clear's knock maps are cleared by L2 once the engine has stopped (the P28 out of step), and a
-neutral record written at once; its trims (format 30) at L2's next tick, the engine running or not, and a
-neutral record likewise; all, both. Its answer is the words of the kinds still to clear ("knock", "trims",
-"knock trims") or "none". store_bench erases the sector below the store's (and checks it
-blank), then programs its 16 pages (each read back), n times, an operation a pass of the main loop
-after the store's own work, then erases it once more; its times are in us. store_flush, a
-diagnostic, flushes the XIP cache alone: way 0 as the ROM's flush (FLUSH read back), 1 with STAT
-polled, 2 with the XIP block left untouched for 10 us (and the flushes not done by then counted).
+store_clear's kinds are cleared at L2's next tick, the engine running or not, each with a neutral record
+written at once: knock the knock maps, trims (format 30) the fuel trims, all both. Its answer is the
+words of the kinds still to clear ("knock", "trims", "knock trims") or "none". store_bench erases the
+sector below the store's (and checks it blank), then programs its 16 pages (each read back), n times, an
+operation a pass of the main loop after the store's own work, then erases it once more; its times are in
+us. store_flush, a diagnostic, flushes the XIP cache alone: way 0 as the ROM's flush (FLUSH read back),
+1 with STAT polled, 2 with the XIP block left untouched for 10 us (and the flushes not done by then
+counted).
 
 The kinds: a pick or a send before the last; the last send (the lookup); the page as written again
 (the value's read, or a start). The bus bench and the probe make reads on the board itself, through

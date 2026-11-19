@@ -474,13 +474,13 @@ void STORE_CODE(store_tick)()
     if (s.posted)
         return;                                                 // thread mode has the post's page
     uint32_t now = now_us();
-    if (s.asked[STORE_KNOCK] != s.done[STORE_KNOCK] && knock_stopped())
-    {
-        knock_clear();                                          // the PC's clear: a neutral record at once
+    if (s.asked[STORE_KNOCK] != s.done[STORE_KNOCK])            // the PC's clears, each at once, the engine
+    {                                                           //   running or not (the owner, 2026-11-19)
+        knock_clear();                                          // (a neutral record at once)
         s.force[STORE_KNOCK] = 1;
         s.done[STORE_KNOCK] = s.asked[STORE_KNOCK];
     }
-    if (s.asked[STORE_TRIMS] != s.done[STORE_TRIMS])            // the trims' at any time (format 30)
+    if (s.asked[STORE_TRIMS] != s.done[STORE_TRIMS])            // (the trims': format 30)
     {
         trims_clear();
         s.force[STORE_TRIMS] = 1;
@@ -765,8 +765,8 @@ uint32_t STORE_CODE(store_clears_pending)()
 
 // store: records written, sectors erased, faults, the next record's sequence, the kinds loaded at the
 // start (bits); store_flash: the flash's JEDEC ID, the longest program and erase (us); store_clear: the
-// kinds asked to be cleared and not yet, their words ("knock": L2 clears the knock maps once the engine has
-// stopped; "trims": at its next tick), or "none".
+// kinds asked to be cleared and not yet (L2 clears them at its next tick), their words ("knock", "trims"),
+// or "none".
 bool store_get_parameter(const char *name, char *value, size_t value_size)
 {
     Store &s = store_state;
@@ -822,8 +822,8 @@ bool store_get_parameter(const char *name, char *value, size_t value_size)
     return false;
 }
 
-// store_clear=knock, trims or all: the knock maps cleared once the engine has stopped, the trims at L2's next
-// tick, each with a neutral record written at once. store_bench=n (1 to 1000): the bench, n cycles, unless one
+// store_clear=knock, trims or all: the knock maps, the trims or both cleared at L2's next tick, the engine
+// running or not, each with a neutral record written at once. store_bench=n (1 to 1000): the bench, n cycles, unless one
 // runs.
 bool store_set_parameter(const char *name, const char *value)
 {

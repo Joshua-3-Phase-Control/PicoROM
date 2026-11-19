@@ -99,13 +99,12 @@ uint32_t pair_test(uint32_t routine);
 // knock_differs whether part one's bytes differ from kept's (128), knock_copy part one's bytes into out
 // (128), knock_restore the maps from the record's bytes, knock_clear the maps to 0 (L2's, as knock_tick
 // is), knock_key the key of what the maps mean (their layout and axes in the image; 0 with the work
-// off), knock_stopped the engine stopped (the P28 out of step), when the PC may clear them.
+// off).
 bool knock_differs(uint32_t one, const uint8_t *kept);
 void knock_copy(uint32_t one, uint8_t *out);
 void knock_restore(const uint8_t *in);
 void knock_clear();
 uint32_t knock_key();
-bool knock_stopped();
 
 // Format 30 (DME-Sim's docs/Paired_Fuel_Learning.md, step 2): the store's trims kind, in bank 2 with the store, its
 // record two parts (the map's points 0 to 31, then 32 to 63 and the idle factor; a word each, high byte first: the

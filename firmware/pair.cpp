@@ -1952,11 +1952,6 @@ uint32_t STORE_CODE(knock_key)()
     return crc == 0 ? 1 : crc;
 }
 
-bool STORE_CODE(knock_stopped)()
-{
-    return !pair.synced;
-}
-
 // ---------------------------------------------------------------------------------------------------
 // The port films (format 25; DME-Sim's docs/Paired_Wall_Film.md, step 1): a discrete tau-X film for each
 // firing place, kept once a tick (L2, after the knock work, before the frame) from the notes since the last
