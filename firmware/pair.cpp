@@ -125,6 +125,15 @@
 // (Film_TrimFall) is blended toward the hot chamber's (Film_TrimFall_Hot) as the films' maps are; the
 // warm-up enrichment toward the share of it a hot chamber keeps (Fuel_WarmUpKept by coolant), its walls
 // taking less of the fuel.
+//
+// Format 30 (DME-Sim's docs/Paired_Fuel_Learning.md, step 2): the fuel trims, learnt from lambda and kept in the
+// store. A factor map on speed by the air of a firing (8 x 8 points, the table's axes) and an idle factor, in bank
+// 2 with the knock maps. Once a tick (L2, after the film work, before the frame), where the engine runs warm and
+// steady in closed loop, the four points around the operating point (the idle factor with the idle switch closed)
+// move by their weights' shares of LamInt's offset from 1.0, 30 s on a point, each within 12.5%. The factor in use
+// (own value 98h: 1.0 while start mode is on; past the closed loop's limits none leaner than 1.0) goes into the slow
+// factor (task 1, unit_tasks.cpp), beside Cal_FuelTrim. The store keeps them as its second kind, and thread mode
+// writes each kind as stored into a live copy in the image's P28 half, for the PC.
 
 #include "pair.h"
 
@@ -160,6 +169,7 @@ static constexpr uint32_t INVERTED = 26; // the format with the turn's pulse inv
 static constexpr uint32_t FILL = 27;     // the format with the filling correction on the need's air (step 4)
 static constexpr uint32_t CHAMBER = 28;  // the format with the chamber's warm-up in the films' maps (step 5)
 static constexpr uint32_t HOT_TRIMS = 29; // the format with the cut's trim and the warm-up by it too (step 6)
+static constexpr uint32_t TRIMS = 30;     // the format with the fuel trims learnt (docs/Paired_Fuel_Learning.md)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -2335,6 +2345,361 @@ uint32_t UNIT_CODE(pair_fill_take)()
     return fill.on ? fill.take : 0;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The fuel trims (format 30; DME-Sim's docs/Paired_Fuel_Learning.md, step 2): a factor map on the P28's own speed
+// and air of a firing (the table's axes, 8 x 8 points) and an idle factor, each a signed word in 2^-31 of the
+// factor (0: x 1.0), in bank 2 with what the store keeps (zeroed as the board starts, then the store's record if it
+// has one). Once a tick (L2, after the film work, before the frame), on the tick's copy as its commit left it:
+//   where it learns (in step, past start mode, lambda's loop closed Cal_TrimClosedTicks ticks; fully warm: the
+//   coolant's own warm-up (88h, Fuel_WarmUp before the chamber's blend) none, and no after-start or acceleration
+//   enrichment (8Ah, 8Bh); no MAP pulse given and no pulse cut owed or taken for Cal_TrimQuietTicks ticks; the speed
+//   within Cal_TrimRpmBand and the air of a firing within Cal_TrimAirBand of their values at the steady spell's start
+//   for Cal_TrimSteadyTicks ticks; Cal_TrimLearn on), the four points around the operating point move by their
+//   interpolation weights' shares of LamInt's offset from 128 x Cal_TrimStep (2^-31 of the factor a count a tick:
+//   1/2640 of the offset, 30 s on a point), the idle factor by the whole of it with the idle switch closed; each
+//   within Cal_TrimMost (2^-15) of 0. Lambda's loop is left as it is: it gives back what the trims take by itself;
+//   the factor in use (own value 98h, 8000h x 1.0): 8000h while start mode is on; the idle factor with the idle
+//   switch closed; else the map's at the operating point (outside its points at its edge, as every map reads), its
+//   four points' weighted sum, and past the closed loop's limits (over Cal_LamRpmMax, Cal_LamLoadMax or
+//   Cal_LamMapMax) none under 8000h: a lean trim was learnt where the car ran, a rich one is safe there. The slow
+//   work (task 1) multiplies it into the slow factor;
+//   the flag TrimLearning in the unit's copy (the log's): this tick learnt.
+// Each point is taken rounded to 2^-15 (the record's unit), so that a power cycle changes no factor.
+static constexpr uint32_t TRIM_POINTS = 8;
+static constexpr uint32_t TRIM_PARTS = 2;                                      // the record's: 32 points, then 32
+static constexpr uint32_t TRIM_HALF = TRIM_POINTS * TRIM_POINTS / TRIM_PARTS;  //   and the idle factor
+static constexpr uint32_t TRIM_BYTES = 2 * (TRIM_POINTS * TRIM_POINTS + 1);    // a word each, high byte first
+static constexpr uint32_t TRIM_LAYOUT = TRIMS << 24 | 1 << 16 | TRIM_POINTS << 8 | TRIM_POINTS; // the map, one idle
+
+// Bank 2: a word naming its layout (the store's key takes it), then the map and the idle factor.
+struct TrimStore
+{
+    uint32_t layout;                              // TRIM_LAYOUT
+    int32_t points[TRIM_POINTS * TRIM_POINTS];    // a speed's air points after another's, 2^-31 of the factor
+    int32_t idle;                                 // the idle factor's, 2^-31
+};
+
+static TrimStore trim_store __attribute__((section(".store")));
+
+struct Trims
+{
+    // Read by DME-Sim (its tests take these offsets): the counts, then the state.
+    volatile uint32_t runs;      // 0: ticks worked
+    volatile uint32_t learnt;    // 4: ticks it learnt
+    volatile uint32_t factor;    // 8: the factor in use (8000h x 1.0; own value 98h)
+    uint32_t closed, quiet;      // 12, 16: ticks the loop has been closed, and with no MAP pulse or cut (to 255)
+    uint32_t steady;             // 20: ticks the speed and the air have stood in their bands (to 255)
+    uint32_t speed0, air0;       // 24, 28: the speed and the air at the steady spell's start
+    uint32_t pulses;             // 32: the MAP pulses given (L1's count) at the last tick
+    // The table's and the calibration's.
+    bool on;                                         // format 30, the trims' axes and constants: the work on
+    uint32_t speed_axis, air_axis;                   // the axes (format 17's: the input, the count, the points)
+    uint32_t learn_at;                               // Cal_TrimLearn's address (read each tick), its constants after
+    uint32_t step, most, rpm_band, air_band;         // Cal_TrimStep, Cal_TrimMost, Cal_TrimRpmBand, Cal_TrimAirBand
+    uint32_t steady_min, closed_min, quiet_min;      // Cal_TrimSteadyTicks, Cal_TrimClosedTicks, Cal_TrimQuietTicks
+    uint32_t closed_bit, flag_bit, in5_at, owed_at, cut_at; // ClosedLoop, TrimLearning; In5, DecelOwed, DecelCut
+    uint32_t rpm_max_at, load_max_at, map_max_at;    // Cal_LamRpmMax's, Cal_LamLoadMax's, Cal_LamMapMax's addresses
+    uint32_t key_ids[4], fuel_trim_at, fuel_k_at;    // the key's maps (Fuel_Main, Fuel_Idle, Fuel_AirTemp,
+                                                     //   Inj_DeadTime), Cal_FuelTrim's address, Cal_Stoich's
+    uint32_t live_at;                                // the live copy's place in the image (0: none)
+    uint16_t speeds[TRIM_POINTS], airs[TRIM_POINTS]; // the axes' points (the image's, taken at the start: quicker)
+};
+
+static Trims trims BANK2_DATA = {};
+
+// A point's factor less 1, 2^-15, rounded (the record's unit).
+static __force_inline int32_t trim_rounded(int32_t point)
+{
+    return (point + 0x8000) >> 16;
+}
+
+// The input's place on an axis's points (rising): its cell's first point (0 to TRIM_POINTS - 2) and the fraction to
+// the next (1/65536), as knock_place finds it on the image (below the first point the first, at the last or past it
+// the last), from the points taken at the start.
+static __force_inline Share trim_place(const uint16_t *points, uint32_t input)
+{
+    uint32_t k = TRIM_POINTS - 1;
+    while (k > 0 && points[k] > input)                         // the highest point at or below the input
+        k--;
+    if (k == TRIM_POINTS - 1)
+        return {TRIM_POINTS - 2, WHOLE_SHARE};
+    uint32_t from = points[k], width = points[k + 1] - from;
+    if (input < from || width == 0)
+        return {0, 0};                                          // below the first point
+    return {k, map_unit_divide32((input - from) << 16, width)};
+}
+
+// The four points around the operating point on the trims' axes and their weights, as knock_cell's.
+static void BANK2_CODE(trim_cell)(uint32_t speed, uint32_t air, Cell *cell)
+{
+    Share s = trim_place(trims.speeds, speed), a = trim_place(trims.airs, air);
+    uint32_t first = s.index * TRIM_POINTS + a.index, s0 = WHOLE_SHARE - s.fraction, a0 = WHOLE_SHARE - a.fraction;
+    cell->at[0] = first;
+    cell->at[1] = first + 1;
+    cell->at[2] = first + TRIM_POINTS;
+    cell->at[3] = first + TRIM_POINTS + 1;
+    cell->weight[0] = share(s0, a0);
+    cell->weight[1] = share(s0, a.fraction);
+    cell->weight[2] = share(s.fraction, a0);
+    cell->weight[3] = share(s.fraction, a.fraction);
+}
+
+// A point moved by step (2^-31), within most of 0 either way.
+static __force_inline void trim_move(int32_t *point, int32_t step, int32_t most)
+{
+    int32_t p = *point + step;
+    *point = p > most ? most : p < -most ? -most : p;
+}
+
+// Past the closed loop's limits: over Cal_LamRpmMax (rpm), Cal_LamLoadMax (0.1 mg) or Cal_LamMapMax (In5's byte).
+static __force_inline bool trim_past(uint32_t speed, uint32_t air, uint32_t in5)
+{
+    return word(trims.rpm_max_at) < speed || word(trims.load_max_at) < air || at(trims.map_max_at) < in5;
+}
+
+static __force_inline uint32_t up_to(uint32_t count, bool on)
+{
+    return on ? (count < 0xFF ? count + 1 : 0xFF) : 0;
+}
+
+// L2's trims work, once a tick on the tick's copy (`bytes`), after the film work, before the frame (pair_tick).
+static void BANK2_CODE(trim_tick)(const uint8_t *bytes)
+{
+    if (!trims.on)
+        return;
+    uint32_t *own = map_unit_owns.own;                          // (the unit's own values, as L2 alone writes 98h)
+    uint32_t speed = own[0], air = own[MAP_UNIT_LOAD - MAP_UNIT_SPEED] & 0xFFFF;
+    bool idle = copy_bit(bytes, control.idle_bit), starting = copy_bit(bytes, pair.start_bit);
+    bool closed = copy_bit(bytes, trims.closed_bit);
+    trims.closed = up_to(trims.closed, closed);
+    uint32_t pulses = levels.map_pulses;                        // a MAP pulse given, or a cut owed or taken
+    bool cut = (bytes[trims.owed_at & 0x7F] | bytes[(trims.owed_at + 1) & 0x7F] | bytes[trims.cut_at & 0x7F]
+                | bytes[(trims.cut_at + 1) & 0x7F]) != 0;
+    trims.quiet = up_to(trims.quiet, pulses == trims.pulses && !cut);
+    trims.pulses = pulses;
+    uint32_t moved = speed > trims.speed0 ? speed - trims.speed0 : trims.speed0 - speed;
+    uint32_t gone = air > trims.air0 ? air - trims.air0 : trims.air0 - air;
+    bool steady = moved <= trims.rpm_band && gone <= (trims.air0 * trims.air_band >> 8);
+    trims.steady = up_to(trims.steady, steady);
+    if (!steady)                                                // a new spell from here
+    {
+        trims.speed0 = speed;
+        trims.air0 = air;
+    }
+    bool warm = (own[MAP_UNIT_WARM_UP - MAP_UNIT_SPEED] | own[MAP_UNIT_AFTER_START - MAP_UNIT_SPEED]
+                 | own[MAP_UNIT_ACCEL - MAP_UNIT_SPEED]) == 0;
+    bool learns = at(trims.learn_at) != 0 && pair.synced && !starting && closed && warm
+                  && trims.closed >= trims.closed_min && trims.quiet >= trims.quiet_min && trims.steady >= trims.steady_min;
+    Cell cell;
+    if (!idle)                                                  // (the idle factor needs no cell)
+        trim_cell(speed, air, &cell);
+    if (learns)
+    {
+        int32_t d = (int32_t)bytes[control.lam_at] - 0x80, most = (int32_t)(trims.most << 16);
+        uint32_t a = (uint32_t)(d < 0 ? -d : d) * trims.step;  // the offset x Cal_TrimStep, at a whole weight
+        if (idle)
+            trim_move(&trim_store.idle, d < 0 ? -(int32_t)a : (int32_t)a, most);
+        else
+            for (uint32_t k = 0; k < 4; k++)
+            {
+                int32_t s = (int32_t)(cell.weight[k] == WHOLE_SHARE ? a : film_mul(a, cell.weight[k]));
+                trim_move(&trim_store.points[cell.at[k]], d < 0 ? -s : s, most);
+            }
+        trims.learnt = trims.learnt + 1;
+    }
+    int32_t offset = 0;                                         // the factor in use, 2^-15 off 1.0
+    if (!starting)
+    {
+        if (idle)
+            offset = trim_rounded(trim_store.idle);
+        else
+        {
+            int32_t sum = 0;
+            for (uint32_t k = 0; k < 4; k++)
+                sum += (int32_t)cell.weight[k] * trim_rounded(trim_store.points[cell.at[k]]);
+            offset = (sum + 0x8000) >> 16;
+        }
+        if (offset < 0 && trim_past(speed, air, bytes[trims.in5_at & 0x7F]))
+            offset = 0;
+    }
+    trims.factor = (uint32_t)(0x8000 + offset);
+    own[MAP_UNIT_TRIM - MAP_UNIT_SPEED] = trims.factor;         // (one store: task 1 reads it in one load)
+    if (learns != ram_bit(trims.flag_bit))                      // the log's flag (the 8051's start clears it)
+    {
+        __asm volatile("cpsid i" ::: "memory");                 // (the bus level writes the byte's other bits)
+        own_bit(trims.flag_bit, learns);
+        __asm volatile("cpsie i" ::: "memory");
+    }
+    trims.runs = trims.runs + 1;
+}
+
+// As the board starts: the trims at 0 (the store fills them), their layout named, the factor 1.0; the work on with
+// format 30's table (u + 169 on: the axes, the constants, the bits and bytes it reads, lambda's limits, the key's
+// maps and constants, the live copy's place), the axes on the P28's own speed and air (8 points each) and the
+// pipeline's whole tick. Once: made small (cold).
+static void __attribute__((cold)) BANK2_CODE(trim_start)(uint32_t u)
+{
+    trim_store.layout = TRIM_LAYOUT;
+    for (uint32_t k = 0; k < TRIM_POINTS * TRIM_POINTS; k++)    // (a loop: no memset in the bank)
+        trim_store.points[k] = 0;
+    trim_store.idle = 0;
+    trims.on = false;
+    trims.runs = trims.learnt = 0;
+    trims.factor = 0x8000;
+    trims.closed = trims.quiet = trims.steady = trims.speed0 = trims.air0 = 0;
+    trims.pulses = levels.map_pulses;
+    trims.live_at = 0;
+    map_unit_set_own(MAP_UNIT_TRIM, 0);                         // (none before format 30: task 1 takes no factor)
+    if (at(MARK + 4) < TRIMS || !control.slowed || !pair.whole)
+        return;
+    uint32_t axes = word(u + 169), constants = word(u + 171);
+    if (axes == 0 || constants == 0)
+        return;
+    trims.speed_axis = axes;
+    trims.air_axis = axes + 2 + 2 * at(axes + 1);
+    trims.learn_at = constants;                                 // Cal_TrimLearn (a byte), then Cal_TrimStep,
+    trims.step = word(constants + 1);                           //   Cal_TrimMost, Cal_TrimRpmBand (words),
+    trims.most = word(constants + 3);                           //   Cal_TrimAirBand, Cal_TrimSteadyTicks,
+    trims.rpm_band = word(constants + 5);                       //   Cal_TrimClosedTicks, Cal_TrimQuietTicks
+    trims.air_band = at(constants + 7);
+    trims.steady_min = at(constants + 8);
+    trims.closed_min = at(constants + 9);
+    trims.quiet_min = at(constants + 10);
+    trims.closed_bit = at(u + 173);
+    trims.flag_bit = at(u + 174);
+    trims.in5_at = at(u + 175);
+    trims.owed_at = at(u + 176);
+    trims.cut_at = at(u + 177);
+    trims.rpm_max_at = word(u + 178);
+    trims.load_max_at = word(u + 180);
+    trims.map_max_at = word(u + 182);
+    for (uint32_t k = 0; k < 4; k++)
+        trims.key_ids[k] = at(u + 184 + k);
+    trims.fuel_trim_at = word(u + 188);
+    trims.fuel_k_at = word(u + 190);
+    trims.live_at = word(u + 192);
+    for (uint32_t k = 0; k < TRIM_POINTS; k++)                  // the axes' points, words
+    {
+        trims.speeds[k] = word(trims.speed_axis + 2 + 2 * k);
+        trims.airs[k] = word(trims.air_axis + 2 + 2 * k);
+    }
+    uint32_t maps = at(MARK + 6);
+    bool ids = trims.key_ids[0] < maps && trims.key_ids[1] < maps && trims.key_ids[2] < maps && trims.key_ids[3] < maps;
+    trims.on = ids && at(axes) == MAP_UNIT_SPEED && at(axes + 1) == TRIM_POINTS && at(trims.air_axis) == MAP_UNIT_LOAD
+               && at(trims.air_axis + 1) == TRIM_POINTS && trims.most != 0 && trims.most < 0x8000;
+    if (trims.on)
+        map_unit_set_own(MAP_UNIT_TRIM, 0x8000);
+}
+
+// The store's trims kind (store.h), in bank 2 with the store. Its record, in two parts: a point a word (high byte
+// first), its factor less 1 in 2^-15, signed, rounded: the map's points 0 to 31, then 32 to 63 and the idle factor.
+static __force_inline int32_t trim_value(uint32_t i)
+{
+    return trim_rounded(i < TRIM_POINTS * TRIM_POINTS ? trim_store.points[i] : trim_store.idle);
+}
+
+bool STORE_CODE(trims_differs)(uint32_t one, const uint8_t *kept)
+{
+    for (uint32_t i = one * TRIM_HALF, end = one == TRIM_PARTS - 1 ? TRIM_BYTES / 2 : i + TRIM_HALF; i < end; i++)
+    {
+        uint32_t v = (uint32_t)trim_value(i) & 0xFFFF;
+        if (kept[2 * i] != v >> 8 || kept[2 * i + 1] != (v & 0xFF))
+            return true;
+    }
+    return false;
+}
+
+void STORE_CODE(trims_copy)(uint32_t one, uint8_t *out)
+{
+    for (uint32_t i = one * TRIM_HALF, end = one == TRIM_PARTS - 1 ? TRIM_BYTES / 2 : i + TRIM_HALF; i < end; i++)
+    {
+        uint32_t v = (uint32_t)trim_value(i) & 0xFFFF;
+        out[2 * i] = v >> 8;
+        out[2 * i + 1] = v & 0xFF;
+    }
+}
+
+void STORE_CODE(trims_restore)(const uint8_t *in)
+{
+    int32_t most = (int32_t)(trims.most << 16);
+    for (uint32_t i = 0; i < TRIM_BYTES / 2; i++)
+    {
+        int32_t p = (int32_t)(int16_t)(in[2 * i] << 8 | in[2 * i + 1]) << 16;
+        p = p > most ? most : p < -most ? -most : p;
+        if (i < TRIM_POINTS * TRIM_POINTS)
+            trim_store.points[i] = p;
+        else
+            trim_store.idle = p;
+    }
+}
+
+// L2's (from the store's tick, as trim_tick moves them): the trims to 0; the factor in use follows at the next tick.
+void STORE_CODE(trims_clear)()
+{
+    for (uint32_t k = 0; k < TRIM_POINTS * TRIM_POINTS; k++)
+        trim_store.points[k] = 0;
+    trim_store.idle = 0;
+}
+
+// The CRC-32 of n bytes of the image from at, on crc.
+static uint32_t STORE_CODE(image_crc)(uint32_t crc, uint32_t from, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+        crc = store_crc(crc, at(from + i));
+    return crc;
+}
+
+// A map's bytes in the image (its axes and values, format 18's layout) by its id: its address, their count. An
+// axis on one of the P28's own inputs (80h on) has words for points, its values words with 40h in the index.
+static constexpr uint32_t OWN_INPUT = 0x80, WORD_VALUES = 0x40;
+
+static uint32_t STORE_CODE(map_bytes)(uint32_t id, uint32_t *map)
+{
+    uint32_t entry = word(MARK + 7) + 3 * id, kind = at(entry + 2), a = word(entry);
+    uint32_t cells = at(a + 1), after = a + 2 + cells * (at(a) & OWN_INPUT ? 2 : 1);
+    if ((kind & 3) > 1)
+    {
+        cells *= at(after + 1);
+        after += 2 + at(after + 1) * (at(after) & OWN_INPUT ? 2 : 1);
+    }
+    *map = a;
+    return after + cells * (kind & WORD_VALUES ? 2 : 1) - a;
+}
+
+// What the trims correct: the CRC-32 of their layout word, both axes, the steady fuel's maps (Fuel_Main, Fuel_Idle,
+// Fuel_AirTemp, Inj_DeadTime: their axes and values) and constants (Cal_FuelTrim's eight words, Cal_Stoich and the
+// four after it: K's) as the image has them; 0 with the work off (never a key: a CRC of 0 is taken as 1).
+uint32_t STORE_CODE(trims_key)()
+{
+    if (!trims.on)
+        return 0;
+    uint32_t crc = ~0u, map;
+    for (uint32_t i = 0; i < 4; i++)
+        crc = store_crc(crc, TRIM_LAYOUT >> 8 * i);
+    crc = image_crc(crc, trims.speed_axis, 2 + 2 * at(trims.speed_axis + 1));
+    crc = image_crc(crc, trims.air_axis, 2 + 2 * at(trims.air_axis + 1));
+    for (uint32_t k = 0; k < 4; k++)
+    {
+        uint32_t n = map_bytes(trims.key_ids[k], &map);
+        crc = image_crc(crc, map, n);
+    }
+    crc = image_crc(crc, trims.fuel_trim_at, 16);
+    crc = image_crc(crc, trims.fuel_k_at, 10);
+    crc = ~crc;
+    return crc == 0 ? 1 : crc;
+}
+
+// A kind's live copy in the image's P28 half (format 30's table: the trims, then the knock maps' each pair's lower
+// if the knock work is on), its bytes as stored; null: none.
+volatile uint8_t *STORE_CODE(pair_live)(uint32_t kind)
+{
+    if (!trims.on || trims.live_at == 0)
+        return nullptr;
+    if (kind == STORE_TRIMS)
+        return pair.rom + trims.live_at;
+    return kind == STORE_KNOCK && knock.on ? pair.rom + trims.live_at + TRIM_BYTES : nullptr;
+}
+
 // Format 24: the knock retard of the firing whose fall 1 has count base (its place's, by its letter) off the
 // plans' advance (1/64 tooth), which it takes no lower than 0 (an advance at 0 or below is left as it is).
 static __force_inline int32_t retarded(int32_t advance, int32_t base)
@@ -2458,7 +2823,7 @@ void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
 // the pulse made again), then (format 24) the knock work, (format 25) the films, (format 27) the
-// manifold's take, its frame, and the store's look for a changed kind.
+// manifold's take, (format 30) the trims, its frame, and the store's look for a changed kind.
 static void UNIT_CODE(tick_at_once)(const Ping &ping)
 {
     uint32_t tick;
@@ -2468,27 +2833,31 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
         pair_control();
     knock_tick();
     film_tick(tick_work, ping.at);
+    trim_tick(tick_work);
     make_frame(tick);
     store_tick();
 }
 
 // L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films,
-// (format 27) the manifold's take, its frame, then the store's look for a changed kind
-// (docs/Paired_Fuel_Learning.md); the next one pended again.
+// (format 27) the manifold's take, (format 30) the trims, its frame, then the store's look for a changed
+// kind (docs/Paired_Fuel_Learning.md), which waits for the next tick when this one's job ran again (those are
+// L2's longest; the store's work can wait); the next one pended again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
         return;
     const Ping &ping = pings.queue[pings.out & (PINGS - 1)];
-    uint32_t tick;
+    uint32_t tick, again = levels.again;
     if (ping.generation != control.generation)
         levels.tick_dropped++;
     else if (tick_job(ping, &tick))
     {
         knock_tick();
         film_tick(tick_work, ping.at);
+        trim_tick(tick_work);
         make_frame(tick);
-        store_tick();
+        if (levels.again == again)
+            store_tick();
         uint32_t span = now_us() - ping.at;
         if (span > levels.tick_us)
             levels.tick_us = span;
@@ -3130,6 +3499,8 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
         pair.fault = false;
         knock.starts = knock.starts + 1;                        // (format 24: the counts from 0, L2's to see)
         film_reset();                                           // (format 25: the films from 0)
+        if (trims.on)                                           // (format 30: the factor 1.0 for start mode's
+            map_unit_set_own(MAP_UNIT_TRIM, 0x8000);            //   first slow work, before L2's next tick)
         unsync();
         if (pair.inject)
             loads_as_built();
@@ -3465,6 +3836,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
     }
     knock_start(u);                                             // format 24: the knock retard (u + 141 on)
     film_start(u);                                              // format 25: the port films (u + 146 on)
+    trim_start(u);                                              // format 30: the fuel trims (u + 169 on)
     pair.on = reach;
 }
 
@@ -3523,6 +3895,12 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
     {                                                           //   moved, the last tick's way (1 toward hot)
         snprintf(value, value_size, "%u %u %u", (unsigned)(chamber.warm >> 8), (unsigned)chamber.runs,
                  (unsigned)chamber.fired);
+        return true;
+    }
+    if (streq(name, "pair_trims"))                              // format 30: ticks worked, ticks it learnt, the
+    {                                                           //   factor in use (8000h x 1.0), the idle factor's
+        snprintf(value, value_size, "%u %u %u %d", (unsigned)trims.runs, (unsigned)trims.learnt, // 2^-15 off 1.0
+                 (unsigned)trims.factor, (int)trim_rounded(trim_store.idle));
         return true;
     }
     return false;
@@ -3791,6 +4169,16 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     else if (routine == 42)                                     // format 29: the warm-up blended at once, on the
     {                                                           //   tick's copy (in: the warm-up)
         out[0] = pair_chamber_warm_up(in[0], tick_work, map_unit_owns.own);
+    }
+    else if (routine == 43)                                     // format 30: L2's trims work at once, on the
+    {                                                           //   tick's copy and own values as they stand
+        trim_tick(tick_work);
+        out[0] = trims.runs;
+        out[1] = trims.learnt;
+        out[2] = trims.factor;
+        out[3] = trims.closed;
+        out[4] = trims.quiet;
+        out[5] = trims.steady;
     }
     else
         return 0;

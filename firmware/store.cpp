@@ -1,4 +1,4 @@
-// The store (store.h; DME-Sim's docs/Paired_Fuel_Learning.md, step 1): what the P28 learns kept in its
+// The store (store.h; DME-Sim's docs/Paired_Fuel_Learning.md, steps 1 and 2): what the P28 learns kept in its
 // flash across power cycles. A ring of eight 4 KiB sectors below the image holds records, a 256-byte
 // page each: the kind (a byte), the kind's layout (a byte), the data's length (16 bits), a sequence
 // number (one more each record), the key (a CRC-32 of what the kind's data mean in the image), a CRC-32
@@ -15,6 +15,10 @@
 // AHEAD_PAGES pages left, thread mode erases the next one, after copying forward any kind whose newest
 // record is there. The board's start (store_start) loads each kind's newest whole record whose key
 // matches the image.
+//
+// Its kinds: 1, the knock maps (format 24's: each pair's lower); 2, the fuel trims (format 30's). From format 30
+// each kind as last stored stands in a live copy in the image's P28 half (pair_live), for the PC: thread mode
+// writes it after each record it has programmed, the board's start from what it loaded (neutral, 0, if nothing).
 //
 // Flash is read through XIP, a word at a time (DME-Sim's model of it takes words only): through the
 // cache for the start's scan, past it from then on. The store's own erase and program (the SDK's
@@ -46,7 +50,7 @@ static constexpr uint32_t SECTOR = 4096, PAGE = 256, SECTORS = 8;
 static constexpr uint32_t SECTOR_PAGES = SECTOR / PAGE, PAGES = SECTORS * SECTOR_PAGES;
 static constexpr uint32_t OFFSET = FLASH_SIZE - SECTOR - ROM_FLASH_SIZE - SECTORS * SECTOR; // below the image
 static constexpr uint32_t HEADER = 16, COMMIT = PAGE - 4, MOST = COMMIT - HEADER;           // 236 bytes of data
-static constexpr uint32_t KINDS = STORE_KNOCK;   // the kinds, 1 to KINDS
+static constexpr uint32_t KINDS = STORE_TRIMS;   // the kinds, 1 to KINDS
 static constexpr uint32_t NONE = ~0u;
 static constexpr uint32_t AHEAD_PAGES = 4;       // pages left when the next sector is erased: a copy
                                                  // forward of each kind and a record posted meanwhile
@@ -60,8 +64,10 @@ static_assert(OFFSET % SECTOR == 0, "the store's sectors are the flash's");
 static void BOARD_CODE(store_flash_erase)(uint32_t flash_offs, size_t count);
 static void BOARD_CODE(store_flash_program)(uint32_t flash_offs, const uint8_t *data, size_t count);
 
-// Each kind's layout (a record's second byte) and data's length: 1, the knock maps (format 24).
+// Each kind's layout (a record's second byte) and data's length: 1, the knock maps (format 24); 2, the fuel trims
+// (format 30: 64 points and the idle factor, a word each).
 static constexpr uint32_t KNOCK_RECORD = 1, KNOCK_BYTES = 128;
+static constexpr uint32_t TRIM_RECORD = 1, TRIM_BYTES = 130;
 
 // The store's state. Read by DME-Sim (its model takes these offsets) up to its own part.
 struct Store
@@ -93,6 +99,7 @@ struct Store
     uint32_t looked_at;                                  // L2's last look for a change (us)
     uint32_t copying, copied;                            // the kind L2 copies for its record, its parts so far
     uint32_t kind, length;                               // the record posted: its kind, its data's length
+    uint32_t turn;                                       // the kinds looked at in turn: the next after this (0 on)
 };
 
 Store store_state STORE_DATA = {0, 0, {0, 0}, 0, 0, 0, 1, 0, OFFSET, SECTORS, store_flash_erase, store_flash_program,
@@ -180,21 +187,32 @@ static __force_inline void put_word(uint8_t *at, uint32_t value)
     at[3] = value >> 24;
 }
 
-// The kinds: their layout, data's length, key, bytes and restore (1: the knock maps, pair.cpp's).
+// The kinds: their layout, data's length, key, bytes and restore (1: the knock maps, 2: the fuel trims,
+// pair.cpp's).
 static uint32_t STORE_CODE(kind_layout)(uint32_t kind)
 {
-    return kind == STORE_KNOCK ? KNOCK_RECORD : 0;
+    return kind == STORE_KNOCK ? KNOCK_RECORD : kind == STORE_TRIMS ? TRIM_RECORD : 0;
 }
 
 static uint32_t STORE_CODE(kind_bytes)(uint32_t kind)
 {
-    return kind == STORE_KNOCK ? KNOCK_BYTES : 0;
+    return kind == STORE_KNOCK ? KNOCK_BYTES : kind == STORE_TRIMS ? TRIM_BYTES : 0;
 }
 
-// A kind's record in parts, each a tick's work at most for L2 (the knock maps: a pair's 64 bytes each).
+// A kind's record in parts, each a tick's work at most for L2 (the knock maps: a pair's 64 bytes each; the trims:
+// 32 points, then 32 and the idle factor).
 static uint32_t STORE_CODE(kind_parts)(uint32_t kind)
 {
-    return kind == STORE_KNOCK ? 2 : 1;
+    return kind == STORE_KNOCK || kind == STORE_TRIMS ? 2 : 1;
+}
+
+// A kind's live copy in the image (format 30): its bytes as last stored.
+static void STORE_CODE(live)(uint32_t kind, const uint8_t *bytes)
+{
+    volatile uint8_t *to = pair_live(kind);
+    if (to != nullptr)
+        for (uint32_t i = 0; i < kind_bytes(kind); i++)
+            to[i] = bytes[i];
 }
 
 // ---- The flash's erase and program (bank 2's .board_code: the board's alone; DME-Sim stands in) ----
@@ -414,8 +432,11 @@ void STORE_CODE(store_update)()
         __asm volatile("" ::: "memory");                        // the post's record read after its flag
         uint32_t kind = s.kind;
         if (write(post_page, kind, s.length))
+        {
             for (uint32_t i = 0; i < s.length; i++)
                 kept[kind][i] = post_page[HEADER + i];
+            live(kind, kept[kind]);                             // format 30: the PC's copy of what is stored
+        }
         __asm volatile("" ::: "memory");                        // the page done before L2 refills it
         s.posted = 0;                                           // a fault: posted again at its next change
         check_ahead();
@@ -429,6 +450,8 @@ void STORE_CODE(store_update)()
 
 static bool STORE_CODE(kind_differs)(uint32_t kind, uint32_t part)
 {
+    if (kind == STORE_TRIMS)
+        return trims_differs(part, kept[kind]);
     return kind == STORE_KNOCK && knock_differs(part, kept[kind]);
 }
 
@@ -436,11 +459,14 @@ static void STORE_CODE(kind_copy)(uint32_t kind, uint32_t part)
 {
     if (kind == STORE_KNOCK)
         knock_copy(part, post_page + HEADER);
+    else if (kind == STORE_TRIMS)
+        trims_copy(part, post_page + HEADER);
 }
 
 // Once a tick: a clear the PC asked for; a kind being copied, a part a tick, then posted; else, once a
-// second, a part of a kind whose minute has passed looked at (its parts in turn), and copied from the next
-// tick on if it differs from what is kept (a forced kind at once: a clear's neutral record).
+// second, a part of a kind whose minute has passed looked at (the kinds and their parts in turn: one part
+// a tick at most), and copied from the next tick on if it differs from what is kept (a forced kind at
+// once: a clear's neutral record).
 void STORE_CODE(store_tick)()
 {
     Store &s = store_state;
@@ -452,6 +478,12 @@ void STORE_CODE(store_tick)()
         knock_clear();                                          // the PC's clear: a neutral record at once
         s.force[STORE_KNOCK] = 1;
         s.done[STORE_KNOCK] = s.asked[STORE_KNOCK];
+    }
+    if (s.asked[STORE_TRIMS] != s.done[STORE_TRIMS])            // the trims' at any time (format 30)
+    {
+        trims_clear();
+        s.force[STORE_TRIMS] = 1;
+        s.done[STORE_TRIMS] = s.asked[STORE_TRIMS];
     }
     if (s.copying != 0)
     {
@@ -475,16 +507,18 @@ void STORE_CODE(store_tick)()
     if (!forced && now - s.looked_at < SECOND_US)
         return;
     s.looked_at = now;
-    for (uint32_t kind = 1; kind <= KINDS; kind++)
-    {
+    for (uint32_t n = 0; n < KINDS; n++)                        // the kinds in turn, from the one after the last
+    {                                                           //   looked at: a part of one a tick at most
+        uint32_t kind = (s.turn + n) % KINDS + 1;
         if (s.key[kind] == 0 || (!s.force[kind] && now - s.posted_at[kind] < MINUTE_US))
             continue;
+        s.turn = kind % KINDS;
         if (!s.force[kind])
         {
             uint32_t part = s.look[kind];
             s.look[kind] = part + 1 < kind_parts(kind) ? part + 1 : 0;
             if (!kind_differs(kind, part))
-                continue;
+                return;                                         // (the next look a second on, at the next kind)
         }
         s.copying = kind;                                       // copied from the next tick on
         s.copied = 0;
@@ -503,12 +537,14 @@ void STORE_CODE(store_start)()
     s.posted = s.ahead = 0;
     s.loaded = 0;
     s.looked_at = now;
-    s.copying = s.copied = 0;
+    s.copying = s.copied = s.turn = 0;
     s.key[STORE_KNOCK] = knock_key();
+    s.key[STORE_TRIMS] = trims_key();
     read_base = s.records == 0 && s.erases == 0 && s.faults == 0 ? XIP : PAST_CACHE; // the cache: nothing written
-    uint32_t best[KINDS + 1] = {}, top = 0, top_page = NONE;
-    for (uint32_t kind = 0; kind <= KINDS; kind++)
+    uint32_t best[KINDS + 1], top = 0, top_page = NONE;         // (zeroed in the loop: an initialiser of three
+    for (uint32_t kind = 0; kind <= KINDS; kind++)              //   words is the SDK's memset, in flash)
     {
+        best[kind] = 0;
         s.newest[kind] = NONE;
         s.force[kind] = 0;
         s.look[kind] = 0;
@@ -555,8 +591,12 @@ void STORE_CODE(store_start)()
             kept[kind][i] = flash_word(p * PAGE + HEADER + (i & ~3u)) >> 8 * (i & 3) & 0xFF;
         if (kind == STORE_KNOCK)
             knock_restore(kept[kind]);
+        else if (kind == STORE_TRIMS)
+            trims_restore(kept[kind]);
         s.loaded = s.loaded | 1u << kind;
     }
+    for (uint32_t kind = 1; kind <= KINDS; kind++)              // format 30: the live copy, what was loaded
+        live(kind, kept[kind]);                                 //   (0, neutral, if nothing)
     read_base = PAST_CACHE;                                     // from here on past the cache
     check_ahead();
 }
@@ -728,7 +768,8 @@ uint32_t STORE_CODE(store_clears_pending)()
 
 // store: records written, sectors erased, faults, the next record's sequence, the kinds loaded at the
 // start (bits); store_flash: the flash's JEDEC ID, the longest program and erase (us); store_clear: the
-// kinds asked to be cleared and not yet ("knock": L2 clears the knock maps once the engine has stopped).
+// kinds asked to be cleared and not yet, their words ("knock": L2 clears the knock maps once the engine has
+// stopped; "trims": at its next tick), or "none".
 bool store_get_parameter(const char *name, char *value, size_t value_size)
 {
     Store &s = store_state;
@@ -745,7 +786,9 @@ bool store_get_parameter(const char *name, char *value, size_t value_size)
     }
     if (streq(name, "store_clear"))
     {
-        strcpyz(value, value_size, store_clears_pending() & 1u << STORE_KNOCK ? "knock" : "none");
+        uint32_t pending = store_clears_pending();
+        bool knock = pending & 1u << STORE_KNOCK, trims = pending & 1u << STORE_TRIMS;
+        strcpyz(value, value_size, knock && trims ? "knock trims" : knock ? "knock" : trims ? "trims" : "none");
         return true;
     }
     if (streq(name, "store_bench"))                     // cycles, faults, erase most, mean, program most, mean
@@ -782,8 +825,9 @@ bool store_get_parameter(const char *name, char *value, size_t value_size)
     return false;
 }
 
-// store_clear=knock (or all): the knock maps cleared once the engine has stopped, and a neutral record
-// written at once. store_bench=n (1 to 1000): the bench, n cycles, unless one runs.
+// store_clear=knock, trims or all: the knock maps cleared once the engine has stopped, the trims at L2's next
+// tick, each with a neutral record written at once. store_bench=n (1 to 1000): the bench, n cycles, unless one
+// runs.
 bool store_set_parameter(const char *name, const char *value)
 {
     if (streq(name, "store_flush"))
@@ -810,9 +854,13 @@ bool store_set_parameter(const char *name, const char *value)
         bench.running = bench.ran = true;
         return true;
     }
-    if (!streq(name, "store_clear") || !(streq(value, "knock") || streq(value, "all")))
+    uint32_t kinds = streq(value, "knock") ? 1u << STORE_KNOCK
+                     : streq(value, "trims") ? 1u << STORE_TRIMS
+                     : streq(value, "all")   ? 1u << STORE_KNOCK | 1u << STORE_TRIMS
+                                             : 0;
+    if (!streq(name, "store_clear") || kinds == 0)
         return false;
-    store_ask_clear(1u << STORE_KNOCK);
+    store_ask_clear(kinds);
     return true;
 }
 

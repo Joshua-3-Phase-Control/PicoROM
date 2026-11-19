@@ -605,6 +605,46 @@ tip-ins rich.
   time** (DME-Sim's core, the levels' run): L2 68.7 us at most (68.4 with format 28), L1 28.3 us. Bank 3
   63.7 KB (344 bytes free), bank 2's `.store_code` 8.7 KB.
 
+Format 30 (DME-Sim's docs/Paired_Fuel_Learning.md, step 2, the owner's of 2026-11-15 and 2026-11-18) learns fuel
+trims from lambda and keeps them in the store:
+- **The trims** (bank 2, `.store`: zeroed as the board starts, then the store's record): a word naming the layout,
+  then an 8 x 8 factor map on the P28's own speed and air of a firing (the table's axes, Fuel_Main's points over
+  the closed-loop region) and an idle factor, each a signed word in 2^-31 of the factor (0: x 1.0).
+- **L2, once a tick** after the film work and before the frame (`trim_tick`, in bank 2 with its state, the axes'
+  points taken into RAM at the start): where it learns (in step, past start mode, lambda's loop closed
+  Cal_TrimClosedTicks; fully warm: the coolant's own warm-up (88h, before the chamber's blend) none, and no
+  after-start (8Ah) or acceleration (8Bh) enrichment; no MAP pulse given and no pulse cut owed or taken for
+  Cal_TrimQuietTicks; the speed and the air within Cal_TrimRpmBand and Cal_TrimAirBand of the steady spell's start
+  for Cal_TrimSteadyTicks; Cal_TrimLearn on, read each tick), the four points around the operating point move by
+  their interpolation weights' shares of LamInt's offset from 128 x Cal_TrimStep (1/2640 of the offset: 30 s on a
+  point), the idle factor by the whole of it with the idle switch closed, each within Cal_TrimMost (12.5%). The
+  factor in use (own value 98h, 8000h x 1.0): 8000h while start mode is on, and at the 8051's start (the bus level:
+  its first slow work comes before L2's tick); the idle factor with the idle switch closed; else the map's (each
+  point rounded to 2^-15, its four points' weighted sum), and past the closed loop's limits (Cal_LamRpmMax,
+  Cal_LamLoadMax, Cal_LamMapMax) none leaner than 8000h. The flag TrimLearning (24h.1) in the unit's copy, the log's.
+- **Task 1** (`fuel`, `trimmed` in bank 2): the slow factor x the factor in use (one load of own value 98h, which no
+  level copies, and f16_mul's product); 8000h or none (0: before format 30) leaves it as it was, bit for bit.
+- **The store's second kind** (store.cpp, STORE_TRIMS): 130 bytes, each point's factor less 1 in 2^-15 (rounded, a
+  signed word high byte first), the map's 64 then the idle factor, in two parts; its key the CRC-32 of the trims'
+  layout word, their axes, Fuel_Main's, Fuel_Idle's, Fuel_AirTemp's and Inj_DeadTime's bytes (from the index),
+  Cal_FuelTrim's 16 bytes and K's 10 (Cal_Stoich on). L2 looks at one part of one kind a second, the kinds in turn,
+  and its store work waits for the next tick when the tick's job ran again (those are L2's longest ticks).
+  `store_clear=trims` clears the trims at L2's next tick (the engine running or not), `all` both kinds.
+- **The live copy** (`pair_live`): each kind as stored, at the table's place in the image's P28 half (the trims'
+  130 bytes, then the knock maps' 128 if the knock work is on), written by thread mode after each record it has
+  programmed and by the board's start from what it loaded (0, neutral, if nothing): the PC reads it as any image
+  bytes, and a commit of the image carries what was there.
+- **The table** adds the trims' axes' and constants' addresses (Cal_TrimLearn, then Cal_TrimStep, Cal_TrimMost,
+  Cal_TrimRpmBand, Cal_TrimAirBand, Cal_TrimSteadyTicks, Cal_TrimClosedTicks, Cal_TrimQuietTicks), the bits
+  ClosedLoop and TrimLearning, In5's, DecelOwed's and DecelCut's RAM addresses, Cal_LamRpmMax's, Cal_LamLoadMax's
+  and Cal_LamMapMax's addresses, the key's four maps' ids, Cal_FuelTrim's and Cal_Stoich's addresses and the live
+  copy's at u+169 to u+193. The log's list may name B0h and B1h (own value 98h).
+- **Its checks:** pair_test 43 (the trims' tick at once), `pair_trims` for the PC (ticks worked, ticks learnt, the
+  factor in use, the idle factor's 2^-15 off 1.0). **Its time** (DME-Sim's core): a tick's trims work 2.3 us at
+  idle, 3.8 to 4.4 us off it; the levels' run L2 71.7 us at most (69.4 with the trims off), L1 28.3 us; four minutes
+  of learning at idle and part load, records written: L2 93.6 us at most (89.7 off). Bank 3 63.8 KB (232 bytes
+  free), bank 2's `.store_code` 13.7 KB.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
@@ -628,20 +668,22 @@ tip-ins rich.
   to make room. With 640, as in the stock builds, a parameter's answer in the USB callback with an
   interrupt on top ran past the stack into TinyUSB's state, and USB stopped; the deepest since has
   been 716 bytes.
-- The store (store.cpp; DME-Sim's docs/Paired_Fuel_Learning.md, step 1) keeps what the P28 learns
-  in its flash across power cycles: eight 4 KiB sectors just below the image (1E7000h on the P28), a
-  record a 256-byte page (kind, layout, length, sequence, key, CRC-32, the data; the page's last
-  word the commit, programmed to 0 once the record's program has ended). Its code and data are in
-  bank 2 beside what it keeps (`.store_code`, copied by map_unit_init; bank 3 has no room). Its
-  first kind is format 24's knock maps, each pair's lower, a byte a point. L2 looks once a second
-  for a part of a kind that changed since its record (a minute at least between records), copies
-  the kind a part a tick and posts it; thread mode (map_unit_update) programs it and reads it back,
-  then the commit, with only USB's, the comms window's and the SDK's timer's interrupts held off by
-  their enable bits: core 1 and the levels run on from RAM. With four pages left in a sector it
-  erases the next one (copying forward a kind's newest record there first). The unit's start loads
-  each kind's newest committed record whose CRC holds and whose key matches the image (the knock
-  maps' axes and layout); a torn one is skipped, so the one before it stands. The board's start
-  reads the flash's JEDEC ID.
+- The store (store.cpp; DME-Sim's docs/Paired_Fuel_Learning.md, steps 1 and 2) keeps what the P28
+  learns in its flash across power cycles: eight 4 KiB sectors just below the image (1E7000h on the
+  P28), a record a 256-byte page (kind, layout, length, sequence, key, CRC-32, the data; the page's
+  last word the commit, programmed to 0 once the record's program has ended). Its code and data are
+  in bank 2 beside what it keeps (`.store_code`, copied by map_unit_init; bank 3 has no room). Its
+  kinds: format 24's knock maps, each pair's lower, a byte a point; format 30's fuel trims, a word a
+  point. L2 looks once a second at a part of a kind (the kinds and parts in turn) that changed since
+  its record (a minute at least between a kind's records), copies the kind a part a tick and posts
+  it; thread mode (map_unit_update) programs it and reads it back, then the commit, with only USB's,
+  the comms window's and the SDK's timer's interrupts held off by their enable bits (core 1 and the
+  levels run on from RAM), then writes the kind's live copy in the image (format 30). With four pages
+  left in a sector it erases the next one (copying forward a kind's newest record there first). The
+  unit's start loads each kind's newest committed record whose CRC holds and whose key matches the
+  image (the knock maps': their axes and layout; the trims': their axes and the steady fuel's maps and
+  constants); a torn one is skipped, so the one before it stands; and writes the live copy from what it
+  loaded. The board's start reads the flash's JEDEC ID.
 - An erase or a program takes the flash off the bus, so nothing may run flash code meanwhile.
   Core 1's ROM loop is in RAM; each start of core 1 (the ROM loop, a bench) waits 10 us for it to
   leave the SDK's start, which is in flash; the store's writes wait while map_task's bench (from
@@ -677,13 +719,15 @@ tip-ins rich.
 | map_stack      |                   | how much of the main stack has never been used            |
 | store          |                   | records, erases, faults, the next sequence, kinds loaded  |
 | store_flash    |                   | the flash's JEDEC ID, the longest program and erase (us)  |
-| store_clear    | knock (or all)    | the kinds asked to clear and not yet cleared (or none)    |
+| store_clear    | knock, trims, all | the kinds asked to clear and not yet cleared (or none)    |
 | store_bench    | n (1 to 1000)     | running, then cycles, faults, erase most, mean, program's |
 | store_flush    | n,way (0 to 2)    | flushes done, the way, cycles most and mean               |
 | store_irqs     |                   | enabled interrupts, those with flash handlers, SysTick's  |
 
 store_clear's knock maps are cleared by L2 once the engine has stopped (the P28 out of step), and a
-neutral record written at once. store_bench erases the sector below the store's (and checks it
+neutral record written at once; its trims (format 30) at L2's next tick, the engine running or not, and a
+neutral record likewise; all, both. Its answer is the words of the kinds still to clear ("knock", "trims",
+"knock trims") or "none". store_bench erases the sector below the store's (and checks it
 blank), then programs its 16 pages (each read back), n times, an operation a pass of the main loop
 after the store's own work, then erases it once more; its times are in us. store_flush, a
 diagnostic, flushes the XIP cache alone: way 0 as the ROM's flush (FLUSH read back), 1 with STAT

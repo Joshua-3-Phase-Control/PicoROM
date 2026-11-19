@@ -107,6 +107,20 @@ void knock_clear();
 uint32_t knock_key();
 bool knock_stopped();
 
+// Format 30 (DME-Sim's docs/Paired_Fuel_Learning.md, step 2): the store's trims kind, in bank 2 with the store, its
+// record two parts (the map's points 0 to 31, then 32 to 63 and the idle factor; a word each, high byte first: the
+// factor less 1 in 2^-15, signed, 130 bytes): trims_differs whether part one's bytes differ from kept's, trims_copy
+// part one's bytes into out, trims_restore the trims from the record's bytes, trims_clear the trims to 0 (L2's, as
+// the trims' tick is), trims_key the key of what they correct (their layout and axes, the steady fuel's maps and
+// constants in the image; 0 with the work off). pair_live a kind's live copy in the image's P28 half (its bytes as
+// last stored, which thread mode writes after each record and the board's start from what it loaded; null: none).
+bool trims_differs(uint32_t one, const uint8_t *kept);
+void trims_copy(uint32_t one, uint8_t *out);
+void trims_restore(const uint8_t *in);
+void trims_clear();
+uint32_t trims_key();
+volatile uint8_t *pair_live(uint32_t kind);
+
 #endif
 
 #endif

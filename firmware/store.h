@@ -15,6 +15,7 @@
 
 // The store's kinds (a record's first byte).
 static constexpr uint32_t STORE_KNOCK = 1; // format 24's knock maps: each pair's lower, a byte a point
+static constexpr uint32_t STORE_TRIMS = 2; // format 30's fuel trims: the map's 64 points and the idle factor, a word each
 
 // The board's start, from map_unit_init (flash code: the board's alone): the flash's JEDEC ID.
 void store_board_start();

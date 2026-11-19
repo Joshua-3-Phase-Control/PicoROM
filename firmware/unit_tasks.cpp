@@ -215,6 +215,16 @@ static uint32_t UNIT_CODE(need_air)(const Task &t)
     return take > half ? a - half : a - take;
 }
 
+// Format 30 (DME-Sim's docs/Paired_Fuel_Learning.md, step 2): the fuel trims' factor in use (own value 98h, L2's:
+// 8000h x 1.0, 1.0 while start mode is on), which task 1 multiplies into the slow factor beside Cal_FuelTrim; read
+// from the unit's own values (no level's copy carries it), one load. 0 (before format 30, or the trims off): none.
+constexpr uint32_t TRIMS_FORMAT = 30;
+
+__force_inline uint32_t trim_factor(const Task &t)
+{
+    return at(t.rom, 0x2004) >= TRIMS_FORMAT ? map_unit_owns.own[MAP_UNIT_TRIM - MAP_UNIT_SPEED] & 0xFFFF : 0;
+}
+
 // The RAM's word at address (its low byte) and the next (its high).
 __force_inline uint32_t ram_word(const Task &t, uint32_t address)
 {
@@ -396,6 +406,17 @@ static uint32_t UNIT_CODE(running_time)(F16 s, uint32_t base, uint32_t warm, uin
     return fuel_running(s, base, warm, after, map, accel);
 }
 
+// Format 30: the slow factor (its mantissa, bits 0-15, and exponent, 16-31) x the fuel trims' factor in use
+// (trim_factor), in bank 2 (bank 3 has no room); as it was with the factor 1.0 (8000h) or none (0).
+static uint32_t BANK2_CODE(trimmed)(uint32_t s, const Task &t)
+{
+    uint32_t factor = trim_factor(t);
+    if (factor == 0 || factor == 0x8000)
+        return s;
+    F16 r = f16_mul(F16{s & 0xFFFF, (int16_t)(s >> 16)}, f16_word(factor));
+    return r.m | (uint32_t)r.e << 16;
+}
+
 // The cranking's factor from Crank_Fuel's word as decayed (2^-11 a whole factor): under 1, none.
 __force_inline F16 crank_factor(uint32_t fuel)
 {
@@ -557,7 +578,8 @@ static void UNIT_CODE(warm_up)(const Task &t)
 // words, and in Cal_InjScale's place Cal_Stoich's, the four words after it Cal_InjBaseFlow,
 // Cal_FuelDensity, Cal_InjFlowKpa and Cal_RailKpa: K x the trim x Fuel_AirTemp (words), its mantissa
 // FuelFactorH:L and its exponent FuelShift (signed). Format 22: data Cal_MapPa's address and MapK's; the
-// MAP pulse's gains' factor (map_gain_k) into MapK, for task 2.
+// MAP pulse's gains' factor (map_gain_k) into MapK, for task 2. Format 30: x the fuel trims' factor in use
+// (trim_factor; x 1.0 returns the product as it was, so with neutral trims every slow factor is as before).
 static void UNIT_CODE(fuel)(const Task &t)
 {
     uint32_t constants = word(t, 2);
@@ -568,9 +590,10 @@ static void UNIT_CODE(fuel)(const Task &t)
         F16 k = fuel_k(word_at(t, c), word_at(t, c + 2), word_at(t, c + 4), word_at(t, c + 6), word_at(t, c + 8));
         uint32_t trim = word_at(t, constants + get(t, 4) + 2 * step);
         F16 s = f16_mul(f16_mul(k, f16_word(trim)), f16_word(value(t, get(t, 6))));
-        put(t, 0, s.m);
-        put(t, 1, s.m >> 8);
-        put(t, 2, (uint32_t)s.e);
+        uint32_t packed = trimmed(s.m | (uint32_t)s.e << 16, t);        // (format 30: x the trims' factor)
+        put(t, 0, packed);
+        put(t, 1, packed >> 8);
+        put(t, 2, packed >> 16);
         if (fine_map(t))
         {
             F16 g = map_gain_k(k, word_at(t, c), word_at(t, word(t, 7)));
