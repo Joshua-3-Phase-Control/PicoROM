@@ -2962,8 +2962,9 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
 
 // L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films,
 // (format 27) the manifold's take, (format 30) the trims, (format 31) the fault codes, its frame and a record's
-// frame, then the store's look for a changed kind (docs/Paired_Fuel_Learning.md), which waits for the next tick
-// when this one's job ran again (those are L2's longest; the store's work can wait); the next one pended again.
+// frame, then the store's look for a changed kind (docs/Paired_Fuel_Learning.md). The fault codes and the store's
+// look wait for the next tick when this one's job ran again (those are L2's longest; their work can wait: the
+// owner's choice of 2026-11-19 for the codes); the next one pended again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
@@ -2977,7 +2978,8 @@ void UNIT_CODE(pair_tick)()
         knock_tick();
         film_tick(tick_work, ping.at);
         trim_tick(tick_work);
-        fault_tick(tick_work, ping.at);
+        if (levels.again == again)
+            fault_tick(tick_work, ping.at);
         fault_frames(make_frame(tick));
         if (levels.again == again)
             store_tick();

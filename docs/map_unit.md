@@ -673,8 +673,10 @@ nothing acts on them:
 - **The table** adds the code table's, the limits', the frame list's and the live copy's addresses, Cal_LamIntMax's,
   Cal_IsvCorrMax's and Cal_IsvCorrMin's, IdleIntHi's RAM address and O2MidBand's bit at u+194 to u+209.
 - **Its checks:** pair_test 44 (the checks at once), `pair_faults` for the PC (ticks worked, the faults present and
-  pending, confirmations, lost). **Its time** (DME-Sim's core): about 5.6 us a tick; L2's longest with every check running 102.8 us on the 951 (96.7 with them off) and 100.1 on the 944 (94.4), over its bound of 100 us: the owner's choice (skipping the checks on a tick whose job ran again, as the store's work waits, measured 96.7 and 94.3). Bank 3
-  65,432 bytes (104 free), bank 2's `.store_code` 23.2 KB.
+  pending, confirmations, lost). They wait for the next tick when the tick's job ran again, as the store's look does
+  (the owner's choice of 2026-11-19: those are L2's longest ticks). **Its time** (DME-Sim's core): about 5.6 us a
+  tick; L2's longest 96.7 us on the 951 and 94.3 on the 944 (102.8 and 100.1 with the checks on every tick), L1
+  28.5 us. Bank 3 65,440 bytes (96 free), bank 2's `.store_code` 23.2 KB.
 
 ## How it works
 
