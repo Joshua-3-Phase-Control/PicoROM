@@ -58,7 +58,7 @@ uint32_t map_unit_task_at(uint32_t task);
 // read by any. Format 19 (step B) adds the spark's, in 1/64 tooth, signed; format 21 (step D) the fuel's
 // enrichments, 8000h a whole fuel; format 24 the knock retard's four (pair.cpp's, in 1/64 tooth); format 25 the
 // port films' four (pair.cpp's, injector cycles); format 26 the films' term; format 27 the manifold's take;
-// format 28 the chamber's warm-up; format 30 the fuel trims' factor in use. MAP_UNIT_OWNS (a power of 2) words
+// format 28 the chamber's warm-up; format 30 the fuel trims' factor in use; format 31 the faults present now. MAP_UNIT_OWNS (a power of 2) words
 // each, the first MAP_UNIT_USED copied by the levels; the knock retards, the films, the term, the take, the chamber
 // and the trims' factor after them, which L2 alone writes (no copy: the plans at the bus level, the slow work's
 // task 1 and the log's frame read them as they are).
@@ -91,6 +91,8 @@ static constexpr uint32_t MAP_UNIT_CHAMBER = 0x97;     // format 28: the chamber
                                                        //   FFFFh hot), L2's
 static constexpr uint32_t MAP_UNIT_TRIM = 0x98;        // format 30: the fuel trims' factor in use (8000h x 1.0;
                                                        //   0: none, before format 30), L2's, which task 1 takes
+static constexpr uint32_t MAP_UNIT_FAULTS = 0x99;      // format 31: the faults present now, a bit a check by its
+                                                       //   id (faults.h): 99h bits 0-15, 9Ah 16 on (L2's, the log's)
 
 // The own values, and L2's and L1's copies of them (pair.cpp's: taken with a level's copy of the RAM,
 // given back at its commit), so that a task reads them as fast as its RAM's bytes.

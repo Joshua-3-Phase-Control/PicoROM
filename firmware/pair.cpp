@@ -134,6 +134,13 @@
 // (own value 98h: 1.0 while start mode is on; past the closed loop's limits none leaner than 1.0) goes into the slow
 // factor (task 1, unit_tasks.cpp), beside Cal_FuelTrim. The store keeps them as its second kind, and thread mode
 // writes each kind as stored into a live copy in the image's P28 half, for the PC.
+//
+// Format 31 (DME-Sim's docs/Paired_Faults.md): the fault codes, which record only (faults.cpp). Once a tick (L2,
+// after the trims' work, before the frame) this level's view of its copy and of the levels' counts goes to the
+// checks; after the frame, a record made this tick takes its frame as the log's frame took it. The bus level
+// counts two things more for them: a turn's reference missing (where it sets RefMissing) and the engine stopped
+// by the heartbeat (the 8051's Pair_Lost: its Beat_Start, the beat moving again after it had stopped the engine).
+// The memory is the store's third kind, with its live copy after the knock maps'.
 
 #include "pair.h"
 
@@ -141,7 +148,9 @@
 
 #include <stdio.h>
 
+#include "faults.h"
 #include "map_unit.h"
+#include "snoop.h"
 #include "store.h"
 #include "str_util.h"
 #include "unit_ram.h"
@@ -170,6 +179,7 @@ static constexpr uint32_t FILL = 27;     // the format with the filling correcti
 static constexpr uint32_t CHAMBER = 28;  // the format with the chamber's warm-up in the films' maps (step 5)
 static constexpr uint32_t HOT_TRIMS = 29; // the format with the cut's trim and the warm-up by it too (step 6)
 static constexpr uint32_t TRIMS = 30;     // the format with the fuel trims learnt (docs/Paired_Fuel_Learning.md)
+static constexpr uint32_t FAULTS = 31;    // the format with the fault codes (docs/Paired_Faults.md)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -296,6 +306,9 @@ struct Pair
     uint32_t knock_mark, knock_at, half;
     // Format 24: the counts by the places' letters (A, C, D, B in firing order), not in firing order.
     bool lettered;
+    // Format 31's counts, for the fault codes: a turn's reference missing (RefMissing set again), and the engine
+    // stopped by the heartbeat (the 8051's Pair_Lost, from its Beat_Start).
+    volatile uint32_t ref_missing, beat_stops;
 };
 
 static Pair pair UNIT_DATA = {};
@@ -1604,14 +1617,14 @@ static __force_inline uint32_t own_byte(uint32_t address)
     return (address & 1 ? value : value >> 8) & 0xFF;
 }
 
-static void UNIT_CODE(make_frame)(uint32_t tick)
+static bool UNIT_CODE(make_frame)(uint32_t tick)
 {
     uint32_t every = at(control.stream_ticks);
     if (every == 0)
-        return;
+        return false;
     uint32_t count = map_unit_divide(tick, every);
     if (tick != count * every)
-        return;                                                         // not due
+        return false;                                                   // not due
     take_inputs(tick_work, nullptr);
     log_put(0xA5);
     log_put(0x5A);
@@ -1627,6 +1640,7 @@ static void UNIT_CODE(make_frame)(uint32_t tick)
         sum += b;
     }
     log_put(sum & 0xFF);
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -2685,14 +2699,125 @@ uint32_t STORE_CODE(trims_key)()
 }
 
 // A kind's live copy in the image's P28 half (format 30's table: the trims, then the knock maps' each pair's lower
-// if the knock work is on), its bytes as stored; null: none.
+// if the knock work is on; format 31's, the fault memory), its bytes as stored; null: none.
 volatile uint8_t *STORE_CODE(pair_live)(uint32_t kind)
 {
+    if (kind == STORE_FAULTS)
+        return faults_live() != 0 ? pair.rom + faults_live() : nullptr;
     if (!trims.on || trims.live_at == 0)
         return nullptr;
     if (kind == STORE_TRIMS)
         return pair.rom + trims.live_at;
     return kind == STORE_KNOCK && knock.on ? pair.rom + trims.live_at + TRIM_BYTES : nullptr;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// The fault codes (format 31; DME-Sim's docs/Paired_Faults.md, faults.cpp): this level's view for the checks, once
+// a tick on the tick's copy as its commit left it, and a new record's frame after the log's frame.
+
+static bool fault_on BANK2_DATA = false;
+
+// The counts as they stand (the bus level's taken as one).
+static void BANK2_CODE(fault_counts)(FaultCounts *c)
+{
+    __asm volatile("cpsid i" ::: "memory");
+    c->starts = knock.starts;
+    c->synced = pair.synced;
+    c->teeth = pair.teeth_seen;
+    c->references = pair.references;
+    c->turns = pair.turns;
+    c->missing = pair.ref_missing;
+    c->crank_faults = pair.faults;
+    c->beat_stops = pair.beat_stops;
+    __asm volatile("cpsie i" ::: "memory");
+    c->event_over = levels.event_over;
+    c->event_lost = levels.event_lost;
+    c->tick_lost = levels.tick_lost;
+    c->tick_over = levels.tick_over;
+    c->again = levels.again;
+    c->knock_faulty = knock.faulty;
+    c->trim_factor = trims.factor;
+    c->trim_steady = trims.steady;
+    c->results = snoop_codes(c->adc);
+}
+
+static void BANK2_CODE(fault_tick)(const uint8_t *bytes, uint32_t now)
+{
+    if (!fault_on)
+        return;
+    FaultCounts c;                                              // (each field set: no initialiser, no memset)
+    fault_counts(&c);
+    faults_tick(bytes, now, c);
+}
+
+// The frame of each record made this tick: Cal_FaultFrame's bytes as the log's frame takes them, from the copy
+// it took (taken here if it took none this tick).
+static void BANK2_CODE(fault_frames)(bool taken)
+{
+    uint32_t due = faults_frames_due();
+    if (due == 0)
+        return;
+    if (!taken)
+        take_inputs(tick_work, nullptr);
+    uint32_t list = faults_frame_list();
+    for (uint32_t slot = 0; due != 0; slot++, due >>= 1)
+    {
+        if (!(due & 1))
+            continue;
+        uint8_t *frame = faults_frame(slot);
+        for (uint32_t i = 0; i < 18; i++)
+        {
+            uint32_t address = at(list + i);
+            frame[i] = control.wide && address >= 0x80 ? own_byte(address) : copy_byte(tick_work, address);
+        }
+    }
+}
+
+// An 8051 bit of the copy as the checks take it: its byte's place << 8 | its mask.
+static __force_inline uint16_t bit_place(uint32_t address)
+{
+    return (0x20 + (address >> 3 & 0x0F)) << 8 | 1u << (address & 7);
+}
+
+// As the board starts: the faults' work on with format 31's table (u + 194 on, faults.cpp's; from u + 202
+// Cal_LamIntMax's, Cal_IsvCorrMax's and Cal_IsvCorrMin's addresses, IdleIntHi and O2MidBand), the whole tick, the
+// slow work and format 30's trims (ClosedLoop, In5, the closed loop's limits): where the checks look. Once: small.
+static void __attribute__((cold)) BANK2_CODE(fault_start)(uint32_t u)
+{
+    fault_on = false;
+    FaultCounts c;
+    fault_counts(&c);
+    if (at(MARK + 4) < FAULTS || !control.slowed || !pair.whole || !trims.on)
+    {
+        faults_start((const uint8_t *)pair.rom, u, nullptr, c);
+        return;
+    }
+    FaultPlaces s;                                              // (each field set: no initialiser, no memset)
+    s.trim_most = trims.most;
+    s.trim_steady_min = trims.steady_min;
+    s.rev_limit = word(pair.rev_limit);                         // (in rpm, format 18 on)
+    s.rpm_max = word(trims.rpm_max_at);
+    s.load_max = word(trims.load_max_at);
+    s.map_max = at(trims.map_max_at);
+    s.lam_most = at(word(u + 202));
+    uint32_t corr_max = at(word(u + 204)), corr_min = at(word(u + 206));
+    s.idle_most = (0x80 + (corr_max >> 1)) & 0xFF;              // Main_Idle's: CLR C; RRC A; ADD A,#80h
+    s.idle_least = (0x80 + (~(corr_min >> 1) & 0xFF)) & 0xFF;   //   and RRC A; CPL A; ADD A,#80h
+    s.start = bit_place(pair.start_bit);
+    s.idle = bit_place(control.idle_bit);
+    s.full = bit_place(control.full_bit);
+    s.closed = bit_place(trims.closed_bit);
+    s.mid_band = bit_place(at(u + 209));
+    s.fuel_cut = bit_place(pair.fuel_cut_bit);
+    s.boost_cut = bit_place(pair.boost_cut_bit);
+    s.pins = pair.pins_at & 0x7F;
+    s.coolant = control.coolant_at & 0x7F;
+    s.lam_int = control.lam_at & 0x7F;
+    s.idle_int = at(u + 208) & 0x7F;
+    s.in5 = trims.in5_at & 0x7F;
+    s.spare[0] = s.spare[1] = s.spare[2] = 0;
+    faults_start((const uint8_t *)pair.rom, u, &s, c);
+    fault_on = faults_live() != 0 || word(u + 194) != 0;
 }
 
 // Format 24: the knock retard of the firing whose fall 1 has count base (its place's, by its letter) off the
@@ -2818,7 +2943,8 @@ void UNIT_CODE(pair_set_own)(uint32_t input, uint32_t value, const uint8_t *ram)
 
 // pair_test's: L2's tick at once, its job, then L1's jobs (as L1 breaks in when the commit lets it go:
 // the pulse made again), then (format 24) the knock work, (format 25) the films, (format 27) the
-// manifold's take, (format 30) the trims, its frame, and the store's look for a changed kind.
+// manifold's take, (format 30) the trims, (format 31) the fault codes, its frame, a record's frame, and the
+// store's look for a changed kind.
 static void UNIT_CODE(tick_at_once)(const Ping &ping)
 {
     uint32_t tick;
@@ -2829,14 +2955,15 @@ static void UNIT_CODE(tick_at_once)(const Ping &ping)
     knock_tick();
     film_tick(tick_work, ping.at);
     trim_tick(tick_work);
-    make_frame(tick);
+    fault_tick(tick_work, ping.at);
+    fault_frames(make_frame(tick));
     store_tick();
 }
 
 // L2's interrupt: the next ping's tick, then (format 24) the knock work once, (format 25) the films,
-// (format 27) the manifold's take, (format 30) the trims, its frame, then the store's look for a changed
-// kind (docs/Paired_Fuel_Learning.md), which waits for the next tick when this one's job ran again (those are
-// L2's longest; the store's work can wait); the next one pended again.
+// (format 27) the manifold's take, (format 30) the trims, (format 31) the fault codes, its frame and a record's
+// frame, then the store's look for a changed kind (docs/Paired_Fuel_Learning.md), which waits for the next tick
+// when this one's job ran again (those are L2's longest; the store's work can wait); the next one pended again.
 void UNIT_CODE(pair_tick)()
 {
     if (pings.out == pings.in)
@@ -2850,7 +2977,8 @@ void UNIT_CODE(pair_tick)()
         knock_tick();
         film_tick(tick_work, ping.at);
         trim_tick(tick_work);
-        make_frame(tick);
+        fault_tick(tick_work, ping.at);
+        fault_frames(make_frame(tick));
         if (levels.again == again)
             store_tick();
         uint32_t span = now_us() - ping.at;
@@ -3303,7 +3431,10 @@ static void UNIT_CODE(tooth)(uint32_t now)
             if (pair.firing == 0)                               //   Main_Firing: RefTurn, else RefMissing,
             {                                                   //   kept till the 8051's start)
                 if (pair.references == pair.ref_mark)
+                {
                     own_bit(pair.missing_bit, true);
+                    pair.ref_missing = pair.ref_missing + 1;    // (format 31: counted, for 1151)
+                }
                 pair.ref_mark = pair.references;
             }
         }
@@ -3537,7 +3668,10 @@ void UNIT_CODE(pair_page_read)(uint32_t address, uint32_t now)
             write(pair.ping + 1, ++pair.beat & 0xFF);
     }
     else if (previous == pair.lost)
+    {
+        pair.beat_stops = pair.beat_stops + 1;                  // format 31: the heartbeat had stopped the engine
         unsync();
+    }
     else if (pair.whole && previous - pair.bits_mark < 16 && ((previous - pair.bits_mark) & 1) == 0)
         map_unit_ram_write(pair.pins_at, (previous - pair.bits_mark) >> 1);  // format 11: the 8051's pins
     else if (pair.knock_mark != 0 && previous == pair.knock_mark)
@@ -3832,6 +3966,7 @@ void UNIT_CODE(pair_start)(uint8_t *rom)
     knock_start(u);                                             // format 24: the knock retard (u + 141 on)
     film_start(u);                                              // format 25: the port films (u + 146 on)
     trim_start(u);                                              // format 30: the fuel trims (u + 169 on)
+    fault_start(u);                                             // format 31: the fault codes (u + 194 on)
     pair.on = reach;
 }
 
@@ -3892,6 +4027,8 @@ bool pair_get_parameter(const char *name, char *value, size_t value_size)
                  (unsigned)chamber.fired);
         return true;
     }
+    if (faults_get_parameter(name, value, value_size))         // format 31: pair_faults
+        return true;
     if (streq(name, "pair_trims"))                              // format 30: ticks worked, ticks it learnt, the
     {                                                           //   factor in use (8000h x 1.0), the idle factor's
         snprintf(value, value_size, "%u %u %u %d", (unsigned)trims.runs, (unsigned)trims.learnt, // 2^-15 off 1.0
@@ -4164,6 +4301,12 @@ uint32_t UNIT_CODE(pair_test)(uint32_t routine)
     else if (routine == 42)                                     // format 29: the warm-up blended at once, on the
     {                                                           //   tick's copy (in: the warm-up)
         out[0] = pair_chamber_warm_up(in[0], tick_work, map_unit_owns.own);
+    }
+    else if (routine == 44)                                     // format 31: L2's fault codes at once, on the
+    {                                                           //   tick's copy and the counts as they stand (in:
+        fault_tick(tick_work, in[0]);                           //   the ping's time); then a record's frame
+        fault_frames(false);
+        out[0] = faults_frames_due();
     }
     else if (routine == 43)                                     // format 30: L2's trims work at once, on the
     {                                                           //   tick's copy and own values as they stand

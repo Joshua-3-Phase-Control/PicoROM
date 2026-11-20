@@ -646,6 +646,36 @@ trims from lambda and keeps them in the store:
   of learning at idle and part load, records written: L2 93.6 us at most (89.7 off). Bank 3 63.8 KB (232 bytes
   free), bank 2's `.store_code` 13.7 KB.
 
+Format 31 (DME-Sim's docs/Paired_Faults.md, step 2, the owner's of 2026-11-16 and 2026-11-17) records fault codes;
+nothing acts on them:
+- **The checks** (faults.cpp, bank 2), at L2 once a tick after the trims' work and before the frame, on the tick's
+  copy: 19, each with a Porsche four-digit code from the image's table (0: none on this car), qualified by its
+  confirm and heal times (ticks; a heal of FFFFh, the next drive without it). A code is pending while it is seen
+  tick after tick, present (its record made) at its confirm time, gone once each of its causes has been tested
+  clean for its heal time; checks that keep their own time (1124, 1132 at rest and at idle, the crank's leaky
+  counts, the events) confirm when it is up. The sensors' look at the snoop's codes (`snoop_codes`: each channel's
+  last result and the results so far) only while they are fresh: an input read in the last Cal_FaultRestTicks, or at
+  rest when the last read was at rest (the 8051's at power-up). The control's look at lambda's and the idle
+  control's bytes and bits and the trims' factor and steady count; the crank's and the P28's at the counts the
+  levels keep (L0 two more: a turn's reference missing, the heartbeat's stop at the 8051's Pair_Lost). The limits
+  (from Cal_FaultSettleTicks on) are taken into RAM at the start. The codes present now: own values 99h (codes 0 to
+  15) and 9Ah.
+- **The memory** (`fault_memory`, bank 2's `.store`): 232 bytes, a head (the drives, the clears, the faults lost to a
+  full memory) and seven records of 32 (the code's place, its causes, present and this drive, its count, drives
+  since last seen, first and last seen, an 18-byte frame of Cal_FaultFrame's list at its first confirmation, from
+  the tick's copy and the own values). A new code takes an empty slot, else the oldest gone one; with every slot
+  present it is counted as lost.
+- **The store's third kind** (STORE_FAULTS): the memory as it stands, one part. A confirmation's record soon (at
+  once, 10 s after the kind's last record of the power-up), a heal and a drive's count by the minute's rule; its key
+  the CRC-32 of the layout's word, the codes (not their times) and the frame's list. Loaded at the start, each
+  record's code in its state again and none of them this drive's.
+- **The live copy:** the memory as loaded or stored, at the table's place in the image's P28 half (232 bytes).
+- **The table** adds the code table's, the limits', the frame list's and the live copy's addresses, Cal_LamIntMax's,
+  Cal_IsvCorrMax's and Cal_IsvCorrMin's, IdleIntHi's RAM address and O2MidBand's bit at u+194 to u+209.
+- **Its checks:** pair_test 44 (the checks at once), `pair_faults` for the PC (ticks worked, the faults present and
+  pending, confirmations, lost). **Its time** (DME-Sim's core): about 5.6 us a tick; L2's longest with every check running 102.8 us on the 951 (96.7 with them off) and 100.1 on the 944 (94.4), over its bound of 100 us: the owner's choice (skipping the checks on a tick whose job ran again, as the store's work waits, measured 96.7 and 94.3). Bank 3
+  65,432 bytes (104 free), bank 2's `.store_code` 23.2 KB.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
@@ -675,7 +705,7 @@ trims from lambda and keeps them in the store:
   last word the commit, programmed to 0 once the record's program has ended). Its code and data are
   in bank 2 beside what it keeps (`.store_code`, copied by map_unit_init; bank 3 has no room). Its
   kinds: format 24's knock maps, each pair's lower, a byte a point; format 30's fuel trims, a word a
-  point. L2 looks once a second at a part of each kind (its parts in turn, one look a tick) that
+  point; format 31's fault memory as it stands (a confirmation's record soon, 10 s after its last). L2 looks once a second at a part of each kind (its parts in turn, one look a tick) that
   changed since its record (a minute at least between a kind's records), copies the kind a part a
   tick and posts it; thread mode (map_unit_update) programs it and reads it back, then the commit,
   with only USB's, the comms window's and the SDK's timer's interrupts held off by their enable bits
@@ -720,14 +750,15 @@ trims from lambda and keeps them in the store:
 | map_stack      |                   | how much of the main stack has never been used            |
 | store          |                   | records, erases, faults, the next sequence, kinds loaded  |
 | store_flash    |                   | the flash's JEDEC ID, the longest program and erase (us)  |
-| store_clear    | knock, trims, all | the kinds asked to clear and not yet cleared (or none)    |
+| store_clear    | a kind, or all    | the kinds asked to clear and not yet cleared (or none)    |
 | store_bench    | n (1 to 1000)     | running, then cycles, faults, erase most, mean, program's |
 | store_flush    | n,way (0 to 2)    | flushes done, the way, cycles most and mean               |
 | store_irqs     |                   | enabled interrupts, those with flash handlers, SysTick's  |
 
 store_clear's kinds are cleared at L2's next tick, the engine running or not, each with a neutral record
-written at once: knock the knock maps, trims (format 30) the fuel trims, all both. Its answer is the
-words of the kinds still to clear ("knock", "trims", "knock trims") or "none". store_bench erases the
+written at once: knock the knock maps, trims (format 30) the fuel trims, faults (format 31) the fault
+memory (empty but its counts, the clears one more), all every kind. Its answer is the words of the
+kinds still to clear ("knock", "trims", "faults", in that order) or "none". store_bench erases the
 sector below the store's (and checks it blank), then programs its 16 pages (each read back), n times, an
 operation a pass of the main loop after the store's own work, then erases it once more; its times are in
 us. store_flush, a diagnostic, flushes the XIP cache alone: way 0 as the ROM's flush (FLUSH read back),

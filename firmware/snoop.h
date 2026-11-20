@@ -23,6 +23,10 @@ void snoop_page_read(uint32_t address);
 uint32_t snoop_result(uint32_t channel, uint32_t back);
 uint32_t snoop_results(uint32_t channel);
 
+// Format 31 (pair.cpp's fault checks): each channel's last result, the eight of them, into out; the results
+// so far, every channel's (a count that moves as the 8051 reads any input).
+uint32_t snoop_codes(uint8_t *out);
+
 // The 8051 read the board since the last call (the activity LED).
 bool snoop_activity();
 

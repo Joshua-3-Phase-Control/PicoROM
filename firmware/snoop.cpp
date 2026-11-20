@@ -160,6 +160,19 @@ uint32_t UNIT_CODE(snoop_results)(uint32_t channel)
     return snoop.adc_count[channel & 7];
 }
 
+uint32_t UNIT_CODE(snoop_codes)(uint8_t *out)
+{
+    uint32_t results = 0;
+#pragma GCC unroll 1
+#pragma GCC novector
+    for (uint32_t i = 0; i < 8; i++)                            // (not unrolled: the bank has little room)
+    {
+        out[i] = snoop.adc[i];
+        results += snoop.adc_count[i];
+    }
+    return results;
+}
+
 void UNIT_CODE(snoop_start)(const uint8_t *rom)
 {
     snoop.rom = rom;

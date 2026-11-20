@@ -16,6 +16,7 @@
 // The store's kinds (a record's first byte).
 static constexpr uint32_t STORE_KNOCK = 1; // format 24's knock maps: each pair's lower, a byte a point
 static constexpr uint32_t STORE_TRIMS = 2; // format 30's fuel trims: the map's 64 points and the idle factor, a word each
+static constexpr uint32_t STORE_FAULTS = 3; // format 31's fault memory: its head and its seven records (faults.h)
 
 // The board's start, from map_unit_init (flash code: the board's alone): the flash's JEDEC ID.
 void store_board_start();
@@ -28,6 +29,13 @@ void store_start();
 // last record (at most once a minute) posted for thread mode.
 void store_tick();
 
+// L2's (format 31, a fault confirmed): the kind posted at L2's next look once 10 s have passed since its last
+// record, the minute's rule aside.
+void store_soon(uint32_t kind);
+
+// The pages read back wrong (the store's count; format 31's code 1163).
+uint32_t store_faults();
+
 // Thread mode (map_unit_update): a posted record programmed, or the next sector erased ahead.
 void store_update();
 
@@ -38,8 +46,8 @@ void store_bench_update();
 // The CRC-32 (reflected, polynomial EDB88320h) of one more byte.
 uint32_t store_crc(uint32_t crc, uint32_t byte);
 
-// The PC's clear of kinds (bit k: kind k), which L2 does (the knock maps once the engine has stopped),
-// and the kinds asked for and not yet cleared.
+// The PC's clear of kinds (bit k: kind k), which L2 does at its next tick, and the kinds asked for and not
+// yet cleared.
 void store_ask_clear(uint32_t kinds);
 uint32_t store_clears_pending();
 
