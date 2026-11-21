@@ -426,6 +426,7 @@ struct FilmChamber
     uint32_t weight;         // 12: the blend's weight at the last tick (1/16384)
     // The table's.
     bool on, trims;          // format 28's blend; format 29's (the cut's trim, the warm-up)
+    bool shared;             // the four soaked maps on one pair of axes too: their blends at once
     uint32_t hot_ids[4];     // the hot chamber's maps: X open, X rest, the strip, the evaporation
     uint32_t share_at;       // Cal_ChamberShare's address
     uint32_t fall_id, kept_id; // format 29: Film_TrimFall_Hot's id, Fuel_WarmUpKept's
@@ -1582,12 +1583,6 @@ struct Log
 
 static Log pair_log UNIT_DATA = {};
 
-static __force_inline void log_put(uint32_t b)
-{
-    pair_log.ring[pair_log.written & (LOG_RING - 1)] = b;
-    pair_log.written = pair_log.written + 1;
-}
-
 uint32_t UNIT_CODE(pair_log_read)(uint32_t *from, uint8_t *bytes, uint32_t most)
 {
     uint32_t written = pair_log.written, n = 0;
@@ -1617,7 +1612,29 @@ static __force_inline uint32_t own_byte(uint32_t address)
     return (address & 1 ? value : value >> 8) & 0xFF;
 }
 
-static bool UNIT_CODE(make_frame)(uint32_t tick)
+// A frame's byte into the ring, then the count of all written one on: the frame keeps the count (L2 alone
+// writes the log) and stores it after each byte, so each byte is the reader's as soon as it is put.
+static __force_inline void frame_put(uint8_t *ring, uint32_t &written, uint32_t b)
+{
+    ring[written & (LOG_RING - 1)] = b;
+    written = written + 1;
+    pair_log.written = written;
+}
+
+// A byte the log's list names: from owns_from (format 18's 80h; none past FEh) an own value's as own_byte
+// takes it (an even address its high byte), else the copy's.
+static __force_inline uint32_t frame_byte(uint32_t address, uint32_t owns_from, const uint8_t *copy,
+                                          const uint32_t *own)
+{
+    if (address < owns_from)
+        return copy[address & 0x7F];
+    return (uint8_t)(own[(address - 0x80) >> 1 & (MAP_UNIT_OWNS - 1)] >> (~address & 1) * 8);
+}
+
+// (Quicker, DME-Sim's docs/Paired_Levels.md, L2's room: in bank 2 with L2's other work; the image, the list,
+// the copies and the log's count in registers through the frame; the bytes, their order and the count's
+// stores as before.)
+static bool BANK2_CODE(make_frame)(uint32_t tick)
 {
     uint32_t every = at(control.stream_ticks);
     if (every == 0)
@@ -1626,20 +1643,25 @@ static bool UNIT_CODE(make_frame)(uint32_t tick)
     if (tick != count * every)
         return false;                                                   // not due
     take_inputs(tick_work, nullptr);
-    log_put(0xA5);
-    log_put(0x5A);
-    log_put(count);
-    uint32_t sum = count;
+    const volatile uint8_t *rom = pair.rom;
+    const uint8_t *copy = tick_work;
+    const uint32_t *own = map_unit_owns.own;
+    uint8_t *ring = pair_log.ring;
+    uint32_t written = pair_log.written, list = control.stream_list, sum = count;
+    uint32_t owns_from = control.wide ? 0x80 : 0x100;                   // (format 18: the own values from 80h)
+    frame_put(ring, written, 0xA5);
+    frame_put(ring, written, 0x5A);
+    frame_put(ring, written, count);
     for (uint32_t i = 0; i < 0x80; i++)
     {
-        uint32_t address = at(control.stream_list + i);
+        uint32_t address = rom[(list + i) & 0xFFFF];
         if (address == 0xFF)
             break;
-        uint32_t b = control.wide && address >= 0x80 ? own_byte(address) : copy_byte(tick_work, address);
-        log_put(b);
+        uint32_t b = frame_byte(address, owns_from, copy, own);
+        frame_put(ring, written, b);
         sum += b;
     }
-    log_put(sum & 0xFF);
+    frame_put(ring, written, sum & 0xFF);
     return true;
 }
 
@@ -2179,6 +2201,14 @@ void BANK2_CODE(film_values)(const uint8_t *bytes, uint32_t *v)
     bool fired = pair.synced && !ram_bit(pair.start_bit) && !over_limit() && !ram_bit(pair.fuel_cut_bit)
                  && !ram_bit(pair.boost_cut_bit);
     int32_t w = (int32_t)chamber_move(fired);
+    if (chamber.shared)                                         // (quicker: the places found once for all four;
+    {                                                           //   DME-Sim's docs/Paired_Levels.md, L2's room)
+        uint32_t soaked[4] = {film.x_open_id, film.x_rest_id, film.strip_id, film.evap_id};
+        map_unit_blend_four(soaked, chamber.hot_ids, w, bytes, own, v);
+        for (uint32_t k = 0; k < 4; k++)
+            v[k] &= 0xFFFF;
+        return;
+    }
     v[0] = map_unit_blend(film.x_open_id, chamber.hot_ids[0], w, bytes, own) & 0xFFFF;
     v[1] = map_unit_blend(film.x_rest_id, chamber.hot_ids[1], w, bytes, own) & 0xFFFF;
     v[2] = map_unit_blend(film.strip_id, chamber.hot_ids[2], w, bytes, own) & 0xFFFF;
@@ -2287,7 +2317,7 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
         film.film[p] = film.waits[p] = 0;
     fill.on = false;                                            // format 27: none taken, no tick yet
     fill.take = fill.ticks = fill.reads[0] = fill.reads[1] = 0;
-    chamber.on = chamber.trims = false;                         // format 28: the chamber soaked
+    chamber.on = chamber.trims = chamber.shared = false;        // format 28: the chamber soaked
     chamber.warm = chamber.runs = chamber.fired = chamber.weight = 0;
     if (at(MARK + 4) < FILM || !control.mapped || !control.slowed || 2 * pair.firings != FILM_PLACES)
         return;
@@ -2328,6 +2358,9 @@ static void __attribute__((cold)) BANK2_CODE(film_start)(uint32_t u)
     }
     chamber.share_at = word(u + 165);
     chamber.on = alike && chamber.share_at != 0;
+    chamber.shared = chamber.on && map_unit_same_axes(soaked[0], soaked[1]) // (all eight maps on one pair of
+                     && map_unit_same_axes(soaked[0], soaked[2])            //   axes: film_values' blends at
+                     && map_unit_same_axes(soaked[0], soaked[3]);           //   once)
     if (!chamber.on || at(MARK + 4) < HOT_TRIMS)                // format 29 (u + 167 on): Film_TrimFall_Hot's
         return;                                                 //   id (on Film_TrimFall's axes) and
     chamber.fall_id = at(u + 167);                              //   Fuel_WarmUpKept's (one axis, words)

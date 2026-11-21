@@ -600,6 +600,36 @@ uint32_t BANK2_CODE(map_unit_blend)(uint32_t id, uint32_t other, int32_t w, cons
                             0xFFFF);
 }
 
+// A map's place in the image, by id.
+static __force_inline uint32_t map_of(uint32_t id)
+{
+    uint32_t entry = entry_of(id);
+    return at(entry) << 8 | at(entry + 1);
+}
+
+// Four of map_unit_blend's at once (film_values': the films' four maps and their hot twins, all on the same two
+// axes, as the board's start checked): the inputs, their places and the cells' offset found once from the
+// first map, then each pair's cells blended and interpolated as map_unit_blend does. The inputs are the tick's
+// copy and an own value only L2 writes, so one read of each is what each blend would read.
+void BANK2_CODE(map_unit_blend_four)(const uint32_t *ids, const uint32_t *others, int32_t w, const uint8_t *bytes,
+                                     const uint32_t *own, uint32_t *values)
+{
+    uint32_t cold = map_of(ids[0]), input = at(cold);
+    uint32_t first = input & OWN ? own[(input - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[input & 0x7F];
+    uint32_t after = wide_after(cold), next = at(after), columns = at(after + 1);
+    uint32_t second = next & OWN ? own[(next - OWN) & (MAP_UNIT_OWNS - 1)] & 0xFFFF : bytes[next & 0x7F];
+    Wide row = wide_place(cold, first), column = wide_place(after, second);
+    uint32_t cells = (wide_after(after) - cold + 2 * row.index * columns) & 0xFFFF; // from each map's start
+    for (uint32_t k = 0; k < 4; k++)
+    {
+        uint32_t c = map_of(ids[k]), h = map_of(others[k]);
+        uint32_t here = blend_row(c + cells, h + cells, column, w);
+        values[k] = row.width == 0 ? here
+                                   : wide_interpolate(here, blend_row(c + cells + 2 * columns, h + cells + 2 * columns,
+                                                                      column, w), row, 0xFFFF);
+    }
+}
+
 // Format 28: whether maps id and other can be blended: both two axes and unsigned words, their axes' bytes alike.
 bool __attribute__((cold)) BANK2_CODE(map_unit_same_axes)(uint32_t id, uint32_t other)
 {

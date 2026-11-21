@@ -124,6 +124,11 @@ uint32_t unit_map_value(uint32_t id, const uint8_t *ram, const uint32_t *own);
 uint32_t map_unit_blend(uint32_t id, uint32_t other, int32_t w, const uint8_t *ram, const uint32_t *own);
 bool map_unit_same_axes(uint32_t id, uint32_t other);
 
+// Four blends as map_unit_blend's (ids[k] toward others[k]), all eight maps on the same two axes: the inputs
+// and their places found once (DME-Sim's docs/Paired_Levels.md, L2's room); values[k] as map_unit_blend's.
+void map_unit_blend_four(const uint32_t *ids, const uint32_t *others, int32_t w, const uint8_t *ram,
+                         const uint32_t *own, uint32_t *values);
+
 // Format 18: Idle_Error with the target in rpm (pair_test's, for DME-Sim's twin).
 uint32_t unit_fine_error_rpm(uint32_t target, uint32_t p, uint32_t k);
 

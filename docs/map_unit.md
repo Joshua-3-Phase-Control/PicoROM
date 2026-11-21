@@ -697,6 +697,26 @@ Format 32 (DME-Sim's docs/Paired_Faults.md, section 3, the faults' actions' firs
 - **Its time** (DME-Sim's core): bank 2's `.store_code` 72 bytes more (23,240: the count 4, the settle 68), bank 3 as
   before; L2's longest as before (96.7 us on the 951, 94.3 on the 944).
 
+L2's room, on format 32 (DME-Sim's docs/Paired_Levels.md; the owner's choice of 2026-11-21, quicker code, no result
+changed): at a part load after a start at 20 C, L2's longest was a tick whose job ran again with the log's frame due,
+103.1 us on the 951 and 104.5 on the 944, past its 100 us.
+- **The films' four blends at once** (`map_unit_blend_four`): when the board's start finds the four soaked maps on
+  one pair of axes with their hot twins (`chamber.shared`, as format 32's tables have them), `film_values` finds the
+  inputs, their places and the cells' offset once, then blends and interpolates each pair as `map_unit_blend` does.
+  The inputs are the tick's copy and the air of a firing, which only L2 writes, so one read is each blend's read.
+  Else the four blends as before.
+- **The frame's loop:** the image, the list, the copy, the own values and the log's count held in registers through
+  the frame, the count stored after each byte as before; `make_frame` in bank 2 with L2's other work.
+- **Its time** (DME-Sim's core): the films about 1,100 cycles less a tick, a frame due 1,000 to 1,300 less. L2's
+  longest at that part load 94.2 us on the 951 and 96.4 on the 944, warm 88.6 and 86.9 (96.7 and 94.3). Bank 3
+  65,136 bytes (400 free: `make_frame` moved), bank 2's `.store_code` 25,804. Each part's arithmetic as before (the
+  film work against DME-Sim's twin at random points; a start at 20 C and its part load on the 944, sparks,
+  injections, cycles and all 145,854 log bytes as on format 32's bank). What moved is when L2 writes and reads what
+  another level reads or writes: the films' term and gains and the trims' factor some 4 us earlier, the manifold's
+  take reading the MAP's reads earlier, a frame's copy taken earlier. So beside format 32's bank a drive is the same
+  until such a read falls in between (DME-Sim: the 951 at a part load after 102 s, the 944 warm after 41 s, an
+  injection 0.1% and 0.5% apart; warm on the 951 one frame's byte, the car the same).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
