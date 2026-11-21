@@ -651,9 +651,9 @@ nothing acts on them:
 - **The checks** (faults.cpp, bank 2), at L2 once a tick after the trims' work and before the frame, on the tick's
   copy: 19, each with a Porsche four-digit code from the image's table (0: none on this car), qualified by its
   confirm and heal times (ticks; a heal of FFFFh, the next drive without it). A code is pending while it is seen
-  tick after tick, present (its record made) at its confirm time, gone once each of its causes has been tested
-  clean for its heal time; checks that keep their own time (1124, 1132 at rest and at idle, the crank's leaky
-  counts, the events) confirm when it is up. The sensors' look at the snoop's codes (`snoop_codes`: each channel's
+  (tick after tick; counted up and down since the actions' first step, below), present (its record made) at its
+  confirm time, gone once each of its causes has been tested clean for its heal time; checks that keep their own
+  time (1124, 1132 at rest and at idle, the crank's leaky counts, the events) confirm when it is up. The sensors' look at the snoop's codes (`snoop_codes`: each channel's
   last result and the results so far) only while they are fresh: an input read in the last Cal_FaultRestTicks, or at
   rest when the last read was at rest (the 8051's at power-up). The control's look at lambda's and the idle
   control's bytes and bits and the trims' factor and steady count; the crank's and the P28's at the counts the
@@ -677,6 +677,15 @@ nothing acts on them:
   (the owner's choice of 2026-11-19: those are L2's longest ticks). **Its time** (DME-Sim's core): about 5.6 us a
   tick; L2's longest 96.7 us on the 951 and 94.3 on the 944 (102.8 and 100.1 with the checks on every tick), L1
   28.5 us. Bank 3 65,440 bytes (96 free), bank 2's `.store_code` 23.2 KB.
+
+The actions' first step (DME-Sim's docs/Paired_Faults.md, section 3: the owner's fifth round of 2026-11-20 and 21)
+debounces the codes. A code confirmed by its confirm time counts its ticks up and down in its timer (no byte more):
+one up a tick seen, one down a tick that tests each of its causes clean, held by a tick that leaves one untested;
+pending above 0, absent again at 0, present at its confirm time's count. So a fault seen in more than half the ticks
+that test it confirms, and a glitch leaves nothing; counted in a row (format 31's first rule), a fault that came and
+went faster than its confirm time was never recorded. The checks that keep their own time, the heal, and a pending
+code from nothing at the 8051's start, as before; the image's table unchanged. **Its time** (DME-Sim's core):
+`qualify` 4 bytes more; L2's longest as before (96.7 us on the 951, 94.3 on the 944).
 
 ## How it works
 

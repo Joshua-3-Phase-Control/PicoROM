@@ -1,14 +1,17 @@
-// The fault codes (faults.h; DME-Sim's docs/Paired_Faults.md, format 31): the first build records only.
+// The fault codes (faults.h; DME-Sim's docs/Paired_Faults.md, format 31): the first build records only; the actions'
+// first step (format 32) debounces them.
 //
 // Once a tick (L2, after the trims' work, before the frame) each check looks at what the P28 has already: the
 // snoop's ADC codes (the NTCs before their linearisation), lambda's and the idle control's state in the tick's
 // copy, and the counts L0, L1 and L2 keep, each its one writer's (this reads their change since the last tick).
 // A check tells, cause by cause (its bits, the code's own), what it tested this tick and what it saw. Then each
-// code seen or not absent is qualified: absent; pending (seen tick after tick: its confirm time runs; a tick not
-// seen leaves nothing); present (confirmed: its record written); gone (tested clean for its heal time: the record
-// stays, read as 12xx; a cause not testable now holds it). Checks with times of their own (1124 on one side, 1132
-// at rest and at idle, the crank's leaky counts, the events) qualify themselves and are confirmed at once; a heal of
-// FFFFh ticks is the next drive without it (a drive: the engine run 30 s after the 8051's start).
+// code seen or not absent is qualified: absent; pending (an up/down count of its ticks above 0: one up a tick
+// seen, one down a tick tested clean, held by a tick not tested; so a fault seen in more than half the ticks that
+// test it confirms, and a glitch leaves nothing); present (confirmed at its confirm time's count: its record
+// written); gone (tested clean for its heal time: the record stays, read as 12xx; a cause not testable now holds
+// it). Checks with times of their own (1124 on one side, 1132 at rest and at idle, the crank's leaky counts, the
+// events) qualify themselves and are confirmed at once; a heal of FFFFh ticks is the next drive without it (a
+// drive: the engine run 30 s after the 8051's start).
 //
 // The memory, the store's third kind (232 bytes): a head (the drives counted, 32 bits; the clears, 16; the
 // faults lost to a full memory, 8; a spare), then seven records of 32 bytes: the code (its place in the table
@@ -94,7 +97,7 @@ struct Check
     uint8_t cause;      // the causes seen while pending or present
     uint8_t this_drive; // seen since the 8051's start
     uint8_t slot;       // its record's slot (NONE: none)
-    uint16_t timer;     // ticks: pending, toward its confirm time; present, toward its heal time
+    uint16_t timer;     // ticks: pending, its up/down count toward its confirm time; present, toward its heal time
     uint16_t code;      // its code (BCD; 0: none on this car)
     uint16_t confirm, heal; // ticks (a heal of FFFFh: the next drive without it)
 };
@@ -634,9 +637,11 @@ static void BANK2_CODE(events)(const Now &v, Found &found, bool turning, uint32_
     }
 }
 
-// Each code seen, pending or present qualified (the others stay absent or gone): seen, toward its confirm time
-// (at once if it qualified itself), present seen again; pending and not seen, nothing; present and every cause
-// it has tested clean, toward its heal time (FFFFh: at the next drive).
+// Each code seen, pending or present qualified (the others stay absent or gone). Not present, an up/down count of
+// its ticks (its timer; the actions' first step, format 32): one up a tick seen, one down a tick that tests every
+// cause it has clean, held by a tick that leaves one untested; pending above 0, absent again at 0 (nothing left),
+// confirmed at its confirm time's count, or at once if it qualified itself. Present: seen again, its heal time from
+// nothing; every cause it has tested clean, toward its heal time (FFFFh: at the next drive).
 static void BANK2_CODE(qualify)(const Found &found)
 {
     Faults &f = fault_state;
@@ -672,21 +677,29 @@ static void BANK2_CODE(qualify)(const Found &found)
             c.timer = up(c.timer, 0xFFFF);
             if ((found.at_once >> id & 1) || c.timer >= c.confirm)
                 confirm(id);
+            continue;
         }
-        else if (c.state == PENDING)
-        {
-            set_state(id, ABSENT);                              // gone before its time: nothing
-            c.cause = 0;
-        }
-        else if (c.state == CONFIRMED && c.heal != BY_DRIVE)
-        {
-            uint32_t tested = tested_of(found, id);
-            if (tested != 0 && (c.cause & ~tested) == 0)        // every cause it has, tested clean
+        if (c.state != PENDING && (c.state != CONFIRMED || c.heal == BY_DRIVE))
+            continue;
+        uint32_t tested = tested_of(found, id);
+        if (tested == 0 || (c.cause & ~tested) != 0)            // a cause it has untested: held
+            continue;
+        if (c.state == PENDING)                                 // every cause it has, tested clean: one down, to
+        {                                                       //   nothing at 0
+            uint32_t count = c.timer;
+            c.timer = count - 1;
+            if (count <= 1)
             {
-                c.timer = up(c.timer, 0xFFFF);
-                if (c.timer >= c.heal)
-                    heal(id);
+                set_state(id, ABSENT);
+                c.cause = 0;
+                c.timer = 0;
             }
+        }
+        else
+        {
+            c.timer = up(c.timer, 0xFFFF);                      // present: toward its heal time
+            if (c.timer >= c.heal)
+                heal(id);
         }
     }
 }
