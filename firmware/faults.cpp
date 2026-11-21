@@ -1,5 +1,6 @@
 // The fault codes (faults.h; DME-Sim's docs/Paired_Faults.md, format 31): the first build records only; the actions'
-// first step (format 32) debounces them.
+// first step (format 32) debounces them, and 1113 judges the full-load signal closed once it has stood
+// Cal_FaultFullTicks (at a snap open the air of a firing passes its limit a tick or two after the switch).
 //
 // Once a tick (L2, after the trims' work, before the frame) each check looks at what the P28 has already: the
 // snoop's ADC codes (the NTCs before their linearisation), lambda's and the idle control's state in the tick's
@@ -33,7 +34,8 @@
 #include "unit_ram.h"
 
 static constexpr uint32_t MARK = 0x2000;
-static constexpr uint32_t FAULTS_FORMAT = 31;
+static constexpr uint32_t FAULTS_FORMAT = 31;              // the table's first (and the memory's layout's)
+static constexpr uint32_t FULL_SETTLE = 32;                 // the format with Cal_FaultFullTicks after the limits
 static constexpr uint32_t RECORDS = 7, RECORD = 32, HEAD = 8, FRAME = 18;
 static constexpr uint32_t BYTES = HEAD + RECORDS * RECORD;  // 232: the store's record
 static constexpr uint32_t LAYOUT = FAULTS_FORMAT << 24 | RECORDS << 16 | RECORD << 8 | FRAME;
@@ -77,15 +79,15 @@ enum : uint8_t
     C_FIFTH = 16,     // 1124 on one side
 };
 
-// The limits as the image has them (from Cal_FaultSettleTicks: its bytes, then its words high byte first), taken
-// at the start into RAM: a load each.
+// The limits as the image has them (from Cal_FaultSettleTicks: its bytes, then its words high byte first; format
+// 32 a word more, Cal_FaultFullTicks, else 0), taken at the start into RAM: a load each.
 struct Limits
 {
     uint8_t settle, supply_low, supply_high, ntc_open, ntc_short, afm_low, afm_high, map_low, map_high;
     uint8_t map_rest_low, map_rest_high, map_idle, warm, in6[4], in6_band;
     uint16_t afm_rpm, switch_rpm, idle_air, full_air, idle_off, idle_flow, idle_ticks, map_rest_ticks;
     uint16_t map_idle_ticks, o2_stuck_ticks, no_start_ticks, rest_ticks, event_add, event_level, clean_turns;
-    uint16_t again_add, again_level, restart_ms, drive_ticks;
+    uint16_t again_add, again_level, restart_ms, drive_ticks, full_ticks;
 };
 
 static constexpr uint32_t LIMIT_BYTES = 18, LIMIT_WORDS = 19;
@@ -127,6 +129,7 @@ struct Faults
     bool read_at_rest;             // that read with no tooth since the tick before it (Power_Up_Inputs')
     uint32_t no_reference;         // ticks cranking with no reference (1151's no-start)
     uint32_t idle_ticks;           // ticks the idle contact has been closed, running (1122)
+    uint32_t full_ticks;           // ticks the full-load signal has been closed, running (1113)
     uint32_t map_rest, map_idle;   // ticks off at rest, over at a warm idle (1132)
     uint32_t one_side, mid_band;   // ticks the oxygen sensor has stayed on one side, in its middle band (1124)
     uint32_t ref_leak, ref_clean, crank_leak, crank_clean; // 1151's and 1153's leaky counts and clean turns
@@ -489,8 +492,9 @@ static void BANK2_CODE(sensors)(const Now &v, Found &found)
         if (between(adc[6]))
             see(found, FAULT_IDLE_SW, C_OTHER);
     }
-    if (running && v.speed > l.switch_rpm && v.air < l.full_air && !v.idle) // 1113 full load: closed with the air
-    {                                                                     //   under a limit
+    if (running && v.speed > l.switch_rpm && v.air < l.full_air && !v.idle // 1113 full load: closed with the air
+        && (!v.full || f.full_ticks >= l.full_ticks))                     //   under a limit, once it has stood its
+    {                                                                     //   settle (untested till then)
         test(found, FAULT_FULL_SW, C_HIGH);
         if (v.full)
             see(found, FAULT_FULL_SW, C_HIGH);
@@ -750,6 +754,7 @@ void BANK2_CODE(faults_tick)(const uint8_t *bytes, uint32_t now, const FaultCoun
     bool turning = f.no_tooth == 0;
     v.rest = f.no_tooth >= l.rest_ticks;
     v.running = v.synced && !v.starting;
+    f.full_ticks = v.running && v.full ? up(f.full_ticks, 0xFFFF) : 0;
     v.cranking = v.starting && turning;
     v.warm = bytes[src.coolant] >= l.warm;
     v.rest_read = f.read_at_rest && teeth == f.read_teeth;
@@ -807,7 +812,8 @@ uint32_t BANK2_CODE(faults_live)()
 // ---- As the board starts ----
 
 // The memory empty, every code absent; the work on with format 31's table (u + 194 on: the code table's, the
-// limits', the frame's list's and the live copy's addresses): each check's entry, the limits taken. Once: small.
+// limits', the frame's list's and the live copy's addresses): each check's entry, the limits taken (format 32's
+// Cal_FaultFullTicks after them). Once: small.
 void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t u, const FaultPlaces *places,
                                                     const FaultCounts &counts)
 {
@@ -817,7 +823,7 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
     f.fitted = 0;
     f.runs = f.present = f.confirmed = f.pending = 0;
     f.since_start = f.drive_ticks = f.seconds = f.sub = 0;
-    f.no_tooth = f.no_reference = f.idle_ticks = f.map_rest = f.map_idle = f.one_side = f.mid_band = 0;
+    f.no_tooth = f.no_reference = f.idle_ticks = f.full_ticks = f.map_rest = f.map_idle = f.one_side = f.mid_band = 0;
     f.ref_leak = f.ref_clean = f.crank_leak = f.crank_clean = f.again_leak = 0;
     f.was_rich = f.was_running = f.no_start = f.no_start_drive = f.dirty = false;
     f.frames_due = 0;
@@ -871,10 +877,11 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
     uint16_t *words = &limits.afm_rpm;
     for (uint32_t i = 0; i < LIMIT_WORDS; i++)
         words[i] = word(limits_at + LIMIT_BYTES + 2 * i);
+    limits.full_ticks = at(MARK + 4) >= FULL_SETTLE ? word(limits_at + LIMIT_BYTES + 2 * LIMIT_WORDS) : 0;
     f.on = true;
 }
 
-static_assert(sizeof(Limits) == 18 + 2 * 19, "Limits: Cal_FaultSettleTicks' 18 bytes, then 19 words");
+static_assert(sizeof(Limits) == 18 + 2 * 20, "Limits: Cal_FaultSettleTicks' 18 bytes, 19 words, format 32's word");
 static_assert(sizeof(FaultPlaces) % 4 == 0, "FaultPlaces: copied a word at a time");
 
 // ---- The store's third kind (store.h) ----

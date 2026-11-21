@@ -678,14 +678,24 @@ nothing acts on them:
   tick; L2's longest 96.7 us on the 951 and 94.3 on the 944 (102.8 and 100.1 with the checks on every tick), L1
   28.5 us. Bank 3 65,440 bytes (96 free), bank 2's `.store_code` 23.2 KB.
 
-The actions' first step (DME-Sim's docs/Paired_Faults.md, section 3: the owner's fifth round of 2026-11-20 and 21)
-debounces the codes. A code confirmed by its confirm time counts its ticks up and down in its timer (no byte more):
-one up a tick seen, one down a tick that tests each of its causes clean, held by a tick that leaves one untested;
-pending above 0, absent again at 0, present at its confirm time's count. So a fault seen in more than half the ticks
-that test it confirms, and a glitch leaves nothing; counted in a row (format 31's first rule), a fault that came and
-went faster than its confirm time was never recorded. The checks that keep their own time, the heal, and a pending
-code from nothing at the 8051's start, as before; the image's table unchanged. **Its time** (DME-Sim's core):
-`qualify` 4 bytes more; L2's longest as before (96.7 us on the 951, 94.3 on the 944).
+Format 32 (DME-Sim's docs/Paired_Faults.md, section 3, the faults' actions' first step: the owner's fifth round of
+2026-11-20 and 21) debounces the codes:
+- **The count:** a code confirmed by its confirm time counts its ticks up and down in its timer (no byte more), for
+  every format's codes: one up a tick seen, one down a tick that tests each of its causes clean, held by a tick that
+  leaves one untested; pending above 0, absent again at 0, present at its confirm time's count. So a fault seen in
+  more than half the ticks that test it confirms, and a glitch leaves nothing; counted in a row (format 31's first
+  rule), a fault that came and went faster than its confirm time was never recorded. The checks that keep their own
+  time, the heal, and a pending code from nothing at the 8051's start, as before.
+- **1113's settle** (the owner's of 2026-11-21): the full-load signal closed is judged only once it has stood
+  Cal_FaultFullTicks (9 ticks, 0.1 s), the engine running; till then 1113 is untested and its count held. At a snap
+  open from a shut throttle the signal closes a tick or two before the air of a firing passes Cal_FaultFullAir, and
+  nothing on such a drive tests 1113 clean, so the count would climb snap after snap (DME-Sim: about 1.8 a snap on
+  the 951, a false 1113 after some 100 snaps).
+- **The table:** the limits a word longer, Cal_FaultFullTicks after Cal_FaultDriveTicks, read from a format 32 image
+  only (0 on format 31's: judged at once, as before); the map unit takes format 32. The memory's layout and key as
+  format 31's, so a stored memory is kept.
+- **Its time** (DME-Sim's core): bank 2's `.store_code` 68 bytes more (23,240), bank 3 as before; L2's longest
+  as before (96.7 us on the 951, 94.3 on the 944).
 
 ## How it works
 
