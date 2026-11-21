@@ -694,8 +694,8 @@ Format 32 (DME-Sim's docs/Paired_Faults.md, section 3, the faults' actions' firs
 - **The table:** the limits a word longer, Cal_FaultFullTicks after Cal_FaultDriveTicks, read from a format 32 image
   only (0 on format 31's: judged at once, as before); the map unit takes format 32. The memory's layout and key as
   format 31's, so a stored memory is kept.
-- **Its time** (DME-Sim's core): bank 2's `.store_code` 68 bytes more (23,240), bank 3 as before; L2's longest
-  as before (96.7 us on the 951, 94.3 on the 944).
+- **Its time** (DME-Sim's core): bank 2's `.store_code` 72 bytes more (23,240: the count 4, the settle 68), bank 3 as
+  before; L2's longest as before (96.7 us on the 951, 94.3 on the 944).
 
 ## How it works
 
