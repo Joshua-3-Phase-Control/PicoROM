@@ -729,7 +729,9 @@ trims. No byte of the image's table more: the format alone says so, and the map 
   task 16 (`lambda_run`, bank 3) takes as one more reason to open the loop in the next tick's job (LamInt x 1.0,
   ClosedLoop cleared). Each drive's start (the 8051's) and a clear of the codes close it again, so the check tests it
   again. The fuel-on limit (1123 lean) keeps the loop.
-- **Its time** (DME-Sim's core): bank 3 8 bytes more (65,144: 392 free), bank 2's `.store_code` 25,936 (132 more).
+- **Its time** (DME-Sim's core): bank 3 8 bytes more (65,144: 392 free), bank 2's `.store_code` 25,936 (132 more);
+  L2's longest as before (94.2 us on the 951, 96.3 on the 944 at the levels' cold part load), L1 28.5 us. The healthy
+  drives the same bit for bit as on format 32's bank (both cars, cold and warm: sparks, injections, cycles, the log).
 
 ## How it works
 
