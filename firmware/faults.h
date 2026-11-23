@@ -7,7 +7,9 @@
 // The fault codes (FEATURE_MAP_UNIT, format 31; DME-Sim's docs/Paired_Faults.md): 19 checks at L2 on what the
 // P28 has already, each confirmed when it has stood for its time and healed when gone for its time, Porsche's
 // four-digit codes (11xx present, 12xx once gone, with a cause), and a memory of 7 records kept as the store's
-// third kind. Records only: nothing acts on a fault. All in bank 2 (faults.cpp).
+// third kind. Format 31 records only; the actions come a format each from 32 (the note's section 3): 33 the trims'
+// rule (pair.cpp's trim_tick) and lambda's loop opened at 1123's fuel-off limit (task 16 reads fault_loop_open). All
+// in bank 2 (faults.cpp).
 #if defined(FEATURE_MAP_UNIT)
 
 // The checks the P28 knows, by id: the image's code table has an entry for each, in this order (its code 0
@@ -35,6 +37,20 @@ enum : uint32_t
     FAULT_STORE,      // 1163 the P28's store
     FAULT_CHECKS,
 };
+
+// Format 33 (the actions' second step: lambda and the trims): the format whose faults act on them, the codes under
+// which the trims learn nothing (1112, 1113, 1114, 1121, 1125) and those under which they learn only toward rich
+// (1123, 1124), a bit by id as the faults present now have them (own value 99h: ids 0 to 15).
+static constexpr uint32_t FAULTS_LAMBDA_FORMAT = 33;
+static constexpr uint32_t FAULTS_NO_LEARNING = 1u << FAULT_IDLE_SW | 1u << FAULT_FULL_SW | 1u << FAULT_COOLANT
+                                               | 1u << FAULT_AFM | 1u << FAULT_AIR_TEMP;
+static constexpr uint32_t FAULTS_RICH_LEARNING = 1u << FAULT_MIXTURE | 1u << FAULT_OXYGEN;
+
+// Format 33: lambda's loop held open this drive, its integrator having stood at 0 (the sensor reading rich) for
+// 1123's confirm time by an up/down count of its own (1123's fuel-off limit confirmed); closed again at each drive's
+// start (the 8051's) and at a clear, so that the check tests it again. L2's: faults_tick sets it, task 16 (lambda,
+// unit_tasks.cpp) reads it in the next tick's job. The fuel-on limit keeps the loop.
+extern volatile uint8_t fault_loop_open;
 
 // Where the checks look in the tick's copy and what the image gives them (pair.cpp's, as the board starts): each
 // bit its byte's place << 8 | its mask, each byte its place, the constants.

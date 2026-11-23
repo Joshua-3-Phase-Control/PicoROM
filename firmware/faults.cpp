@@ -1,6 +1,9 @@
 // The fault codes (faults.h; DME-Sim's docs/Paired_Faults.md, format 31): the first build records only; the actions'
 // first step (format 32) debounces them, and 1113 judges the full-load signal closed once it has stood
-// Cal_FaultFullTicks (at a snap open the air of a firing passes its limit a tick or two after the switch).
+// Cal_FaultFullTicks (at a snap open the air of a firing passes its limit a tick or two after the switch). The
+// second (format 33) acts on lambda and the trims: the trims learn by the faults present now (pair.cpp's
+// trim_tick), and lambda's loop is held open for the drive once its integrator has stood at 0, the sensor reading
+// rich, for 1123's confirm time (fault_loop_open, which task 16 reads).
 //
 // Once a tick (L2, after the trims' work, before the frame) each check looks at what the P28 has already: the
 // snoop's ADC codes (the NTCs before their linearisation), lambda's and the idle control's state in the tick's
@@ -36,6 +39,8 @@
 static constexpr uint32_t MARK = 0x2000;
 static constexpr uint32_t FAULTS_FORMAT = 31;              // the table's first (and the memory's layout's)
 static constexpr uint32_t FULL_SETTLE = 32;                 // the format with Cal_FaultFullTicks after the limits
+                                                            //   (33, faults.h's: the faults act on lambda and the
+                                                            //   trims)
 static constexpr uint32_t RECORDS = 7, RECORD = 32, HEAD = 8, FRAME = 18;
 static constexpr uint32_t BYTES = HEAD + RECORDS * RECORD;  // 232: the store's record
 static constexpr uint32_t LAYOUT = FAULTS_FORMAT << 24 | RECORDS << 16 | RECORD << 8 | FRAME;
@@ -114,8 +119,12 @@ struct Faults
     uint32_t since_start;          // 16: ticks since the 8051's start (to FFFFh)
     uint32_t drive_ticks;          // 20: ticks running since then (to Cal_FaultDriveTicks: the drive counted)
     uint32_t seconds, sub;         // 24, 28: the drive's seconds (to FFFFh), the tick in its second
+    uint32_t fuel_off;             // 32: format 33, the drive's up/down count of ticks at lambda's fuel-off limit
+                                   //   (closed, LamInt 0: one up; closed above it: one down), toward 1123's confirm
+                                   //   time, which holds lambda's loop open (fault_loop_open) for the drive
     // The table's.
     bool on;
+    bool lambda;                   // format 33's action on lambda (a format 33 image, 1123 fitted)
     uint32_t fitted;               // the codes this car has, a bit by id
     const uint8_t *rom;
     uint32_t codes_at, frame_at, live_at;
@@ -142,6 +151,7 @@ struct Faults
 };
 
 Faults fault_state BANK2_DATA = {};
+volatile uint8_t fault_loop_open BANK2_DATA = 0;
 Check fault_checks[FAULT_CHECKS] BANK2_DATA = {};
 static Limits limits BANK2_DATA = {};
 static FaultPlaces src BANK2_DATA = {};
@@ -298,7 +308,8 @@ static void BANK2_CODE(drive_counted)()
     fault_state.dirty = fault_state.dirty || any;
 }
 
-// The 8051 started: a new drive (nothing seen yet in it); a pending code from nothing.
+// The 8051 started: a new drive (nothing seen yet in it); a pending code from nothing; lambda's loop closed again
+// (format 33), so that 1123's check tests it again.
 static void BANK2_CODE(drive_start)()
 {
     Faults &f = fault_state;
@@ -307,6 +318,8 @@ static void BANK2_CODE(drive_start)()
     f.seconds = f.sub = 0;
     f.no_start_drive = false;
     f.idle_ticks = f.map_rest = f.map_idle = f.one_side = f.mid_band = f.no_reference = 0;
+    f.fuel_off = 0;
+    fault_loop_open = 0;
     for (uint32_t id = 0; id < FAULT_CHECKS; id++)
     {
         Check &c = fault_checks[id];
@@ -531,6 +544,17 @@ static void BANK2_CODE(control)(const Now &v, Found &found)
         int32_t trim = (int32_t)v.counts->trim_factor - 0x8000, most = (int32_t)src.trim_most;
         if (trim >= most || -trim >= most)
             see(found, FAULT_MIXTURE, C_OTHER | (trim > 0 ? C_HIGH : C_LOW));
+        if (f.lambda)                                           // format 33: the integrator at its fuel-off limit
+        {                                                       //   (0, the sensor rich) one up, above it one down;
+            if (lam == 0)                                       //   at 1123's confirm time the loop held open this
+            {                                                   //   drive (the fuel-on limit keeps it)
+                f.fuel_off = up(f.fuel_off, 0xFFFF);
+                if (f.fuel_off >= fault_checks[FAULT_MIXTURE].confirm)
+                    fault_loop_open = 1;
+            }
+            else if (f.fuel_off != 0)
+                f.fuel_off = f.fuel_off - 1;
+        }
     }
     bool past = v.full || src.rpm_max < v.speed || src.load_max < v.air || src.map_max < b[src.in5];
     if (running && warm && !past && !cut && !boost_cut)         // 1124 the oxygen sensor: no signal (its middle
@@ -811,9 +835,9 @@ uint32_t BANK2_CODE(faults_live)()
 
 // ---- As the board starts ----
 
-// The memory empty, every code absent; the work on with format 31's table (u + 194 on: the code table's, the
-// limits', the frame's list's and the live copy's addresses): each check's entry, the limits taken (format 32's
-// Cal_FaultFullTicks after them). Once: small.
+// The memory empty, every code absent, lambda's loop not held; the work on with format 31's table (u + 194 on: the
+// code table's, the limits', the frame's list's and the live copy's addresses): each check's entry, the limits
+// taken (format 32's Cal_FaultFullTicks after them), format 33's action on lambda if 1123 is fitted. Once: small.
 void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t u, const FaultPlaces *places,
                                                     const FaultCounts &counts)
 {
@@ -827,6 +851,9 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
     f.ref_leak = f.ref_clean = f.crank_leak = f.crank_clean = f.again_leak = 0;
     f.was_rich = f.was_running = f.no_start = f.no_start_drive = f.dirty = false;
     f.frames_due = 0;
+    f.lambda = false;
+    f.fuel_off = 0;
+    fault_loop_open = 0;
     for (uint32_t i = 0; i < BYTES; i++)                        // (a loop: no memset in the bank)
         fault_memory[i] = 0;
     for (uint32_t id = 0; id < FAULT_CHECKS; id++)
@@ -878,6 +905,7 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
     for (uint32_t i = 0; i < LIMIT_WORDS; i++)
         words[i] = word(limits_at + LIMIT_BYTES + 2 * i);
     limits.full_ticks = at(MARK + 4) >= FULL_SETTLE ? word(limits_at + LIMIT_BYTES + 2 * LIMIT_WORDS) : 0;
+    f.lambda = at(MARK + 4) >= FAULTS_LAMBDA_FORMAT && (f.fitted >> FAULT_MIXTURE & 1);
     f.on = true;
 }
 
@@ -926,7 +954,8 @@ void STORE_CODE(faults_restore)(uint8_t *in)
 }
 
 // L2's (the store's tick, at the PC's clear): the memory empty but its counts (the drives; the clears one more),
-// every code from nothing (a fault still there comes back after its confirm time).
+// every code from nothing (a fault still there comes back after its confirm time), lambda's loop closed again as at a
+// drive's start (format 33).
 void STORE_CODE(faults_clear)()
 {
     uint32_t clears = get16(fault_memory + 4) + 1;
@@ -944,6 +973,8 @@ void STORE_CODE(faults_clear)()
     fault_state.present = fault_state.pending = 0;
     fault_state.no_start = false;
     fault_state.dirty = false;
+    fault_state.fuel_off = 0;
+    fault_loop_open = 0;
 }
 
 // What the memory means: the CRC-32 of its layout word, the code table's codes (not their times) and the

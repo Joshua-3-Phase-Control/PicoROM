@@ -141,6 +141,11 @@
 // counts two things more for them: a turn's reference missing (where it sets RefMissing) and the engine stopped
 // by the heartbeat (the 8051's Pair_Lost: its Beat_Start, the beat moving again after it had stopped the engine).
 // The memory is the store's third kind, with its live copy after the knock maps'.
+//
+// Format 33 (docs/Paired_Faults.md, section 3: the actions' second step): the faults act on lambda and the trims.
+// The trims learn nothing while 1112, 1113, 1114, 1121 or 1125 stands and only toward rich while 1123 or 1124 does
+// (trim_tick); lambda's loop (task 16) is held open for the drive once its integrator has stood at 0, the sensor
+// reading rich, for 1123's confirm time (faults.cpp's fault_loop_open). No byte of the image's table more.
 
 #include "pair.h"
 
@@ -2406,7 +2411,10 @@ uint32_t UNIT_CODE(pair_fill_take)()
 //   Cal_LamMapMax) none under 8000h: a lean trim was learnt where the car ran, a rich one is safe there. The slow
 //   work (task 1) multiplies it into the slow factor;
 //   the flag TrimLearning in the unit's copy (the log's): this tick learnt.
-// Each point is taken rounded to 2^-15 (the record's unit), so that a power cycle changes no factor.
+// Each point is taken rounded to 2^-15 (the record's unit), so that a power cycle changes no factor. Format 33
+// (DME-Sim's docs/Paired_Faults.md, section 3): it learns by the faults present now (own value 99h, the last tick's):
+// nothing while 1112, 1113, 1114, 1121 or 1125 stands, only toward rich (LamInt over 128) while 1123 or 1124 does;
+// the factor in use as it stands.
 static constexpr uint32_t TRIM_POINTS = 8;
 static constexpr uint32_t TRIM_PARTS = 2;                                      // the record's: 32 points, then 32
 static constexpr uint32_t TRIM_HALF = TRIM_POINTS * TRIM_POINTS / TRIM_PARTS;  //   and the idle factor
@@ -2444,6 +2452,8 @@ struct Trims
     uint32_t key_ids[4], fuel_trim_at, fuel_k_at;    // the key's maps (Fuel_Main, Fuel_Idle, Fuel_AirTemp,
                                                      //   Inj_DeadTime), Cal_FuelTrim's address, Cal_Stoich's
     uint32_t live_at;                                // the live copy's place in the image (0: none)
+    uint32_t no_learning, rich_only;                 // format 33: the faults under which it learns nothing, only
+                                                     //   toward rich (bits by id; 0 before format 33)
     uint16_t speeds[TRIM_POINTS], airs[TRIM_POINTS]; // the axes' points (the image's, taken at the start: quicker)
 };
 
@@ -2530,14 +2540,17 @@ static void BANK2_CODE(trim_tick)(const uint8_t *bytes)
     }
     bool warm = (own[MAP_UNIT_WARM_UP - MAP_UNIT_SPEED] | own[MAP_UNIT_AFTER_START - MAP_UNIT_SPEED]
                  | own[MAP_UNIT_ACCEL - MAP_UNIT_SPEED]) == 0;
+    int32_t d = (int32_t)bytes[control.lam_at] - 0x80;          // LamInt's offset (over 0: the loop adds fuel)
+    uint32_t faults = own[MAP_UNIT_FAULTS - MAP_UNIT_SPEED];    // format 33: the faults present now, ids 0-15
     bool learns = at(trims.learn_at) != 0 && pair.synced && !starting && closed && warm
-                  && trims.closed >= trims.closed_min && trims.quiet >= trims.quiet_min && trims.steady >= trims.steady_min;
+                  && trims.closed >= trims.closed_min && trims.quiet >= trims.quiet_min && trims.steady >= trims.steady_min
+                  && (faults & trims.no_learning) == 0 && (d > 0 || (faults & trims.rich_only) == 0);
     Cell cell;
     if (!idle)                                                  // (the idle factor needs no cell)
         trim_cell(speed, air, &cell);
     if (learns)
     {
-        int32_t d = (int32_t)bytes[control.lam_at] - 0x80, most = (int32_t)(trims.most << 16);
+        int32_t most = (int32_t)(trims.most << 16);
         uint32_t a = (uint32_t)(d < 0 ? -d : d) * trims.step;  // the offset x Cal_TrimStep, at a whole weight
         if (idle)
             trim_move(&trim_store.idle, d < 0 ? -(int32_t)a : (int32_t)a, most);
@@ -2578,7 +2591,7 @@ static void BANK2_CODE(trim_tick)(const uint8_t *bytes)
 // As the board starts: the trims at 0 (the store fills them), their layout named, the factor 1.0; the work on with
 // format 30's table (u + 169 on: the axes, the constants, the bits and bytes it reads, lambda's limits, the key's
 // maps and constants, the live copy's place), the axes on the P28's own speed and air (8 points each) and the
-// pipeline's whole tick. Once: made small (cold).
+// pipeline's whole tick; format 33's faults' rule (faults.h). Once: made small (cold).
 static void __attribute__((cold)) BANK2_CODE(trim_start)(uint32_t u)
 {
     trim_store.layout = TRIM_LAYOUT;
@@ -2591,6 +2604,9 @@ static void __attribute__((cold)) BANK2_CODE(trim_start)(uint32_t u)
     trims.closed = trims.quiet = trims.steady = trims.speed0 = trims.air0 = 0;
     trims.pulses = levels.map_pulses;
     trims.live_at = 0;
+    bool acts = at(MARK + 4) >= FAULTS_LAMBDA_FORMAT;           // (format 33's: the faults present now act)
+    trims.no_learning = acts ? FAULTS_NO_LEARNING : 0;
+    trims.rich_only = acts ? FAULTS_RICH_LEARNING : 0;
     map_unit_set_own(MAP_UNIT_TRIM, 0);                         // (none before format 30: task 1 takes no factor)
     if (at(MARK + 4) < TRIMS || !control.slowed || !pair.whole)
         return;

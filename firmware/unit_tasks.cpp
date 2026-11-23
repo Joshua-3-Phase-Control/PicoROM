@@ -7,6 +7,7 @@
 
 #if defined(FEATURE_MAP_UNIT)
 
+#include "faults.h"
 #include "map_unit.h"
 #include "pair.h"
 #include "unit_ram.h"
@@ -2207,7 +2208,8 @@ static void UNIT_CODE(lambda_timer)(const Task &t)
 // start, else Cal_LamCoolant's, at idle its second; Cal_LamCoolantHyst more to close); the sensor's
 // band; closed with the sensor ready, the integrator a step toward its other side (at a switch the
 // jump, Lambda_Jump, toward rich less Cal_LamJumpRich; else the ramp, Lambda_Ramp: a step each 64 and
-// one more on the rest's share of the ticks), within 0 and Cal_LamIntMax; open, x 1.0.
+// one more on the rest's share of the ticks), within 0 and Cal_LamIntMax; open, x 1.0. Format 33: held
+// open too by the fault codes, the drive's 1123 at its fuel-off limit (faults.h's fault_loop_open).
 static void UNIT_CODE(lambda_run)(const Task &t)
 {
     uint32_t pins = byte_of(t, LM_PINS);
@@ -2218,7 +2220,8 @@ static void UNIT_CODE(lambda_run)(const Task &t)
     bool open = bit(t, get(t, LM_START)) || bit(t, get(t, LM_NOT_SYNCED)) || bit(t, get(t, LM_FUEL_CUT))
                 || bit(t, get(t, LM_BOOST_CUT)) || lambda_load_open(t);
     if (!open)                                                          // CJNE A,Rpm: C; JC Main_Lambda_Open
-        open = speed_at(t, word(t, 0) + get(t, closed ? LM_RPM_MAX : LM_RPM_CLOSE)) < speed_of(t, byte_of(t, LM_RPM));
+        open = speed_at(t, word(t, 0) + get(t, closed ? LM_RPM_MAX : LM_RPM_CLOSE)) < speed_of(t, byte_of(t, LM_RPM))
+               || fault_loop_open != 0;                                 // (format 33: L2's, 0 before it)
     if (open)
         closed = false;                                                 // CLR ClosedLoop
     else

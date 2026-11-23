@@ -279,7 +279,8 @@ static constexpr uint32_t CHAMBER = 28;       // the chamber's warm-up in the fi
 static constexpr uint32_t HOT_TRIMS = 29;     // the cut's trim and the warm-up by it too (pair.cpp's)
 static constexpr uint32_t TRIMS = 30;         // the fuel trims learnt (pair.cpp's)
 static constexpr uint32_t FAULTS = 31;        // the fault codes (pair.cpp's and faults.cpp's)
-static constexpr uint32_t FULL_SETTLE = 32;   // 1113's settle (faults.cpp's: the newest)
+static constexpr uint32_t FULL_SETTLE = 32;   // 1113's settle (faults.cpp's)
+static constexpr uint32_t LAMBDA_ACTS = 33;   // the faults act on lambda and the trims (faults.h's: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -984,7 +985,7 @@ static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
     if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2
-        || m[4] > FULL_SETTLE)
+        || m[4] > LAMBDA_ACTS)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

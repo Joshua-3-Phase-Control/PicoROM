@@ -717,6 +717,20 @@ changed): at a part load after a start at 20 C, L2's longest was a tick whose jo
   until such a read falls in between (DME-Sim: the 951 at a part load after 102 s, the 944 warm after 41 s, an
   injection 0.1% and 0.5% apart; warm on the 951 one frame's byte, the car the same).
 
+Format 33 (DME-Sim's docs/Paired_Faults.md, section 3, the faults' actions' second step) acts on lambda and the
+trims. No byte of the image's table more: the format alone says so, and the map unit takes format 33.
+- **The trims** (`trim_tick`) learn by the faults present now (own value 99h, written by the last tick's checks):
+  nothing while 1112, 1113, 1114, 1121 or 1125 stands, and only toward rich (LamInt over 128) while 1123 or 1124
+  does (faults.h's `FAULTS_NO_LEARNING`, `FAULTS_RICH_LEARNING`). The factor in use as it stands, the knock maps as
+  before (1131 alone stops them).
+- **Lambda's loop** is held open for the drive once its integrator has stood at 0, the sensor reading rich, for
+  1123's confirm time: faults.cpp counts the drive's ticks at that fuel-off limit up and down by 1123's rule (one up a
+  tick closed at 0, one down a tick closed above it; `fuel_off`, Faults' word at 32) and sets `fault_loop_open`, which
+  task 16 (`lambda_run`, bank 3) takes as one more reason to open the loop in the next tick's job (LamInt x 1.0,
+  ClosedLoop cleared). Each drive's start (the 8051's) and a clear of the codes close it again, so the check tests it
+  again. The fuel-on limit (1123 lean) keeps the loop.
+- **Its time** (DME-Sim's core): bank 3 8 bytes more (65,144: 392 free), bank 2's `.store_code` 25,936 (132 more).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
