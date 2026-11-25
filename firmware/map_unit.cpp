@@ -42,6 +42,7 @@
 #include "pico/multicore.h"
 
 #include "bus_bench.h"
+#include "faults.h"
 #include "pair.h"
 #include "pio_programs.h"
 #include "rom.h"
@@ -281,7 +282,8 @@ static constexpr uint32_t TRIMS = 30;         // the fuel trims learnt (pair.cpp
 static constexpr uint32_t FAULTS = 31;        // the fault codes (pair.cpp's and faults.cpp's)
 static constexpr uint32_t FULL_SETTLE = 32;   // 1113's settle (faults.cpp's)
 static constexpr uint32_t LAMBDA_ACTS = 33;   // the faults act on lambda and the trims (faults.h's)
-static constexpr uint32_t STEPPING = 34;      // no fuel in a turn out of step (pair.cpp's: the newest)
+static constexpr uint32_t STEPPING = 34;      // no fuel in a turn out of step (pair.cpp's)
+static constexpr uint32_t SUBSTITUTES = 35;   // the NTCs' substitutes (faults.cpp's, given here: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -950,6 +952,19 @@ uint32_t UNIT_CODE(map_unit_task_at)(uint32_t task)
     return 0;
 }
 
+// Format 35: an NTC's code past the checks' limits (IN2 the intake air, IN3 the coolant) never reaches the control:
+// L2's substitute in place of the byte the snoop made from it, at once.
+static void UNIT_CODE(substitute)(uint32_t channel)
+{
+    uint32_t code = snoop_result(channel, 0);
+    if (code < fault_substitutes.open && code > fault_substitutes.shorted)
+        return;
+    if (channel == 3)
+        made[fault_substitutes.coolant_at & 0x7F] = fault_substitutes.coolant;
+    else
+        made[fault_substitutes.air_at & 0x7F] = fault_substitutes.air;
+}
+
 void UNIT_CODE(map_unit_adc)(uint32_t channel)
 {
     if (!unit.on || at(MARK + 4) < 4)
@@ -961,6 +976,8 @@ void UNIT_CODE(map_unit_adc)(uint32_t channel)
         if (at(entry + 1) == channel)
             made[at(entry) & 0x7F] = snooped(at(entry) & 0x7F);
     }
+    if (channel - 2 < 2 && fault_substitutes.on)                // format 35: IN2, IN3 (the NTCs)
+        substitute(channel);
 }
 
 // map_window runs from init, so page 0's reads reach the snoop whether the unit is on or not; the
@@ -986,7 +1003,7 @@ static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
     if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2
-        || m[4] > STEPPING)
+        || m[4] > SUBSTITUTES)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

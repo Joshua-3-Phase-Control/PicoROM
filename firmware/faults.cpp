@@ -3,7 +3,8 @@
 // Cal_FaultFullTicks (at a snap open the air of a firing passes its limit a tick or two after the switch). The
 // second (format 33) acts on lambda and the trims: the trims learn by the faults present now (pair.cpp's
 // trim_tick), and lambda's loop is held open for the drive once its integrator has stood at 0, the sensor reading
-// rich, for 1123's confirm time (fault_loop_open, which task 16 reads).
+// rich, for 1123's confirm time (fault_loop_open, which task 16 reads). The fourth (format 35) gives the control the
+// NTCs' substitutes for a code past the checks' limits (fault_substitutes, which map_unit_adc takes at once).
 //
 // Once a tick (L2, after the trims' work, before the frame) each check looks at what the P28 has already: the
 // snoop's ADC codes (the NTCs before their linearisation), lambda's and the idle control's state in the tick's
@@ -40,7 +41,7 @@ static constexpr uint32_t MARK = 0x2000;
 static constexpr uint32_t FAULTS_FORMAT = 31;              // the table's first (and the memory's layout's)
 static constexpr uint32_t FULL_SETTLE = 32;                 // the format with Cal_FaultFullTicks after the limits
                                                             //   (33, faults.h's: the faults act on lambda and the
-                                                            //   trims)
+                                                            //   trims; 35, the substitutes' three words after it)
 static constexpr uint32_t RECORDS = 7, RECORD = 32, HEAD = 8, FRAME = 18;
 static constexpr uint32_t BYTES = HEAD + RECORDS * RECORD;  // 232: the store's record
 static constexpr uint32_t LAYOUT = FAULTS_FORMAT << 24 | RECORDS << 16 | RECORD << 8 | FRAME;
@@ -85,7 +86,8 @@ enum : uint8_t
 };
 
 // The limits as the image has them (from Cal_FaultSettleTicks: its bytes, then its words high byte first; format
-// 32 a word more, Cal_FaultFullTicks, else 0), taken at the start into RAM: a load each.
+// 32 a word more, Cal_FaultFullTicks, else 0; format 35 three more, the substitutes', else 0), taken at the start
+// into RAM: a load each.
 struct Limits
 {
     uint8_t settle, supply_low, supply_high, ntc_open, ntc_short, afm_low, afm_high, map_low, map_high;
@@ -93,6 +95,8 @@ struct Limits
     uint16_t afm_rpm, switch_rpm, idle_air, full_air, idle_off, idle_flow, idle_ticks, map_rest_ticks;
     uint16_t map_idle_ticks, o2_stuck_ticks, no_start_ticks, rest_ticks, event_add, event_level, clean_turns;
     uint16_t again_add, again_level, restart_ms, drive_ticks, full_ticks;
+    uint16_t sub_cold, sub_warm, sub_rise; // format 35: Cal_FaultSubCold, Cal_FaultSubWarm (bytes), Cal_FaultSubRise
+                                           //   (1/65536 of a byte a tick)
 };
 
 static constexpr uint32_t LIMIT_BYTES = 18, LIMIT_WORDS = 19;
@@ -148,10 +152,16 @@ struct Faults
     bool no_start_drive;           // a no-start this drive
     bool dirty;                    // the memory changed by what the minute's rule writes
     uint32_t frames_due;           // the records whose frame is to be filled this tick (a bit a slot)
+    // Format 35: the substitutes' state (this power-up's): the coolant's base and its rise (1/65536 of a byte),
+    // whether a plausible coolant code has come, the intake air's first plausible byte.
+    uint32_t coolant_base, coolant_rise;
+    bool coolant_seen, air_seen;
+    uint8_t air_first;
 };
 
 Faults fault_state BANK2_DATA = {};
 volatile uint8_t fault_loop_open BANK2_DATA = 0;
+volatile FaultSubstitutes fault_substitutes BANK2_DATA = {};
 Check fault_checks[FAULT_CHECKS] BANK2_DATA = {};
 static Limits limits BANK2_DATA = {};
 static FaultPlaces src BANK2_DATA = {};
@@ -732,6 +742,48 @@ static void BANK2_CODE(qualify)(const Found &found)
     }
 }
 
+// Format 35: the NTCs' substitutes, made each tick as the control's bytes (map_unit_adc gives them for a code past
+// the checks' limits). A plausible code's byte is its own: the tick's copy has the snoop's byte made from it. The
+// coolant's base is its last plausible byte this power-up, else the intake air's first plausible byte, else
+// Cal_FaultSubCold; while 1114 is present and the engine runs it rises Cal_FaultSubRise a tick, to Cal_FaultSubWarm
+// (a base over it kept as it is), and never falls back. The intake air's: its last plausible byte, else
+// Cal_FaultSubCold.
+static void BANK2_CODE(substitutes)(const Now &v)
+{
+    Faults &f = fault_state;
+    const Limits &l = limits;
+    volatile FaultSubstitutes &s = fault_substitutes;
+    uint32_t air = v.counts->adc[2], coolant = v.counts->adc[3];
+    if (air < l.ntc_open && air > l.ntc_short)
+    {
+        s.air = v.bytes[src.air];
+        if (!f.air_seen)
+            f.air_first = v.bytes[src.air];
+        f.air_seen = true;
+    }
+    if (coolant < l.ntc_open && coolant > l.ntc_short)
+    {
+        f.coolant_seen = true;
+        f.coolant_base = (uint32_t)v.bytes[src.coolant] << 16;
+        f.coolant_rise = 0;
+    }
+    else
+    {
+        if (!f.coolant_seen)
+            f.coolant_base = (uint32_t)(f.air_seen ? f.air_first : l.sub_cold) << 16;
+        if (fault_checks[FAULT_COOLANT].state == CONFIRMED && v.running && f.coolant_rise < 0xFF0000)
+            f.coolant_rise += l.sub_rise;
+    }
+    uint32_t warm = (uint32_t)l.sub_warm << 16, value = f.coolant_base;
+    if (value < warm)
+    {
+        value += f.coolant_rise;
+        if (value > warm)
+            value = warm;
+    }
+    s.coolant = value >> 16 & 0xFF;
+}
+
 void BANK2_CODE(faults_tick)(const uint8_t *bytes, uint32_t now, const FaultCounts &counts)
 {
     Faults &f = fault_state;
@@ -783,6 +835,8 @@ void BANK2_CODE(faults_tick)(const uint8_t *bytes, uint32_t now, const FaultCoun
     v.warm = bytes[src.coolant] >= l.warm;
     v.rest_read = f.read_at_rest && teeth == f.read_teeth;
     v.fresh = f.read_ago < l.rest_ticks || v.rest_read;
+    if (fault_substitutes.on)                                   // format 35: the NTCs' substitutes, each tick
+        substitutes(v);
     bool running = v.running;
     Found found;
     for (uint32_t i = 0; i < FOUND_WORDS; i++)                  // (no initialiser: that would be a memset)
@@ -854,6 +908,9 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
     f.lambda = false;
     f.fuel_off = 0;
     fault_loop_open = 0;
+    fault_substitutes.on = 0;                                   // (format 35: none till the table's taken)
+    f.coolant_base = f.coolant_rise = 0;
+    f.coolant_seen = f.air_seen = false;
     for (uint32_t i = 0; i < BYTES; i++)                        // (a loop: no memset in the bank)
         fault_memory[i] = 0;
     for (uint32_t id = 0; id < FAULT_CHECKS; id++)
@@ -906,10 +963,25 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
         words[i] = word(limits_at + LIMIT_BYTES + 2 * i);
     limits.full_ticks = at(MARK + 4) >= FULL_SETTLE ? word(limits_at + LIMIT_BYTES + 2 * LIMIT_WORDS) : 0;
     f.lambda = at(MARK + 4) >= FAULTS_LAMBDA_FORMAT && (f.fitted >> FAULT_MIXTURE & 1);
+    if (at(MARK + 4) >= FAULTS_SUBSTITUTE_FORMAT)               // format 35: the substitutes' words and their start
+    {
+        uint32_t w = limits_at + LIMIT_BYTES + 2 * LIMIT_WORDS + 2;
+        limits.sub_cold = word(w);
+        limits.sub_warm = word(w + 2);
+        limits.sub_rise = word(w + 4);
+        f.coolant_base = limits.sub_cold << 16;
+        fault_substitutes.open = limits.ntc_open;
+        fault_substitutes.shorted = limits.ntc_short;
+        fault_substitutes.air = fault_substitutes.coolant = limits.sub_cold & 0xFF;
+        fault_substitutes.air_at = src.air;
+        fault_substitutes.coolant_at = src.coolant;
+        fault_substitutes.on = 1;
+    }
     f.on = true;
 }
 
-static_assert(sizeof(Limits) == 18 + 2 * 20, "Limits: Cal_FaultSettleTicks' 18 bytes, 19 words, format 32's word");
+static_assert(sizeof(Limits) == 18 + 2 * 23, "Limits: Cal_FaultSettleTicks' 18 bytes, 19 words, format 32's word, "
+                                             "format 35's three");
 static_assert(sizeof(FaultPlaces) % 4 == 0, "FaultPlaces: copied a word at a time");
 
 // ---- The store's third kind (store.h) ----

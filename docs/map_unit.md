@@ -747,6 +747,23 @@ and the map unit takes format 34.
   L0 three cycles longer at the 8051's start (2,483), its longest running as before (1,629 on the 951, 1,663 on the
   944), L1 and L2 as before. The healthy drives the same bit for bit as on format 33's bank (both cars, cold and warm).
 
+Format 35 (the actions' fourth step) gives the control the NTCs' substitutes. The limits three words longer
+(Cal_FaultSubCold, Cal_FaultSubWarm, Cal_FaultSubRise after Cal_FaultFullTicks), and the map unit takes format 35.
+- **At once, at L0:** `map_unit_adc`, after making each byte the snoop gives the control, calls `substitute` for IN2
+  (the intake air) and IN3 (the coolant): a raw code at or over Cal_FaultNtcOpen or at or under Cal_FaultNtcShort is
+  replaced by faults.cpp's substitute (`fault_substitutes`). The slow work, the tick and start mode read only that
+  byte; the checks read the raw codes (`snoop_codes`), so 1114 and 1125 are confirmed and healed as before.
+- **Each tick, at L2:** faults.cpp's `substitutes`, from the tick's copy (a plausible code's byte its own): the intake
+  air's last plausible byte this power-up, else Cal_FaultSubCold; the coolant's last plausible byte, else the intake
+  air's first plausible byte this power-up, else Cal_FaultSubCold; while 1114 is present (its check confirmed, or
+  loaded present at the start) and the engine runs, Cal_FaultSubRise more a tick (1/65536 of a byte) to
+  Cal_FaultSubWarm, a base already over it kept, never falling back while the code stays implausible. Not on a tick
+  run again (no checks there), so the rise is a little slower than its word gives.
+- **Its time** (DME-Sim's core): bank 3 88 bytes more (65,424: 112 free), bank 2's `.store_code` 26,376 (440 more);
+  the snoop's longest 4.19 us (4.00 before), L0's longest at the start and running as before; L1 as before; L2 0.4 us
+  longer in the levels' drive (71.6 us on the 951, 69.7 on the 944), its longest at the cold part load as before
+  (a tick run again). The healthy drives the same bit for bit as on format 34's bank (both cars, cold and warm).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds

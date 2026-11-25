@@ -153,6 +153,11 @@
 // reference is then left out (Ref_Skip) as after a cut, and so each one till a reference comes in step. Without
 // it a lost count stopped the sparks while the 8051 went on injecting at every other reference. The bus level's
 // work (the reference's), no byte of the image's table more.
+//
+// Format 35 (the actions' fourth step): the NTCs' substitutes. A coolant or intake air code past the checks' limits
+// never reaches the control: the bus level makes the byte the snoop gives the slow work, the tick and start mode
+// from faults.cpp's substitute instead, at once (map_unit_adc); L2 makes the substitutes each tick. The limits three
+// words longer (Cal_FaultSubCold, Cal_FaultSubWarm, Cal_FaultSubRise).
 
 #include "pair.h"
 
@@ -2898,7 +2903,8 @@ static void __attribute__((cold)) BANK2_CODE(fault_start)(uint32_t u)
     s.lam_int = control.lam_at & 0x7F;
     s.idle_int = at(u + 208) & 0x7F;
     s.in5 = trims.in5_at & 0x7F;
-    s.spare[0] = s.spare[1] = s.spare[2] = 0;
+    s.air = control.air_at & 0x7F;                              // (format 35's substitutes)
+    s.spare[0] = s.spare[1] = 0;
     faults_start((const uint8_t *)pair.rom, u, &s, c);
     fault_on = faults_live() != 0 || word(u + 194) != 0;
 }

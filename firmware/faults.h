@@ -8,8 +8,8 @@
 // P28 has already, each confirmed when it has stood for its time and healed when gone for its time, Porsche's
 // four-digit codes (11xx present, 12xx once gone, with a cause), and a memory of 7 records kept as the store's
 // third kind. Format 31 records only; the actions come a format each from 32 (the note's section 3): 33 the trims'
-// rule (pair.cpp's trim_tick) and lambda's loop opened at 1123's fuel-off limit (task 16 reads fault_loop_open). All
-// in bank 2 (faults.cpp).
+// rule (pair.cpp's trim_tick) and lambda's loop opened at 1123's fuel-off limit (task 16 reads fault_loop_open); 35
+// the NTCs' substitutes (map_unit_adc gives fault_substitutes). All in bank 2 (faults.cpp).
 #if defined(FEATURE_MAP_UNIT)
 
 // The checks the P28 knows, by id: the image's code table has an entry for each, in this order (its code 0
@@ -52,6 +52,23 @@ static constexpr uint32_t FAULTS_RICH_LEARNING = 1u << FAULT_MIXTURE | 1u << FAU
 // unit_tasks.cpp) reads it in the next tick's job. The fuel-on limit keeps the loop.
 extern volatile uint8_t fault_loop_open;
 
+// Format 35 (the actions' fourth step): the NTCs' substitutes. A code past the checks' limits (Cal_FaultNtcOpen,
+// Cal_FaultNtcShort) never reaches the control: the bus level (map_unit_adc) makes the byte the snoop gives the
+// control from the substitute instead, at once; L2 makes the substitutes each tick, as the control's bytes (the
+// linearisation's: C = (byte - 58.6) / 1.49). The coolant's: its last plausible byte this power-up, else the intake
+// air's first this power-up, else Cal_FaultSubCold; once 1114 is present, Cal_FaultSubRise more a tick while the
+// engine runs, to Cal_FaultSubWarm (a base already over it kept). The intake air's: its last plausible byte, else
+// Cal_FaultSubCold. The checks read the raw codes.
+static constexpr uint32_t FAULTS_SUBSTITUTE_FORMAT = 35;
+struct FaultSubstitutes
+{
+    uint8_t on;              // a format 35 image, the faults on
+    uint8_t open, shorted;   // Cal_FaultNtcOpen, Cal_FaultNtcShort (a code at or over, at or under)
+    uint8_t air, coolant;    // the substitutes for IN2 (the intake air) and IN3 (the coolant)
+    uint8_t air_at, coolant_at; // their bytes in the RAM's copy (AirTemp, Coolant)
+};
+extern volatile FaultSubstitutes fault_substitutes;
+
 // Where the checks look in the tick's copy and what the image gives them (pair.cpp's, as the board starts): each
 // bit its byte's place << 8 | its mask, each byte its place, the constants.
 struct FaultPlaces
@@ -64,7 +81,8 @@ struct FaultPlaces
                                                         //   ClosedLoop, O2MidBand, FuelCut, BoostCut
     uint8_t pins, coolant, lam_int, idle_int, in5;      // the pins' byte (O2_LEAN its bit 1), Coolant, LamInt,
                                                         //   IdleIntHi, In5
-    uint8_t spare[3];
+    uint8_t air;                                        // AirTemp (format 35's)
+    uint8_t spare[2];
 };
 
 // What the checks count on each tick (pair.cpp's, each its one writer's, taken after the tick's commit).
