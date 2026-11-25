@@ -146,6 +146,13 @@
 // The trims learn nothing while 1112, 1113, 1114, 1121 or 1125 stands and only toward rich while 1123 or 1124 does
 // (trim_tick); lambda's loop (task 16) is held open for the drive once its integrator has stood at 0, the sensor
 // reading rich, for 1123's confirm time (faults.cpp's fault_loop_open). No byte of the image's table more.
+//
+// Format 34 (the actions' third step): no fuel in a turn the P28 is out of step. A reference off its place (a
+// crank fault, counted as ever) or one with no tooth since the last (a dead speed sensor, whose references the
+// count's arithmetic otherwise finds in step) puts the P28 out of step; running (never in start mode), the next
+// reference is then left out (Ref_Skip) as after a cut, and so each one till a reference comes in step. Without
+// it a lost count stopped the sparks while the 8051 went on injecting at every other reference. The bus level's
+// work (the reference's), no byte of the image's table more.
 
 #include "pair.h"
 
@@ -185,6 +192,7 @@ static constexpr uint32_t CHAMBER = 28;  // the format with the chamber's warm-u
 static constexpr uint32_t HOT_TRIMS = 29; // the format with the cut's trim and the warm-up by it too (step 6)
 static constexpr uint32_t TRIMS = 30;     // the format with the fuel trims learnt (docs/Paired_Fuel_Learning.md)
 static constexpr uint32_t FAULTS = 31;    // the format with the fault codes (docs/Paired_Faults.md)
+static constexpr uint32_t STEPPING = 34;  // the format with no fuel in a turn out of step (the faults' actions)
 static constexpr uint32_t RETI = 0x32, AJMP = 0x01, SETB_BIT = 0xD2, CLR_BIT = 0xC2, MOV_C_BIT = 0xA2;
 static constexpr uint32_t REFERENCE = 0x03, VECTOR = 0x13;
 static constexpr uint32_t MOST_EVENTS = 8;
@@ -317,6 +325,16 @@ struct Pair
 };
 
 static Pair pair UNIT_DATA = {};
+
+// Format 34: the P28's step at the references (read by DME-Sim's tests at these offsets; 0 at the board's start).
+struct Stepping
+{
+    volatile uint32_t skips; // 0: references left out out of step (the phase would have injected at them)
+    uint32_t astray;         // 4: out of step: the last reference off its place, or with no tooth since the one before
+    uint32_t count;          // 8: the count at the last reference
+};
+
+static Stepping stepping UNIT_DATA = {};
 
 // DME-Sim's checks of the routines (pair_test): their inputs and outputs.
 struct Case
@@ -847,6 +865,22 @@ static void UNIT_CODE(phase_at_reference)()
     write_phase();
 }
 
+// Format 34: the step the reference found, after the phase's turn (in: in step with a tooth since the reference
+// before). Out of step, running (never in start mode), the next reference is left out as after a cut, its pulse
+// none (the turn's first firing finds it left out); in step again, the phase goes on from there.
+static void UNIT_CODE(at_step)(bool in)
+{
+    if (at(MARK + 4) < STEPPING)
+        return;                                                 // (an image before format 34)
+    stepping.astray = !in;
+    if (in || pair.next_skips || ram_bit(pair.start_bit))
+        return;                                                 // in step, left out by the phase, or starting
+    pair.next_skips = 1;
+    stepping.skips = stepping.skips + 1;
+    write_reference();
+    write_phase();
+}
+
 // The turn's first firing, at slot 0's tooth (before the 8051's Main_Turn, rom_lean's Turn_Cut there):
 // starting, its pulse (each firing's); a turn 720 degrees leaves out, none; else a cut (over
 // Cal_RevLimit, the overrun's or the overboost guard's) leaves the next reference out, counted at the
@@ -902,10 +936,10 @@ void UNIT_CODE(pair_start_over)()
     if (!pair.phased)
         return;
     __asm volatile("cpsid i" ::: "memory");
-    pair.next_skips = 0;                                        // rom_lean's CLR Inj720Odd
-    write_reference();
+    pair.next_skips = stepping.astray;                          // rom_lean's CLR Inj720Odd (format 34: none
+    write_reference();                                          //   out of step)
     if (pair.whole)
-        own_bit(pair.phase_bit, false);
+        own_bit(pair.phase_bit, stepping.astray != 0);
     __asm volatile("cpsie i" ::: "memory");
 }
 
@@ -3420,6 +3454,7 @@ static void UNIT_CODE(unsync)()
     drop_coil();
     steer(NOTHING);
     write_flags();
+    stepping.astray = 0;                                        // (format 34: a count from the next reference)
 }
 
 // The firing's length at slot 0's tooth (the table's first event), and the tooth period from it; the
@@ -3499,6 +3534,7 @@ static void UNIT_CODE(tooth)(uint32_t now)
 
 // The reference: the latch's tooth by the times (as rom_lean by the speed input), so fall 1's count;
 // in step if that is the count's fall 1 or a tooth off it, else the count from there (a fault).
+// Format 34: in step only with a tooth since the reference before (none: a dead speed sensor).
 static void UNIT_CODE(reference)(uint32_t now)
 {
     pair.references++;
@@ -3508,19 +3544,26 @@ static void UNIT_CODE(reference)(uint32_t now)
     while (k < 4 && since * 256 >= (256 - pair.teeth_high + 256 * k) * period)
         k++;
     uint32_t ahead = k + pair.fall1_ahead;                      // fall 1, this many teeth on
+    bool turned = pair.count != stepping.count;                 // a tooth since the reference before
+    stepping.count = pair.count;
     if (pair.synced)
     {
         uint32_t place = pair.pos + ahead;                      // its place in the count's turn
         while (place >= pair.turn)
             place -= pair.turn;
         if (place == 0 || place == 1 || place == pair.turn - 1)
+        {
+            if (!turned || stepping.astray)
+                at_step(turned);                                // (in step as ever: nothing to do)
             return;                                             // in step, or the tie
+        }
         pair.faults++;
         pair.fault = true;
         pair.stamped = false;
         pair.fire_valid = false;
         drop_coil();
         steer(NOTHING);
+        at_step(false);
     }
     place_at(ahead == 0 ? 0 : pair.turn - ahead);
     pair.synced = 1;

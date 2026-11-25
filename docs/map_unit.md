@@ -733,6 +733,20 @@ trims. No byte of the image's table more: the format alone says so, and the map 
   L2's longest as before (94.2 us on the 951, 96.3 on the 944 at the levels' cold part load), L1 28.5 us. The healthy
   drives the same bit for bit as on format 32's bank (both cars, cold and warm: sparks, injections, cycles, the log).
 
+Format 34 (the actions' third step) gives no fuel in a turn the P28 is out of step. No byte of the image's table more,
+and the map unit takes format 34.
+- **Out of step** (`stepping.astray`, set at each reference by `at_step`): the reference off its place (a crank
+  fault, `pair.faults` counted as before), or one with no tooth since the one before (`stepping.count`: a dead speed
+  sensor, whose references the count's arithmetic otherwise finds in step). A reference in step with teeth since the
+  one before ends it, and so does a count lost (`unsync`).
+- **The references left out:** out of step and running (never in start mode), the next reference's AJMP is set to
+  `Ref_Skip` after the phase has turned, as after a cut (`next_skips` 1, so the turn's first firing makes no pulse).
+  The phase goes on from there once in step. `stepping.skips` counts them. Start mode's end (`pair_start_over`) leaves
+  the next reference out too while out of step.
+- **Its time** (DME-Sim's core): bank 3 192 bytes more (65,336: 200 free; `pair_start` as it was), bank 2 as it was;
+  L0 three cycles longer at the 8051's start (2,483), its longest running as before (1,629 on the 951, 1,663 on the
+  944), L1 and L2 as before. The healthy drives the same bit for bit as on format 33's bank (both cars, cold and warm).
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
