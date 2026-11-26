@@ -764,6 +764,20 @@ Format 35 (the actions' fourth step) gives the control the NTCs' substitutes. Th
   longer in the levels' drive (71.6 us on the 951, 69.7 on the 944), its longest at the cold part load as before
   (a tick run again). The healthy drives the same bit for bit as on format 34's bank (both cars, cold and warm).
 
+Format 36 (the actions' fifth step) looks for 1112 where a stuck idle contact shows, and takes it open while 1112
+stands. No byte of the image's table more, and the map unit takes format 36.
+- **The check** (faults.cpp, L2): 1112's cause 1 is tested above the overrun's cut-off speed, Overrun_CutSpeed by
+  coolant as task 11's cut takes it (its id the seventh byte of task 11's data, `FaultPlaces.cut_speed`, looked up each
+  tick with `unit_map_value`), in place of Cal_FaultSwitchRpm, and on the contact's raw state (`contact`: IN6 within
+  Cal_FaultIn6Band of both switches' level or the idle contact's), not the IdleSwitch bit its action clears.
+- **The action:** while 1112 stands (its check confirmed) and the engine runs above that speed, L2 sets
+  `fault_idle_open`, and task 15's switches (`tick_switches`) clear IdleSwitch by it in the next tick's job: no overrun
+  cut while driving, the main maps off idle, the knock retard applied. Below the cut-off the contact as it reads. The
+  8051's start and a clear of the codes end it.
+- **Its time** (DME-Sim's core): bank 3 16 bytes more (65,440: 96 free), bank 2's `.store_code` 26,608 (232 more); L0
+  and L1 as before; L2 1.3 us longer in the levels' drive (72.9 us on the 951, 71.0 on the 944), its longest at the
+  cold part load as before (a tick run again). The healthy drives the same bit for bit as on format 35's bank.
+
 ## How it works
 
 - `map_window` (map_unit.pio; pio1's state machine 2, comms_clock's, which only FEATURE_CLOCK builds
