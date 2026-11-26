@@ -283,7 +283,8 @@ static constexpr uint32_t FAULTS = 31;        // the fault codes (pair.cpp's and
 static constexpr uint32_t FULL_SETTLE = 32;   // 1113's settle (faults.cpp's)
 static constexpr uint32_t LAMBDA_ACTS = 33;   // the faults act on lambda and the trims (faults.h's)
 static constexpr uint32_t STEPPING = 34;      // no fuel in a turn out of step (pair.cpp's)
-static constexpr uint32_t SUBSTITUTES = 35;   // the NTCs' substitutes (faults.cpp's, given here: the newest)
+static constexpr uint32_t SUBSTITUTES = 35;   // the NTCs' substitutes (faults.cpp's, given here)
+static constexpr uint32_t IDLE_CONTACT = 36;  // 1112's check and the contact taken open (faults.cpp's: the newest)
 
 MapUnitOwn map_unit_owns UNIT_DATA = {};
 
@@ -1003,7 +1004,7 @@ static uint32_t UNIT_CODE(marked_page)()
 {
     const uint8_t *m = unit.rom + MARK;
     if (unit.mask != EIGHT_KIB || m[0] != 'M' || m[1] != 'A' || m[2] != 'P' || m[3] != 'U' || m[4] < 2
-        || m[4] > SUBSTITUTES)
+        || m[4] > IDLE_CONTACT)
         return 0;
     return m[5] < 0x20 ? m[5] : 0;
 }

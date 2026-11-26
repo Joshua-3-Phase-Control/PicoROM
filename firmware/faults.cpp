@@ -4,7 +4,9 @@
 // second (format 33) acts on lambda and the trims: the trims learn by the faults present now (pair.cpp's
 // trim_tick), and lambda's loop is held open for the drive once its integrator has stood at 0, the sensor reading
 // rich, for 1123's confirm time (fault_loop_open, which task 16 reads). The fourth (format 35) gives the control the
-// NTCs' substitutes for a code past the checks' limits (fault_substitutes, which map_unit_adc takes at once).
+// NTCs' substitutes for a code past the checks' limits (fault_substitutes, which map_unit_adc takes at once). The
+// fifth (format 36) looks for 1112 above the overrun's cut-off speed at the contact's raw state, and while it stands
+// takes the contact open above that speed (fault_idle_open, which task 15's switches take).
 //
 // Once a tick (L2, after the trims' work, before the frame) each check looks at what the P28 has already: the
 // snoop's ADC codes (the NTCs before their linearisation), lambda's and the idle control's state in the tick's
@@ -36,6 +38,7 @@
 #include "store.h"
 #include "str_util.h"
 #include "unit_ram.h"
+#include "unit_tasks.h"
 
 static constexpr uint32_t MARK = 0x2000;
 static constexpr uint32_t FAULTS_FORMAT = 31;              // the table's first (and the memory's layout's)
@@ -157,11 +160,13 @@ struct Faults
     uint32_t coolant_base, coolant_rise;
     bool coolant_seen, air_seen;
     uint8_t air_first;
+    bool idle_raw;                 // format 36: 1112's check at the cut-off on IN6's raw state, its action on
 };
 
 Faults fault_state BANK2_DATA = {};
 volatile uint8_t fault_loop_open BANK2_DATA = 0;
 volatile FaultSubstitutes fault_substitutes BANK2_DATA = {};
+volatile uint8_t fault_idle_open BANK2_DATA = 0;
 Check fault_checks[FAULT_CHECKS] BANK2_DATA = {};
 static Limits limits BANK2_DATA = {};
 static FaultPlaces src BANK2_DATA = {};
@@ -330,6 +335,7 @@ static void BANK2_CODE(drive_start)()
     f.idle_ticks = f.map_rest = f.map_idle = f.one_side = f.mid_band = f.no_reference = 0;
     f.fuel_off = 0;
     fault_loop_open = 0;
+    fault_idle_open = 0;                                        // (format 36: starting, not above the cut-off)
     for (uint32_t id = 0; id < FAULT_CHECKS; id++)
     {
         Check &c = fault_checks[id];
@@ -415,6 +421,18 @@ static __force_inline void timed(Found &found, uint32_t id, uint32_t cause, uint
         test(found, id, cause);
 }
 
+// Format 36: IN6 at the level of both switches closed or of the idle contact (within Cal_FaultIn6Band): the idle
+// contact closed as its wiring reads, whatever the control makes of it.
+static bool BANK2_CODE(contact)(uint32_t code)
+{
+    const Limits &l = limits;
+    uint32_t band = l.in6_band;
+    for (uint32_t k = 0; k < 2; k++)
+        if (code + band >= l.in6[k] && code <= l.in6[k] + band)
+            return true;
+    return false;
+}
+
 // IN6 between the throttle switches' levels: within Cal_FaultIn6Band of none of the four.
 static bool BANK2_CODE(between)(uint32_t code)
 {
@@ -434,6 +452,7 @@ struct Now
     uint32_t speed, air;
     bool running, cranking, rest, warm, idle, full, starting, synced;
     bool fresh, rest_read;  // the codes read in the last Cal_FaultRestTicks, or at rest with no tooth since
+    uint32_t cutoff;        // format 36: the overrun's cut-off speed (rpm: Overrun_CutSpeed by coolant)
 };
 
 static void BANK2_CODE(sensors)(const Now &v, Found &found)
@@ -503,10 +522,12 @@ static void BANK2_CODE(sensors)(const Now &v, Found &found)
         else
             f.map_idle = 0;
     }
-    if (running && v.speed > l.switch_rpm && v.air > l.idle_air) // 1112 the idle contact: closed with the air over a
+    uint32_t gate = f.idle_raw ? v.cutoff : l.switch_rpm;       // (format 36: over the overrun's cut-off, the contact
+    bool idle = f.idle_raw ? contact(adc[6]) : v.idle;          //   as IN6 reads, which its action leaves)
+    if (running && v.speed > gate && v.air > l.idle_air)        // 1112 the idle contact: closed with the air over a
     {                                                           //   limit; IN6 between the levels
         test(found, FAULT_IDLE_SW, C_HIGH);
-        if (v.idle)
+        if (idle)
             see(found, FAULT_IDLE_SW, C_HIGH);
     }
     if (!cranking)
@@ -835,6 +856,7 @@ void BANK2_CODE(faults_tick)(const uint8_t *bytes, uint32_t now, const FaultCoun
     v.warm = bytes[src.coolant] >= l.warm;
     v.rest_read = f.read_at_rest && teeth == f.read_teeth;
     v.fresh = f.read_ago < l.rest_ticks || v.rest_read;
+    v.cutoff = f.idle_raw ? unit_map_value(src.cut_speed, bytes, map_unit_owns.own) : 0; // (format 36's)
     if (fault_substitutes.on)                                   // format 35: the NTCs' substitutes, each tick
         substitutes(v);
     bool running = v.running;
@@ -859,6 +881,8 @@ void BANK2_CODE(faults_tick)(const uint8_t *bytes, uint32_t now, const FaultCoun
     f.was_running = running;
     if (running)
         f.last_running = now;
+    fault_idle_open = f.idle_raw && running && fault_checks[FAULT_IDLE_SW].state == CONFIRMED // format 36: the
+                      && v.speed > v.cutoff;                                                 //   contact taken open
     uint32_t *own = map_unit_owns.own;                          // the faults present now, the log's
     own[MAP_UNIT_FAULTS - MAP_UNIT_SPEED] = f.present & 0xFFFF;
     own[MAP_UNIT_FAULTS + 1 - MAP_UNIT_SPEED] = f.present >> 16;
@@ -909,6 +933,8 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
     f.fuel_off = 0;
     fault_loop_open = 0;
     fault_substitutes.on = 0;                                   // (format 35: none till the table's taken)
+    fault_idle_open = 0;                                        // (format 36: the contact as it reads)
+    f.idle_raw = false;
     f.coolant_base = f.coolant_rise = 0;
     f.coolant_seen = f.air_seen = false;
     for (uint32_t i = 0; i < BYTES; i++)                        // (a loop: no memset in the bank)
@@ -963,6 +989,7 @@ void __attribute__((cold)) BANK2_CODE(faults_start)(const uint8_t *rom, uint32_t
         words[i] = word(limits_at + LIMIT_BYTES + 2 * i);
     limits.full_ticks = at(MARK + 4) >= FULL_SETTLE ? word(limits_at + LIMIT_BYTES + 2 * LIMIT_WORDS) : 0;
     f.lambda = at(MARK + 4) >= FAULTS_LAMBDA_FORMAT && (f.fitted >> FAULT_MIXTURE & 1);
+    f.idle_raw = at(MARK + 4) >= FAULTS_IDLE_FORMAT && src.cut_speed != 0 && (f.fitted >> FAULT_IDLE_SW & 1);
     if (at(MARK + 4) >= FAULTS_SUBSTITUTE_FORMAT)               // format 35: the substitutes' words and their start
     {
         uint32_t w = limits_at + LIMIT_BYTES + 2 * LIMIT_WORDS + 2;
@@ -1047,6 +1074,7 @@ void STORE_CODE(faults_clear)()
     fault_state.dirty = false;
     fault_state.fuel_off = 0;
     fault_loop_open = 0;
+    fault_idle_open = 0;                                        // (format 36: 1112 absent, the contact as it reads)
 }
 
 // What the memory means: the CRC-32 of its layout word, the code table's codes (not their times) and the

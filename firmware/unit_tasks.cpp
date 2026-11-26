@@ -2058,7 +2058,8 @@ static void UNIT_CODE(tick_switches)(const Task &t)
 {
     uint32_t switches = step_table(t.rom, t.ram, word(t, TW_SWITCHES)); // Step_Table_Lookup
     set_bit(t, get(t, TW_FULL), switches & 1);                          // RRC A; MOV FullLoadSwitch,C
-    set_bit(t, get(t, TW_IDLE), switches >> 1 & 1);                     // RRC A; MOV IdleSwitch,C
+    set_bit(t, get(t, TW_IDLE), (switches >> 1 & 1) && !fault_idle_open); // RRC A; MOV IdleSwitch,C (format 36:
+                                                                          //   open while 1112 stands, above the cut-off)
 }
 
 static void UNIT_CODE(tick_work)(const Task &t)

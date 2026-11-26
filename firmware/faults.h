@@ -9,7 +9,9 @@
 // four-digit codes (11xx present, 12xx once gone, with a cause), and a memory of 7 records kept as the store's
 // third kind. Format 31 records only; the actions come a format each from 32 (the note's section 3): 33 the trims'
 // rule (pair.cpp's trim_tick) and lambda's loop opened at 1123's fuel-off limit (task 16 reads fault_loop_open); 35
-// the NTCs' substitutes (map_unit_adc gives fault_substitutes). All in bank 2 (faults.cpp).
+// the NTCs' substitutes (map_unit_adc gives fault_substitutes); 36 1112's check at the overrun's cut-off and the idle
+// contact taken open above it while 1112 stands (task 15's switches read fault_idle_open). All in bank 2
+// (faults.cpp).
 #if defined(FEATURE_MAP_UNIT)
 
 // The checks the P28 knows, by id: the image's code table has an entry for each, in this order (its code 0
@@ -69,6 +71,15 @@ struct FaultSubstitutes
 };
 extern volatile FaultSubstitutes fault_substitutes;
 
+// Format 36 (the actions' fifth step): 1112's check looks above the overrun's cut-off speed (Overrun_CutSpeed by
+// coolant, as task 11's cut takes it) at the contact's raw state (IN6 at both switches' level or the idle
+// contact's), not the IdleSwitch bit; while 1112 stands and the engine runs above that speed, the contact is taken
+// open: L2 sets fault_idle_open each tick, and task 15's switches (tick_switches) clear IdleSwitch by it in the next
+// tick's job, so no overrun cut while driving, the main maps off idle and the knock retard applied; below the
+// cut-off, at idle, the contact as it reads.
+static constexpr uint32_t FAULTS_IDLE_FORMAT = 36;
+extern volatile uint8_t fault_idle_open;
+
 // Where the checks look in the tick's copy and what the image gives them (pair.cpp's, as the board starts): each
 // bit its byte's place << 8 | its mask, each byte its place, the constants.
 struct FaultPlaces
@@ -82,7 +93,8 @@ struct FaultPlaces
     uint8_t pins, coolant, lam_int, idle_int, in5;      // the pins' byte (O2_LEAN its bit 1), Coolant, LamInt,
                                                         //   IdleIntHi, In5
     uint8_t air;                                        // AirTemp (format 35's)
-    uint8_t spare[2];
+    uint8_t cut_speed;                                  // Overrun_CutSpeed's id (format 36's; 0: none)
+    uint8_t spare;
 };
 
 // What the checks count on each tick (pair.cpp's, each its one writer's, taken after the tick's commit).

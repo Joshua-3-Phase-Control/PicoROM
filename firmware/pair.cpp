@@ -158,6 +158,10 @@
 // never reaches the control: the bus level makes the byte the snoop gives the slow work, the tick and start mode
 // from faults.cpp's substitute instead, at once (map_unit_adc); L2 makes the substitutes each tick. The limits three
 // words longer (Cal_FaultSubCold, Cal_FaultSubWarm, Cal_FaultSubRise).
+//
+// Format 36 (the actions' fifth step): 1112's check above the overrun's cut-off speed on IN6's raw state, and while
+// 1112 stands the idle contact taken open above that speed (faults.cpp's fault_idle_open, which task 15's switches
+// take in the next tick's job). No byte of the image's table more.
 
 #include "pair.h"
 
@@ -2904,7 +2908,16 @@ static void __attribute__((cold)) BANK2_CODE(fault_start)(uint32_t u)
     s.idle_int = at(u + 208) & 0x7F;
     s.in5 = trims.in5_at & 0x7F;
     s.air = control.air_at & 0x7F;                              // (format 35's substitutes)
-    s.spare[0] = s.spare[1] = 0;
+    uint32_t cuts = map_unit_task_at(11);                       // (format 36: Overrun_CutSpeed's id, the seventh
+    if (cuts != 0)                                              //   byte of task 11's data, past its inputs and
+    {                                                           //   outputs)
+        cuts += 1 + at(cuts);
+        cuts += 1 + at(cuts);
+        s.cut_speed = at(cuts + 6);
+    }
+    else
+        s.cut_speed = 0;
+    s.spare = 0;
     faults_start((const uint8_t *)pair.rom, u, &s, c);
     fault_on = faults_live() != 0 || word(u + 194) != 0;
 }
